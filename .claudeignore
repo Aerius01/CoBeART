@@ -1,0 +1,105 @@
+# Claude Code ignore file
+# Files and directories listed here will be excluded from Claude's context
+
+# Dependencies
+node_modules/
+cobeart-app/node_modules/
+package-lock.json
+cobeart-app/package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.pixi/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.cursor/
+.cursorignore
+.cursorindexingignore
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Build artifacts
+*.pyc
+*.pyo
+*.log
+*.manifest
+*.spec
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Type checking
+.mypy_cache/
+.pytype/
+.pyre/
+.dmypy.json
+
+# Linting
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Git
+.git/
+.gitignore
+
+# Large binary or generated files
+*.mp4
+*.avi
+*.mov
+*.wav
+*.mp3
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pdf
+*.zip
+*.tar.gz
+
+# OptiTrack SDK binaries (if present)
+*.dll
+*.dylib
+
+# License (already documented)
+LICENSE

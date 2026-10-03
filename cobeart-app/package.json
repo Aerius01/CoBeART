@@ -16,5 +16,8 @@
   "devDependencies": {
     "electron": "^37.2.6",
     "concurrently": "^8.2.2"
+  },
+  "allowScripts": {
+    "electron@37.4.0": true
   }
 }

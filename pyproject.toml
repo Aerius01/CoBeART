@@ -7,7 +7,7 @@ name = "CoBeArt"
 version = "1.0"
 description = "Audio-visual demonstrator using spatial augmented reality, real-time body tracking and rendering"
 readme = "README.md"
-requires-python = ">=3.6"
+requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "David Mezey & David James"}
@@ -21,48 +21,31 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.6",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "msgpack",
-    "numpy",
+    "numpy>=2",
     "scipy",
-    "pyaudio",
+    "python-socketio[client]",
+    "soundcard",
+    "madmom @ git+https://github.com/CPJKU/madmom.git@27f032e8947204902c675e5e341a3faf5dc86dae",
 ]
 
 [project.optional-dependencies]
 test = [
     "bandit",
     "flake8",
+    "jsonschema",
     "pytest",
     "pytest-cov",
 ]
-cobeart = [
-    "opencv-python==4.7.0.72",
+viz = [
     "matplotlib",
-    "scipy",
-    "pynput",
-    "psutil",
-    "fabric",
-    "tinyflux",
-    "filterpy",
-    "python-socketio[client]",
-    "soundcard",
-    "pygame",
-    # Note: madmom is required for beat detection but must be installed from source
-    # Install from the madmom/ directory with: pip install -e ./madmom
-    # See beat detector module docstrings for implementation details
 ]
 
 [project.scripts]
 start-optitrack-client = "cobeart.optitrackclient.start_client:start"
+start-audio-client = "cobeart.audiocapture.capture:main"
 
 [project.urls]
 Homepage = "https://github.com/mezdahun/CoBeART"
@@ -77,3 +60,6 @@ cobeart = ["*.txt"]
 
 [tool.setuptools]
 zip-safe = false
+
+[tool.pytest.ini_options]
+testpaths = ["cobeart"]

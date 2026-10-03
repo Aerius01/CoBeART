@@ -84,7 +84,6 @@ ipython_config.py
 
 # Exclude Node Modules
 cobeart-app/node_modules/*
-cobeart-app/package-lock.json
 
 
 # pyenv

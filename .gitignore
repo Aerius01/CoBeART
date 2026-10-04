@@ -213,3 +213,6 @@ __marimo__/
 
 # madmom library (cloned for development)
 madmom/
+
+# Claude Code agent worktrees
+.claude/worktrees/

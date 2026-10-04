@@ -36,7 +36,7 @@
   "$defs": {
     "rigidBodyFields": {
       "$comment": "Field definitions shared with splat.schema.json. No additionalProperties here, so that schema can extend it; closed via rigidBody below.",
-      "description": "State of one rigid body in arena coordinates. Arena axes (D5): x and y horizontal, z vertical (up), origin at arena centre on the floor. Positions are millimetres; nominal arena bounds come from cobeart/settings/streaming.py (x and y in [-3000, 3000], z in [0, 2500]) and are not enforced here, because a body slightly outside the arena is a valid observation that consumers clamp. Orientation (D5, provisional pending an on-site check): the OptiTrack quaternion is remapped into arena axes, then decomposed once as intrinsic Z-Y-X. At identity orientation the body faces arena +y with up = +z.",
+      "description": "State of one rigid body in arena coordinates. Arena axes (D5): right-handed, x and y horizontal, z vertical (up), origin at arena centre on the floor. Positions are millimetres; nominal arena bounds come from cobeart/settings/streaming.py (x and y in [-3000, 3000], z in [0, 2500]) and are not enforced here, because a body slightly outside the arena is a valid observation that consumers clamp. Orientation (D5, provisional pending an on-site check) is a unit quaternion in arena axes, not Euler angles, so it has no gimbal lock or wraparound. At identity the body faces arena +y with up = +z (body right = +x). Consumers derive what they need from it, e.g. forward = q applied to (0, 1, 0), and forward lean = asin(-forward.z), positive leaning forward.",
       "type": "object",
       "properties": {
         "ID": {
@@ -56,23 +56,29 @@
           "description": "Height above the arena floor (arena z, up), integer millimetres. Nominal range [0, 2500].",
           "type": "integer"
         },
-        "roll": {
-          "description": "Side tilt in degrees: rotation about the body's forward axis (arena +y at identity), the middle (Y) angle of the decomposition, so limited to [-90, 90]. 0 = upright. Sign provisional pending the on-site D5 check.",
+        "qx": {
+          "description": "Orientation quaternion, x component (vector part). The quaternion (qx, qy, qz, qw) is unit length and maps body axes to arena axes as a proper rotation. q and -q are the same orientation: consumers must not rely on the sign.",
           "type": "number",
-          "minimum": -90,
-          "maximum": 90
+          "minimum": -1,
+          "maximum": 1
         },
-        "yaw": {
-          "description": "Heading in degrees: rotation about arena +z (vertical), the first (Z) angle of the decomposition. 0 = facing arena +y. Range [-180, 180]. Sign provisional pending the on-site D5 check.",
+        "qy": {
+          "description": "Orientation quaternion, y component (vector part). The quaternion (qx, qy, qz, qw) is unit length and maps body axes to arena axes as a proper rotation. q and -q are the same orientation: consumers must not rely on the sign.",
           "type": "number",
-          "minimum": -180,
-          "maximum": 180
+          "minimum": -1,
+          "maximum": 1
         },
-        "pitch": {
-          "description": "Forward/back tilt in degrees, positive leaning forward: rotation about the body's lateral axis (arena x at identity), the last (X) angle of the decomposition. 0 = upright. Range [-180, 180].",
+        "qz": {
+          "description": "Orientation quaternion, z component (vector part). The quaternion (qx, qy, qz, qw) is unit length and maps body axes to arena axes as a proper rotation. q and -q are the same orientation: consumers must not rely on the sign.",
           "type": "number",
-          "minimum": -180,
-          "maximum": 180
+          "minimum": -1,
+          "maximum": 1
+        },
+        "qw": {
+          "description": "Orientation quaternion, scalar part (scalar-last order, as in scipy and THREE.js).",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
         },
         "vx": {
           "description": "Velocity along arena x, mm/s (finite difference between successive producer frames).",
@@ -86,16 +92,16 @@
           "description": "Velocity along arena z, mm/s.",
           "type": "number"
         },
-        "vroll": {
-          "description": "Rate of change of roll, degrees/s.",
+        "wx": {
+          "description": "Angular velocity about arena x, degrees/s. The vector (wx, wy, wz) is computed from successive orientation quaternions (rotation vector of q_now * q_prev^-1 over the time step), in arena axes, so it has no spikes at angle wraparound.",
           "type": "number"
         },
-        "vyaw": {
-          "description": "Rate of change of yaw, degrees/s.",
+        "wy": {
+          "description": "Angular velocity about arena y, degrees/s. The vector (wx, wy, wz) is computed from successive orientation quaternions (rotation vector of q_now * q_prev^-1 over the time step), in arena axes, so it has no spikes at angle wraparound.",
           "type": "number"
         },
-        "vpitch": {
-          "description": "Rate of change of pitch, degrees/s.",
+        "wz": {
+          "description": "Angular velocity about arena z, degrees/s. The vector (wx, wy, wz) is computed from successive orientation quaternions (rotation vector of q_now * q_prev^-1 over the time step), in arena axes, so it has no spikes at angle wraparound.",
           "type": "number"
         },
         "abs_vel": {
@@ -115,15 +121,16 @@
         "x",
         "y",
         "z",
-        "roll",
-        "yaw",
-        "pitch",
+        "qx",
+        "qy",
+        "qz",
+        "qw",
         "vx",
         "vy",
         "vz",
-        "vroll",
-        "vyaw",
-        "vpitch",
+        "wx",
+        "wy",
+        "wz",
         "abs_vel",
         "norm_abs_vel"
       ]

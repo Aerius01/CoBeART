@@ -1,16 +1,8 @@
 import numpy as np
 import soundcard as sc
-import warnings
 import time
 import threading
 from cobeart.audiocapture.utils import select_audio_device
-
-# NumPy 2.x compatibility for soundcard backend: redirect deprecated binary fromstring to frombuffer
-try:
-    import soundcard.mediafoundation as _sc_mf  # type: ignore
-    _sc_mf.numpy.fromstring = np.frombuffer  # type: ignore[attr-defined]
-except Exception:
-    pass
 
 class AudioCapturer:
     """A class to capture audio from a user-selected input device."""
@@ -149,12 +141,6 @@ class AudioCapturer:
             return
         
         print("Audio stream started.")
-        # Reduce warning spam for occasional glitches from the backend.
-        warnings.filterwarnings(
-            "once",
-            message="data discontinuity in recording",
-            module="soundcard.mediafoundation",
-        )
         # Capture in ~10 ms blocks for stability; maintain a rolling window of chunk_size
         base10 = int(round(self.sample_rate / 100))  # ~10 ms
         capture_frames = max(base10, 240)

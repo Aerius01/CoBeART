@@ -3,15 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from cobeart.audiocapture.utils import select_audio_device
-import warnings
 import threading
-
-# NumPy 2.x compatibility for soundcard backend: redirect deprecated binary fromstring to frombuffer
-try:
-    import soundcard.mediafoundation as _sc_mf  # type: ignore
-    _sc_mf.numpy.fromstring = np.frombuffer  # type: ignore[attr-defined]
-except Exception:
-    pass
 
 def main():
     """Sets up and runs a low-latency audio visualizer using Matplotlib."""
@@ -25,13 +17,6 @@ def main():
     base10 = int(round(samplerate / 100))  # ~10 ms blocks ≈ device period
     CAPTURE_FRAMES = max(base10, 240)      # capture in ~10 ms blocks
     CHUNK = max(base10 * 4, 960)           # plot ~40 ms window
-
-    # Reduce warning spam for occasional glitches from the backend.
-    warnings.filterwarnings(
-        "once",
-        message="data discontinuity in recording",
-        module="soundcard.mediafoundation",
-    )
 
     # --- Matplotlib plotting ---
     plt.style.use('fast')

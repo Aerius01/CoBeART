@@ -17,6 +17,24 @@ async function startHttpServer() {
   hub = await createHub({ port: PORT, host: '127.0.0.1', publicDir: path.join(__dirname, '..', 'public') });
 }
 
+// Maps the dialog choice to the page the window loads.
+function resolveViewUrl(shader, usePerfMode) {
+  const base = `http://127.0.0.1:${PORT}`;
+  switch (shader) {
+    case 'molten':
+      return `${base}/molten/${usePerfMode ? '?performance=true' : ''}`;
+    case 'ink':
+      return `${base}/ink/`;
+    case 'mixed':
+      return `${base}/composite/`;
+    default:
+      return `${base}/`;
+  }
+}
+
+// DevTools are opt-in: set COBEART_DEBUG=1.
+const DEBUG = process.env.COBEART_DEBUG === '1';
+
 // Creates and configures the main application window.
 function createWindow(shader, usePerfMode) {
   const win = new BrowserWindow({
@@ -38,17 +56,7 @@ function createWindow(shader, usePerfMode) {
   });
 
   // The window loads its content from the local server, just like a web browser.
-  let url = `http://127.0.0.1:${PORT}/`;
-  if (shader === 'molten') {
-    url = `http://127.0.0.1:${PORT}/molten/`;
-    if (usePerfMode) {
-      url += '?performance=true';
-    }
-  } else if (shader === 'ink') {
-    url = `http://127.0.0.1:${PORT}/ink/`;
-  } else if (shader === 'mixed') {
-    url = `http://127.0.0.1:${PORT}/composite/`;
-  }
+  const url = resolveViewUrl(shader, usePerfMode);
   // Wait for the window to be ready before opening DevTools and injecting variables
   win.webContents.on('did-finish-load', () => {
     win.webContents.executeJavaScript(`window.__SOCKET_PORT__=${PORT}`);
@@ -56,9 +64,8 @@ function createWindow(shader, usePerfMode) {
     // Show window once content is loaded to prevent GPU errors
     win.show();
 
-    // Opening devtools breaks ink visualization
-    // Only open devtools if shader is not 'ink', and do it after page load
-    if (shader !== 'ink') {
+    // Opening devtools breaks ink visualization, so never open it there.
+    if (DEBUG && shader !== 'ink') {
       // Small delay to ensure page is fully initialized
       setTimeout(() => {
         win.webContents.openDevTools();
@@ -78,7 +85,7 @@ function createWindow(shader, usePerfMode) {
 app.whenReady().then(async () => {
   await startHttpServer();
 
-  const choice = dialog.showMessageBoxSync({
+  const { response, checkboxChecked } = await dialog.showMessageBox({
     type: 'question',
     buttons: ['Splat', 'Molten', 'Ink', 'Mixed'],
     defaultId: 0,
@@ -89,8 +96,8 @@ app.whenReady().then(async () => {
     checkboxChecked: false
   });
 
-  const shader = ['splat', 'molten', 'ink', 'mixed'][choice];
-  const usePerfMode = choice.checkboxChecked;
+  const shader = ['splat', 'molten', 'ink', 'mixed'][response];
+  const usePerfMode = checkboxChecked;
 
   createWindow(shader, usePerfMode);
 
@@ -98,6 +105,10 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(shader, usePerfMode);
   });
+}).catch((err) => {
+  console.error('Startup failed:', err);
+  hub?.close();
+  app.exit(1);
 });
 
 // Defines the application's behavior when all windows are closed.

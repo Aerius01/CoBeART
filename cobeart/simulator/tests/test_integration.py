@@ -1,20 +1,16 @@
 """End-to-end: simulator -> hub -> /viewer subscriber.
 
-Uses the real hub (`node cobeart-app/server.js` on an ephemeral port) when node and node_modules are available,
-otherwise a minimal python-socketio hub that mirrors the merge behavior.
+Uses the real hub (`node cobeart-app/server.js` on an ephemeral port); skipped when node or node_modules is missing.
 """
 import os
 import shutil
 import socket
 import subprocess
-import threading
 import time
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
-from socketserver import ThreadingMixIn
 from typing import Any
-from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import pytest
 import socketio
@@ -46,70 +42,22 @@ def _wait_for_health(url: str, timeout_s: float = 15.0) -> None:
     raise TimeoutError(f"Hub at {url} did not become healthy within {timeout_s}s")
 
 
-class _QuietHandler(WSGIRequestHandler):
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-
-class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
-    daemon_threads = True
-
-
-def _python_hub(port: int) -> Iterator[None]:
-    """Minimal hub: /ingest frames are merged with the latest /audio message and re-emitted on /viewer."""
-    sio = socketio.Server(async_mode="threading", cors_allowed_origins="*")
-    latest_audio: dict[str, Any] = {}
-
-    def health(environ: dict[str, Any], start_response: Any) -> list[bytes]:
-        start_response("200 OK", [("Content-Type", "application/json")])
-        return [b"{}"]
-
-    @sio.on("audio_metrics", namespace="/audio")
-    def on_audio(sid: str, data: dict[str, Any]) -> None:
-        latest_audio.clear()
-        latest_audio.update({**data, "timestamp": time.time() * 1000})
-
-    @sio.on("frame", namespace="/ingest")
-    def on_frame(sid: str, data: dict[str, Any]) -> None:
-        merged: dict[str, Any] = {**data, "timestamp": time.time() * 1000}
-        if latest_audio:
-            merged["audio"] = dict(latest_audio)
-        sio.emit("frame", merged, namespace="/viewer")
-
-    app = socketio.WSGIApp(sio, health, socketio_path="socket.io")
-    server = make_server("127.0.0.1", port, app, server_class=_ThreadingWSGIServer, handler_class=_QuietHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
 @pytest.fixture
 def hub_url() -> Iterator[str]:
+    if shutil.which("node") is None or not (APP_DIR / "node_modules").is_dir():
+        pytest.skip("real hub unavailable: install Node and run `npm ci` in cobeart-app/")
     port: int = _free_port()
     url: str = f"http://127.0.0.1:{port}"
-    if shutil.which("node") is not None and (APP_DIR / "node_modules").is_dir():
-        proc = subprocess.Popen(
-            ["node", "server.js"], cwd=APP_DIR, env={**os.environ, "PORT": str(port)},
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        try:
-            _wait_for_health(url)
-            yield url
-        finally:
-            proc.terminate()
-            proc.wait(timeout=10)
-    else:
-        yield from _hub_fallback(port, url)
-
-
-def _hub_fallback(port: int, url: str) -> Iterator[str]:
-    for _ in _python_hub(port):
+    proc = subprocess.Popen(
+        ["node", "server.js"], cwd=APP_DIR, env={**os.environ, "PORT": str(port)},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
         _wait_for_health(url)
         yield url
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
 
 
 def _collect_viewer(url: str, run: Any) -> list[dict[str, Any]]:

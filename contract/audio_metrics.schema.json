@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cobeart.invalid/contract/audio_metrics.schema.json",
+  "title": "audio_metrics",
+  "description": "Per-chunk audio metrics emitted by the Python audio producer on Socket.IO namespace /audio, event 'audio_metrics' (about 100 Hz, one message per capture block). The hub stores the latest one, adds 'timestamp', and embeds it as frame.audio. All levels are computed from float samples where 1.0 is digital full scale.",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "description": "Contract version. Consumers must reject any other value.",
+      "const": 1
+    },
+    "timestamp": {
+      "description": "Hub receipt time, Unix epoch milliseconds (JS Date.now()). Set or overwritten by the hub when it stores the message; producers do not send it. Required inside frame.audio, where consumers use it to judge staleness.",
+      "type": "number",
+      "minimum": 1000000000000,
+      "maximum": 100000000000000
+    },
+    "rms": {
+      "description": "Root mean square of the current analysis window (chunk_size samples, default 1024), linear amplitude. 0 is silence, 1.0 is a full-scale square wave; values above 1.0 only occur if the backend delivers clipped samples.",
+      "type": "number",
+      "minimum": 0
+    },
+    "peak": {
+      "description": "Maximum absolute sample value in the analysis window, linear amplitude. 1.0 is digital full scale; values above 1.0 only occur if the backend delivers clipped samples.",
+      "type": "number",
+      "minimum": 0
+    },
+    "zcr": {
+      "description": "Zero-crossing rate: sign changes divided by window length, dimensionless.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "dominant_frequency": {
+      "description": "Frequency of the strongest FFT bin of the Hann-windowed analysis window, in Hz. Ranges from 0 to sample_rate / 2 (24000 at 48 kHz); resolution is sample_rate / chunk_size (about 47 Hz at the defaults).",
+      "type": "number",
+      "minimum": 0
+    },
+    "rms_db": {
+      "description": "RMS level in dBFS mapped linearly from [-60, 0] dBFS to [0, 1] and clipped. Despite the name this is a normalized value, not decibels.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "rms_envelope": {
+      "description": "rms_db smoothed with fast attack (coefficient 0.7) and slow release (coefficient 0.95), in the same normalized [0, 1] scale.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "is_peak": {
+      "description": "True for the single chunk in which rms exceeds 2x its running mean (last 100 chunks) and the absolute floor 0.1, with at least 300 ms since the previous peak.",
+      "type": "boolean"
+    },
+    "peak_intensity": {
+      "description": "How far rms is above the adaptive peak threshold, as a fraction of that threshold: max(0, (rms - threshold) / threshold). Dimensionless, unbounded above; 0 when below threshold or during the first 10 chunks.",
+      "type": "number",
+      "minimum": 0
+    },
+    "is_onset": {
+      "description": "True when the half-wave rectified spectral flux exceeds 2.5x its running mean (last 50 chunks) and the absolute floor 0.3.",
+      "type": "boolean"
+    },
+    "onset_strength": {
+      "description": "Spectral flux divided by the adaptive onset threshold (threshold floored at 0.1), capped at 5. Dimensionless; values above 1 mean above threshold.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "spectrum_2d": {
+      "description": "Rolling log-frequency magnitude spectrogram for use as a shader texture. Outer array has spectrum_config.height rows ordered oldest first, newest last; each row has spectrum_config.width log-spaced bins from freq_min to freq_max. Values are log10 magnitudes mapped to [0, 1] and temporally smoothed.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "spectrum_config": {
+      "description": "Shape and frequency range of spectrum_2d.",
+      "type": "object",
+      "properties": {
+        "width": {
+          "description": "Number of frequency bins per row (spectrum_bins, default 128).",
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "description": "Number of history rows (spectrum_history, default 16).",
+          "type": "integer",
+          "minimum": 1
+        },
+        "freq_min": {
+          "description": "Lower edge of the first bin, Hz (default 20).",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "freq_max": {
+          "description": "Nominal upper edge of the last bin, Hz (default 20000). The producer caps the actual edge at sample_rate / 2.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": ["width", "height", "freq_min", "freq_max"],
+      "additionalProperties": false
+    },
+    "beat": {
+      "description": "True for the single message in which a predicted beat time has been reached. Beat detection is a default-on signal, so this field is always present.",
+      "type": "boolean"
+    },
+    "tempo_bpm": {
+      "description": "Current tempo estimate in beats per minute. null only while the beat tracker has no stable tempo yet (start-up or after a tempo change).",
+      "type": ["number", "null"],
+      "exclusiveMinimum": 0
+    },
+    "beat_timestamp": {
+      "description": "Predicted time of the beat being reported, Unix epoch seconds on the producer's wall clock (Python time.time()). Note: seconds, unlike the millisecond hub timestamps. Non-null exactly when beat is true.",
+      "type": ["number", "null"],
+      "minimum": 1000000000,
+      "maximum": 100000000000
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "rms",
+    "peak",
+    "zcr",
+    "dominant_frequency",
+    "rms_db",
+    "rms_envelope",
+    "is_peak",
+    "peak_intensity",
+    "is_onset",
+    "onset_strength",
+    "spectrum_2d",
+    "spectrum_config",
+    "beat",
+    "tempo_bpm",
+    "beat_timestamp"
+  ],
+  "additionalProperties": false,
+  "if": {
+    "properties": { "beat": { "const": true } }
+  },
+  "then": {
+    "properties": {
+      "tempo_bpm": { "type": "number" },
+      "beat_timestamp": { "type": "number" }
+    }
+  },
+  "else": {
+    "properties": {
+      "beat_timestamp": { "type": "null" }
+    }
+  }
+}

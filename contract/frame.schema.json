@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cobeart.invalid/contract/frame.schema.json",
+  "title": "frame",
+  "description": "One motion-capture frame. Sent by the Python motion producer on Socket.IO namespace /ingest, event 'frame' (up to package_framerate, 240 Hz). The hub overwrites 'timestamp' with its receipt time, attaches the latest audio_metrics as 'audio' when available, and re-emits the result on /viewer, event 'frame'. The same schema validates both hops.",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "description": "Contract version. Consumers must reject any other value.",
+      "const": 1
+    },
+    "type": {
+      "description": "Source tag. Always 'optitrack', including for simulated motion that stands in for OptiTrack.",
+      "const": "optitrack"
+    },
+    "timestamp": {
+      "description": "Unix epoch milliseconds. The producer sets its send time; the hub overwrites it with its receipt time (JS Date.now()) before forwarding, so on /viewer it is always hub time. The minimum rejects a value accidentally sent in seconds.",
+      "type": "number",
+      "minimum": 1000000000000,
+      "maximum": 100000000000000
+    },
+    "rigidbodies": {
+      "description": "Currently tracked rigid bodies, at most one entry per ID. Order is not significant: consumers must look bodies up by ID, never by array index. A body missing from a frame is not tracked in that frame.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/rigidBody" }
+    },
+    "audio": {
+      "description": "Latest audio_metrics message, attached by the hub only. Producers on /ingest never send it; the hub omits it when no audio has arrived (or, once implemented, when it is stale). It keeps its own schemaVersion and always carries the hub 'timestamp'.",
+      "type": "object",
+      "$ref": "audio_metrics.schema.json",
+      "required": ["timestamp"]
+    }
+  },
+  "required": ["schemaVersion", "type", "timestamp", "rigidbodies"],
+  "additionalProperties": false,
+  "$defs": {
+    "rigidBodyFields": {
+      "$comment": "Field definitions shared with splat.schema.json. No additionalProperties here, so that schema can extend it; closed via rigidBody below.",
+      "description": "State of one rigid body in arena coordinates. Arena axes (D5): x and y horizontal, z vertical (up), origin at arena centre on the floor. Positions are millimetres; nominal arena bounds come from cobeart/settings/streaming.py (x and y in [-3000, 3000], z in [0, 2500]) and are not enforced here, because a body slightly outside the arena is a valid observation that consumers clamp. Orientation (D5, provisional pending an on-site check): the OptiTrack quaternion is remapped into arena axes, then decomposed once as intrinsic Z-Y-X. At identity orientation the body faces arena +y with up = +z.",
+      "type": "object",
+      "properties": {
+        "ID": {
+          "description": "Rigid-body ID as assigned in Motive. Canonical name is 'ID' (upper case). The producer only sends IDs below max_num_objects (streaming.py, currently 10); names for IDs are in cobeart-app/public/body_map.json.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "x": {
+          "description": "Position along arena x, integer millimetres. Nominal range [-3000, 3000].",
+          "type": "integer"
+        },
+        "y": {
+          "description": "Position along arena y, integer millimetres. Nominal range [-3000, 3000].",
+          "type": "integer"
+        },
+        "z": {
+          "description": "Height above the arena floor (arena z, up), integer millimetres. Nominal range [0, 2500].",
+          "type": "integer"
+        },
+        "roll": {
+          "description": "Side tilt in degrees: rotation about the body's forward axis (arena +y at identity), the middle (Y) angle of the decomposition, so limited to [-90, 90]. 0 = upright. Sign provisional pending the on-site D5 check.",
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "yaw": {
+          "description": "Heading in degrees: rotation about arena +z (vertical), the first (Z) angle of the decomposition. 0 = facing arena +y. Range [-180, 180]. Sign provisional pending the on-site D5 check.",
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "pitch": {
+          "description": "Forward/back tilt in degrees, positive leaning forward: rotation about the body's lateral axis (arena x at identity), the last (X) angle of the decomposition. 0 = upright. Range [-180, 180].",
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "vx": {
+          "description": "Velocity along arena x, mm/s (finite difference between successive producer frames).",
+          "type": "number"
+        },
+        "vy": {
+          "description": "Velocity along arena y, mm/s.",
+          "type": "number"
+        },
+        "vz": {
+          "description": "Velocity along arena z, mm/s.",
+          "type": "number"
+        },
+        "vroll": {
+          "description": "Rate of change of roll, degrees/s.",
+          "type": "number"
+        },
+        "vyaw": {
+          "description": "Rate of change of yaw, degrees/s.",
+          "type": "number"
+        },
+        "vpitch": {
+          "description": "Rate of change of pitch, degrees/s.",
+          "type": "number"
+        },
+        "abs_vel": {
+          "description": "Horizontal speed sqrt(vx^2 + vy^2), mm/s. vz is not included.",
+          "type": "number",
+          "minimum": 0
+        },
+        "norm_abs_vel": {
+          "description": "abs_vel divided by max_vel (13000 mm/s) and capped at 1, then held at the maximum of the recent history window so it decays only after sustained stillness. Dimensionless, [0, 1].",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "ID",
+        "x",
+        "y",
+        "z",
+        "roll",
+        "yaw",
+        "pitch",
+        "vx",
+        "vy",
+        "vz",
+        "vroll",
+        "vyaw",
+        "vpitch",
+        "abs_vel",
+        "norm_abs_vel"
+      ]
+    },
+    "rigidBody": {
+      "type": "object",
+      "$ref": "#/$defs/rigidBodyFields",
+      "unevaluatedProperties": false
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cobeart.invalid/contract/splat.schema.json",
+  "title": "splat",
+  "description": "Bridge-to-simulation message, sent with window.postMessage by cobeart-app/public/fluid-bridge.js to every iframe and to its own window: one message per rigid body per bridge tick (120 Hz), from the latest /viewer frame. It is that frame's rigid-body entry unchanged (same field names, units and ranges as frame.schema.json), plus 'type' and 'color'. It has no schemaVersion: it never leaves the frontend and changes together with the frame contract.",
+  "type": "object",
+  "$ref": "frame.schema.json#/$defs/rigidBodyFields",
+  "properties": {
+    "type": {
+      "description": "Message discriminator. Listeners ignore messages with any other type (e.g. 'cursor').",
+      "const": "splat"
+    },
+    "color": {
+      "description": "Splat colour as linear RGB, each channel in [0, 1].",
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "minItems": 3,
+      "maxItems": 3
+    }
+  },
+  "required": ["type", "color"],
+  "unevaluatedProperties": false
+}

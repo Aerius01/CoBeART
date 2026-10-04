@@ -96,12 +96,13 @@
           const vx = rb.vx || 0;
           const vy = rb.vy || 0;
           const vz = rb.vz || 0;
-          const roll = rb.roll || 0;
-          const pitch = rb.pitch || 0;
-          const yaw = rb.yaw || 0;
-          const vroll = rb.vroll || 0;
-          const vpitch = rb.vpitch || 0;
-          const vyaw = rb.vyaw || 0;
+          const qx = rb.qx ?? 0;
+          const qy = rb.qy ?? 0;
+          const qz = rb.qz ?? 0;
+          const qw = rb.qw ?? 1;
+          const wx = rb.wx || 0;
+          const wy = rb.wy || 0;
+          const wz = rb.wz || 0;
           const absVel = rb.abs_vel || 0;
           const normVel = rb.norm_abs_vel || 0;
 
@@ -109,8 +110,8 @@
 Position: (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})<br>
 Velocity: (${vx.toFixed(2)}, ${vy.toFixed(2)}, ${vz.toFixed(2)})<br>
 |V|: ${absVel.toFixed(2)} (norm: ${normVel.toFixed(2)})<br>
-Rotation: (roll: ${roll.toFixed(2)}, pitch: ${pitch.toFixed(2)}, yaw: ${yaw.toFixed(2)})<br>
-Angular Velocity: (vroll: ${vroll.toFixed(2)}, vpitch: ${vpitch.toFixed(2)}, vyaw: ${vyaw.toFixed(2)})<br><br>`;
+Orientation q: (${qx.toFixed(3)}, ${qy.toFixed(3)}, ${qz.toFixed(3)}, ${qw.toFixed(3)})<br>
+Angular Velocity: (wx: ${wx.toFixed(2)}, wy: ${wy.toFixed(2)}, wz: ${wz.toFixed(2)}) deg/s<br><br>`;
         }
 //        console.log('[fluid-bridge] updating overlay', overlayText);
         overlay.innerHTML = overlayText; // Update the overlay text
@@ -132,19 +133,20 @@ Angular Velocity: (vroll: ${vroll.toFixed(2)}, vpitch: ${vpitch.toFixed(2)}, vya
           const vx = rb.vx || 0;
           const vy = rb.vy || 0;
           const vz = rb.vz || 0;
-          const roll = rb.roll || 0;
-          const pitch = rb.pitch || 0;
-          const yaw = rb.yaw || 0;
-          const vroll = rb.vroll || 0;
-          const vpitch = rb.vpitch || 0;
-          const vyaw = rb.vyaw || 0;
+          const qx = rb.qx ?? 0;
+          const qy = rb.qy ?? 0;
+          const qz = rb.qz ?? 0;
+          const qw = rb.qw ?? 1;
+          const wx = rb.wx || 0;
+          const wy = rb.wy || 0;
+          const wz = rb.wz || 0;
           const color = [1, 0.6, 0.2];
           const absVel = rb.abs_vel;
           const normVel = rb.norm_abs_vel;
-          postToWindow({ type: 'splat', id, x, y, z, vx, vy, vz, roll, pitch, yaw, vroll, vpitch, vyaw, absVel, normVel, color });
+          postToWindow({ type: 'splat', id, x, y, z, vx, vy, vz, qx, qy, qz, qw, wx, wy, wz, absVel, normVel, color });
 //          console.log('DEBUG: sent splat', absVel, normVel);
           //          const consoleMessage = `[fluid-bridge] sent splat id:${id} pos:(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) vel:(${vx.toFixed(2)}, ${vy.toFixed(2)}, ${vz.toFixed(2)})`;
-          //          console.log('[fluid-bridge] sent splat', { id, x, y , z, vx, vy, vz, roll, pitch, yaw, vroll, vpitch, vyaw });
+          //          console.log('[fluid-bridge] sent splat', { id, x, y , z, vx, vy, vz, qx, qy, qz, qw, wx, wy, wz });
         }
         latestFrame = null; // Clear the frame after sending
       }

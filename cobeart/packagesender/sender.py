@@ -40,23 +40,24 @@ class PayloadSender:
             try:
                 output_list = []
                 for triplet in obj_positions:
-                    id, x, y, z, roll, yaw, pitch = triplet
-                    deducted_metrics = metrics_tracker.update(id, x, y, z, roll, yaw, pitch)
+                    id, x, y, z, qx, qy, qz, qw = triplet
+                    deducted_metrics = metrics_tracker.update(id, x, y, z, qx, qy, qz, qw)
                     if id < otsettings.max_num_objects:
                         output_list.append({
                             "ID": id,
                             "x": int(x),  # [mm]
                             "y": int(y),  # [mm]
                             "z": int(z),  # [mm]
-                            "roll": float(roll),  # [degrees]
-                            "yaw": float(yaw),  # [degrees]
-                            "pitch": float(pitch),  # [degrees]
+                            "qx": float(qx),  # unit quaternion, arena axes
+                            "qy": float(qy),
+                            "qz": float(qz),
+                            "qw": float(qw),
                             "vx": float(deducted_metrics.velocity[0]),  # [mm/s]
                             "vy": float(deducted_metrics.velocity[1]),  # [mm/s]
                             "vz": float(deducted_metrics.velocity[2]),  # [mm/s]
-                            "vroll": float(deducted_metrics.angular_velocity[0]),  # [degrees/s]
-                            "vyaw": float(deducted_metrics.angular_velocity[1]),  # [degrees/s]
-                            "vpitch": float(deducted_metrics.angular_velocity[2]),  # [degrees/s]
+                            "wx": float(deducted_metrics.angular_velocity[0]),  # [degrees/s], arena axes
+                            "wy": float(deducted_metrics.angular_velocity[1]),  # [degrees/s]
+                            "wz": float(deducted_metrics.angular_velocity[2]),  # [degrees/s]
                             "abs_vel": float(deducted_metrics.abs_velocity),  # [mm/s]
                             "norm_abs_vel": float(deducted_metrics.norm_abs_velocity)  # [0..1]
                         })

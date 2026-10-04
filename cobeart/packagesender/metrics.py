@@ -1,5 +1,6 @@
 """Per-body velocity metrics derived from successive OptiTrack poses."""
 import logging
+import math
 import time
 from collections import deque
 from collections.abc import Callable
@@ -25,9 +26,9 @@ class BodyMetrics:
     """Immutable metrics snapshot for one body at one frame."""
     id: int
     position: Vector
-    orientation: Vector  # (roll, pitch, yaw) degrees
+    orientation: Vector  # unit quaternion (qx, qy, qz, qw), arena axes
     velocity: Vector  # [mm/s]
-    angular_velocity: Vector  # [degrees/s]
+    angular_velocity: Vector  # (wx, wy, wz) [degrees/s], arena axes
     abs_velocity: float  # [mm/s], xy plane
     norm_abs_velocity: float  # [0..1]
 
@@ -52,6 +53,26 @@ def normalize_abs_velocity(abs_vel: float, max_vel: float = DEFAULT_MAX_VEL) -> 
     return min(abs_vel / max_vel, 1.0)
 
 
+def calc_angular_velocity(q_prev: Vector, q_now: Vector, time_diff: float) -> Vector:
+    """World-frame angular velocity (deg/s) as the rotation vector of q_now * q_prev^-1 over time_diff."""
+    ax, ay, az, aw = (float(c) for c in q_now)
+    # Conjugate of q_prev is its inverse for a unit quaternion.
+    bx, by, bz, bw = (-float(q_prev[0]), -float(q_prev[1]), -float(q_prev[2]), float(q_prev[3]))
+    dw: float = aw * bw - ax * bx - ay * by - az * bz
+    dx: float = aw * bx + ax * bw + ay * bz - az * by
+    dy: float = aw * by - ax * bz + ay * bw + az * bx
+    dz: float = aw * bz + ax * by - ay * bx + az * bw
+    if dw < 0.0:
+        # q and -q are the same rotation; take the short way round.
+        dw, dx, dy, dz = -dw, -dx, -dy, -dz
+    sin_half: float = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if sin_half < 1e-12:
+        return _zeros()
+    angle: float = 2.0 * math.atan2(sin_half, dw)
+    scale: float = math.degrees(angle) / (sin_half * time_diff)
+    return np.array([dx * scale, dy * scale, dz * scale])
+
+
 class MetricsTracker:
     """Computes velocities per body, each with its own smoothing window."""
 
@@ -67,12 +88,12 @@ class MetricsTracker:
         self._bodies: dict[int, BodyState] = {}
 
     def update(
-        self, id: int, x: float, y: float, z: float, roll: float, yaw: float, pitch: float
+        self, id: int, x: float, y: float, z: float, qx: float, qy: float, qz: float, qw: float
     ) -> BodyMetrics:
-        """Record a pose for a body and return its current metrics."""
+        """Record an arena pose (mm, unit quaternion) for a body and return its current metrics."""
         now: float = self._clock()
         position: Vector = np.array([x, y, z])
-        orientation: Vector = np.array([roll, pitch, yaw])
+        orientation: Vector = np.array([qx, qy, qz, qw])
 
         state: BodyState | None = self._bodies.get(id)
         if state is None:
@@ -98,7 +119,7 @@ class MetricsTracker:
         time_diff: float = now - state.timestamp
         if time_diff > 0:
             velocity: Vector = (position - state.position) / time_diff
-            angular_velocity: Vector = (orientation - state.orientation) / time_diff
+            angular_velocity: Vector = calc_angular_velocity(state.orientation, orientation, time_diff)
         else:
             velocity = _zeros()
             angular_velocity = _zeros()

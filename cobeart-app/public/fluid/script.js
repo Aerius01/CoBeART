@@ -1207,7 +1207,7 @@ let colorUpdateTimer = 0.0;
 let latestNormVel = 0;
 let latestZ = {};
 // Latest observed angular velocities from incoming messages
-let latestAngVel = { vroll: 0, vpitch: 0, vyaw: 0 };
+let latestAngVel = { wx: 0, wy: 0, wz: 0 };
 
 function computeVelocityDissipation(zdict) {
     // TODO: modify other global variables to have IDs for multiple tracked opbjects
@@ -1230,12 +1230,12 @@ function computeSplatRadius(normVel) {
     return Math.max(0, Math.min(v, 0.8)) / 1.5;
 }
 
-function computeCurl(vroll, vpitch, vyaw) {
-    // Placeholder mapping f(vroll, vpitch, vyaw) -> CURL in [0, 50]
+function computeCurl(wx, wy, wz) {
+    // Placeholder mapping f(wx, wy, wz) -> CURL in [0, 50], angular velocity in deg/s (arena axes)
     // Currently maps angular speed magnitude to the 0..1 range; adjust as needed.
-    const rx = typeof vroll === 'number' ? vroll : 0;
-    const ry = typeof vpitch === 'number' ? vpitch : 0;
-    const rz = typeof vyaw === 'number' ? vyaw : 0;
+    const rx = typeof wx === 'number' ? wx : 0;
+    const ry = typeof wy === 'number' ? wy : 0;
+    const rz = typeof wz === 'number' ? wz : 0;
     const angSpeed = Math.sqrt(rx * rx + ry * ry + rz * rz);
     const normalized = Math.max(0, Math.min(1, angSpeed / 100));
     return normalized * 50.0;
@@ -1257,7 +1257,7 @@ function update() {
     //        console.log("splat radius: ", config.SPLAT_RADIUS);
     //        config.VELOCITY_DISSIPATION = computeVelocityDissipation(latestZ);
     //        console.log("velocity dissipation: ", config.VELOCITY_DISSIPATION);
-    //        config.CURL = computeCurl(latestAngVel.vroll, latestAngVel.vpitch, latestAngVel.vyaw);
+    //        config.CURL = computeCurl(latestAngVel.wx, latestAngVel.wy, latestAngVel.wz);
     //    }
     applyInputs();
     if (!config.PAUSED)
@@ -1806,9 +1806,9 @@ window.addEventListener('keydown', e => {
         if (!m || m.type !== 'splat') return;
 
         // Track latest angular velocities from the incoming message
-        latestAngVel.vroll = typeof m.vroll === 'number' ? m.vroll : 0;
-        latestAngVel.vpitch = typeof m.vpitch === 'number' ? m.vpitch : 0;
-        latestAngVel.vyaw = typeof m.vyaw === 'number' ? m.vyaw : 0;
+        latestAngVel.wx = typeof m.wx === 'number' ? m.wx : 0;
+        latestAngVel.wy = typeof m.wy === 'number' ? m.wy : 0;
+        latestAngVel.wz = typeof m.wz === 'number' ? m.wz : 0;
 
         latestNormVel = m.normVel
         latestZ[m.id] = m.z
@@ -2592,9 +2592,11 @@ window.addEventListener('keydown', e => {
 
         // Change color according to head tilt if mode is activated
         if (headTiltColorMode && m.id === bodyPartsIndex['head']) {
-            let pitch = m.roll; // in degrees, positive when leaning forward
-            let rawPitch = m.roll;
-            // Map pitch between -90 (facing up) and 60 (facing down) to palette indices between 0 and 200
+            // Forward lean = asin(-forward.z), forward = q applied to (0, 1, 0); degrees, positive leaning forward
+            const forwardZ = 2 * (m.qy * m.qz + m.qw * m.qx);
+            let pitch = Math.asin(Math.max(-1, Math.min(1, -forwardZ))) * 180 / Math.PI;
+            let rawPitch = pitch;
+            // Map pitch between -40 (facing up) and 30 (facing down) to the palette hue range; needs on-site retuning
             const minPitch = -40;
             const maxPitch = 30;
             if (pitch < minPitch) pitch = minPitch;

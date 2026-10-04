@@ -1,6 +1,8 @@
 // Original shader: https://www.shadertoy.com/view/WdVXWy
 // Textures and cubemaps: https://shadertoyunofficial.wordpress.com/2019/07/23/shadertoy-media-files/
 
+const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__?.debug === true;
+
 const MAX_BODIES = 10;
 let trackedEntities = {};
 let iMouseArray = [];
@@ -27,17 +29,12 @@ function cleanupEntities() {
 
 // Listen to messages arriving from bridge-script. We do not connect individual shaders to the raw
 // data input, but share a common bridge-script that redistributes the data to all shaders.
-window.addEventListener('message', (e) => {
-    const m = e.data;
-    //    printing receuived data
-    console.log('Received message:', m);
-    if (!m || m.type !== 'splat') return;
-
+function handleSplat(m) {
     const seenIds = new Set();
 
-    seenIds.add(m.id);
+    seenIds.add(m.ID);
 
-    if (!trackedEntities[m.id]) {
+    if (!trackedEntities[m.ID]) {
         let newIndex = -1;
         const usedIndices = Object.values(trackedEntities).map(e => e.index);
         for (let i = 1; i < MAX_BODIES; i++) {
@@ -48,12 +45,12 @@ window.addEventListener('message', (e) => {
         }
 
         if (newIndex === -1) {
-            console.log("Max number of tracked bodies reached.");
+            if (DEBUG) console.log("Max number of tracked bodies reached.");
             return;
         }
 
-        trackedEntities[m.id] = {
-            id: m.id,
+        trackedEntities[m.ID] = {
+            id: m.ID,
             index: newIndex,
             iMouse: new THREE.Vector4(0, 0, 0, 0),
             iMouseTarget: new THREE.Vector4(0, 0, 0, 0),
@@ -63,13 +60,11 @@ window.addEventListener('message', (e) => {
         };
     }
 
-    const entity = trackedEntities[m.id];
+    const entity = trackedEntities[m.ID];
     entity.lastSeen = Date.now();
     if (entity.timeoutTimer) clearTimeout(entity.timeoutTimer);
 
-    const absVel = Math.sqrt(m.vx * m.vx + m.vy * m.vy);
-
-    if (absVel < STATIONARY_VELOCITY_THRESHOLD) {
+    if (m.abs_vel < STATIONARY_VELOCITY_THRESHOLD) {
         if (!entity.stationaryTimer) {
             entity.stationaryTimer = setTimeout(() => {
                 entity.iMouseTarget.set(0, 0, 0, 0);
@@ -111,8 +106,33 @@ window.addEventListener('message', (e) => {
             }
         }
     }
-});
+}
 
+// Cursor events from the composite parent
+function handleCursor(m) {
+    const pixelRatio = window.devicePixelRatio;
+    const x = m.x * window.innerWidth * pixelRatio;
+    const y = m.y * window.innerHeight * pixelRatio;
+    if (m.down) {
+        iJustClickedArray[0] = 1.0;
+        iMouseArray[0].set(x, y, x, y);
+        iMouseTarget.copy(iMouseArray[0]);
+    } else if (m.up) {
+        iMouseArray[0].set(0, 0, 0, 0);
+        iMouseTarget.set(0, 0, 0, 0);
+    } else {
+        iMouseTarget.x = x;
+        iMouseTarget.y = y;
+    }
+}
+
+window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (DEBUG) console.log('Received message:', m);
+    if (!m) return;
+    if (m.type === 'splat') handleSplat(m);
+    else if (m.type === 'cursor') handleCursor(m);
+});
 
 // --- THREE.js implementation for Shadertoy shader ---
 
@@ -514,26 +534,6 @@ function init() {
         }
         iMouseArray[0].set(0, 0, 0, 0);
         iMouseTarget.set(0, 0, 0, 0);
-    });
-
-    // Accept cursor events from composite parent
-    window.addEventListener('message', (e) => {
-        const m = e.data;
-        if (!m || m.type !== 'cursor') return;
-        const pixelRatio = window.devicePixelRatio;
-        const x = m.x * window.innerWidth * pixelRatio;
-        const y = m.y * window.innerHeight * pixelRatio;
-        if (m.down) {
-            iJustClickedArray[0] = 1.0;
-            iMouseArray[0].set(x, y, x, y);
-            iMouseTarget.copy(iMouseArray[0]);
-        } else if (m.up) {
-            iMouseArray[0].set(0, 0, 0, 0);
-            iMouseTarget.set(0, 0, 0, 0);
-        } else {
-            iMouseTarget.x = x;
-            iMouseTarget.y = y;
-        }
     });
 
     document.addEventListener('keydown', (e) => {

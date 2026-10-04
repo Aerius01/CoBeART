@@ -2,6 +2,7 @@
 
 // ---- config / state (kept from original ink) --------------------------------
 const MAX_BODIES = 10;
+const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__?.debug === true;
 const STATIONARY_VELOCITY_THRESHOLD = 50;
 const STATIONARY_TIMEOUT = 200;
 const MOUSE_SMOOTHING = 0.2;
@@ -289,15 +290,14 @@ function init() {
   // receive messages from common bridge
   window.addEventListener('message', (e) => {
     const m = e.data;
-    //    printing receuived data
-    console.log('Received message:', m);
+    if (DEBUG) console.log('Received message:', m);
     if (!m || m.type !== 'splat') return;
 
     const seenIds = new Set();
 
-    seenIds.add(m.id);
+    seenIds.add(m.ID);
 
-    if (!trackedEntities[m.id]) {
+    if (!trackedEntities[m.ID]) {
         let newIndex = -1;
         const usedIndices = Object.values(trackedEntities).map(e => e.index);
         for (let i = 1; i < MAX_BODIES; i++) {
@@ -308,12 +308,12 @@ function init() {
         }
 
         if (newIndex === -1) {
-            console.log("Max number of tracked bodies reached.");
+            if (DEBUG) console.log("Max number of tracked bodies reached.");
             return;
         }
 
-        trackedEntities[m.id] = {
-            id: m.id,
+        trackedEntities[m.ID] = {
+            id: m.ID,
             index: newIndex,
             iMouse: new THREE.Vector4(0, 0, 0, 0),
             iMouseTarget: new THREE.Vector4(0, 0, 0, 0),
@@ -323,13 +323,11 @@ function init() {
         };
     }
 
-    const entity = trackedEntities[m.id];
+    const entity = trackedEntities[m.ID];
     entity.lastSeen = Date.now();
     if (entity.timeoutTimer) clearTimeout(entity.timeoutTimer);
 
-    const absVel = Math.sqrt(m.vx * m.vx + m.vy * m.vy);
-
-    if (absVel < STATIONARY_VELOCITY_THRESHOLD) {
+    if (m.abs_vel < STATIONARY_VELOCITY_THRESHOLD) {
         if (!entity.stationaryTimer) {
             entity.stationaryTimer = setTimeout(() => {
                 entity.iMouseTarget.set(0, 0, 0, 0);

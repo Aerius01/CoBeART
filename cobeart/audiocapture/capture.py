@@ -2,7 +2,26 @@ import numpy as np
 import soundcard as sc
 import time
 import threading
+import logging
+import sys
+from typing import ContextManager, Optional, Protocol
 from cobeart.audiocapture.utils import select_audio_device
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+AUDIO_SCHEMA_VERSION: int = 1
+
+
+class AudioRecorder(Protocol):
+    """An open recording session that yields blocks of samples."""
+
+    def record(self, numframes: int) -> Optional[np.ndarray]: ...
+
+
+class AudioSource(Protocol):
+    """What the capturer uses from a microphone (satisfied by soundcard.Microphone)."""
+
+    def recorder(self, samplerate: float, channels: list[int], blocksize: int) -> ContextManager[AudioRecorder]: ...
 
 
 class AudioCapturer:
@@ -10,7 +29,7 @@ class AudioCapturer:
 
     def __init__(self, chunk_size=1024, sample_rate=48000, spectrum_bins=128, spectrum_history=16,
                  enable_beat_detection=False, enable_emit=False, socketio_url=None, socketio_namespace="/audio",
-                 debug=False):
+                 debug=False, mic: Optional[AudioSource] = None):
         """
         Initializes the AudioCapturer by selecting a device.
         A larger chunk_size (e.g., 1024) is better for frequency resolution of metrics.
@@ -23,8 +42,9 @@ class AudioCapturer:
             spectrum_history: Number of historical spectrum frames to keep
             enable_beat_detection: Enable real-time beat detection (requires madmom)
             debug: Enable debug logging in beat detection components
+            mic: Capture source to use instead of prompting for a device (injected in tests)
         """
-        self.mic = select_audio_device()
+        self.mic = mic if mic is not None else select_audio_device()
         self.chunk_size = chunk_size
         # Prefer device default samplerate if available to avoid resampling.
         try:
@@ -37,6 +57,7 @@ class AudioCapturer:
         self._ring = np.zeros(self.chunk_size, dtype=np.float32)
         self._ring_lock = threading.Lock()
         self._capture_thread = None
+        self._capture_error: Optional[BaseException] = None
 
         # Spectrum analysis configuration
         self.spectrum_bins = spectrum_bins
@@ -148,6 +169,7 @@ class AudioCapturer:
         base10 = int(round(self.sample_rate / 100))  # ~10 ms
         capture_frames = max(base10, 240)
         self._stop_event.clear()
+        self._capture_error = None
 
         def _capture_loop():
             try:
@@ -178,8 +200,9 @@ class AudioCapturer:
                             payload = self.compute_metrics_payload(frame_data)
                             if payload is not None:
                                 self._emitter.push_metrics(payload)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.exception("Audio capture thread failed")
+                self._capture_error = exc
 
         self._capture_thread = threading.Thread(target=_capture_loop, name="audio-capture", daemon=True)
         self._capture_thread.start()
@@ -231,6 +254,11 @@ class AudioCapturer:
             self._emitter.stop()
         self.is_recording = False
         print("Audio stream stopped.")
+
+    @property
+    def capture_error(self) -> Optional[BaseException]:
+        """The exception that terminated the capture thread, or None while it is healthy."""
+        return self._capture_error
 
     def read_chunk(self):
         """Reads a chunk of audio data from the stream."""
@@ -529,6 +557,7 @@ class AudioCapturer:
 
         # Note that is_peak, is_onset, and beat are explicitly cast to bools to ensure they are JSON serializable.
         return {
+            "schemaVersion": AUDIO_SCHEMA_VERSION,
             "rms": float(rms),
             "peak": float(self.get_peak_amplitude(data)),
             "zcr": float(self.get_zero_crossing_rate(data)),
@@ -586,6 +615,7 @@ def main():
         help="Socket.IO namespace (default: /audio)"
     )
     args = parser.parse_args()
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
 
     # Create capturer with optional emission
     capturer = AudioCapturer(
@@ -606,6 +636,9 @@ def main():
 
     try:
         while True:
+            if capturer.capture_error is not None:
+                logger.error("Audio capture thread died: %r", capturer.capture_error)
+                sys.exit(1)
             audio_data = capturer.read_chunk()
             if audio_data is not None and audio_data.size > 0:
                 rms = capturer.get_rms(audio_data)

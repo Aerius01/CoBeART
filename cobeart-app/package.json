@@ -6,8 +6,8 @@
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "concurrently -k -n WEB,ELECTRON \"node server.js\" \"electron .\"",
-    "web": "node server.js"
+    "web": "node server.js",
+    "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -15,7 +15,7 @@
   },
   "devDependencies": {
     "electron": "^37.2.6",
-    "concurrently": "^8.2.2"
+    "socket.io-client": "^4.8.4"
   },
   "allowScripts": {
     "electron@37.4.0": true

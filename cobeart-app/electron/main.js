@@ -6,120 +6,15 @@
 const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
 
-// The server is run directly within the main process (self-contained)
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
+// The hub (Express + Socket.IO) runs directly within the main process (self-contained).
+const { createHub } = require('./hub');
 
-let server, io, PORT = 3000;
+const PORT = 3000;
+let hub;
 
-// Sets up and starts the integrated web server.
-function startHttpServer() {
-  const appx = express();
-  server = http.createServer(appx);
-  io = new Server(server, { cors: { origin: "*" } });
-
-  // This line is the key that connects the server to the front-end.
-  // It tells Express to serve all files from the 'public' directory statically.
-  // When the BrowserWindow loads the server's URL, this allows 'index.html' to be found and served.
-  appx.use(express.static(path.join(__dirname, '..', 'public')));
-
-  let lastFrame = null;
-  let lastAudioData = null;
-
-  // Health check endpoint
-  appx.get('/health', (req, res) => {
-    const audioAge = lastAudioData ? Date.now() - lastAudioData.timestamp : null;
-    const frameAge = lastFrame ? Date.now() - lastFrame.timestamp : null;
-    res.json({
-      server: 'ok',
-      namespaces: {
-        ingest: io.of('/ingest').sockets.size,
-        audio: io.of('/audio').sockets.size,
-        viewer: io.of('/viewer').sockets.size
-      },
-      lastAudioAge: audioAge,
-      lastFrameAge: frameAge
-    });
-  });
-
-  // STEP 1a: The '/audio' namespace - dedicated channel for audio metrics only
-  const audio = io.of('/audio');
-  audio.on('connection', (socket) => {
-    console.log('[electron] Client connected to /audio');
-
-    // Audio metrics data - updates background state, doesn't drive emissions
-    socket.on('audio_metrics', (audioData) => {
-      // Enhanced validation
-      if (!audioData || typeof audioData !== 'object') return;
-
-      // Validate expected fields
-      const requiredFields = ['rms', 'peak', 'zcr', 'dominant_frequency'];
-      const hasAllFields = requiredFields.every(field =>
-        typeof audioData[field] === 'number' && !isNaN(audioData[field])
-      );
-
-      if (!hasAllFields) {
-        console.warn('[electron] Invalid audio_metrics payload:', audioData);
-        return;
-      }
-
-      try {
-        // Store latest audio data with timestamp
-        lastAudioData = {
-          ...audioData,
-          timestamp: Date.now()
-        };
-      } catch (err) {
-        console.error('[electron] Error processing audio_metrics:', err);
-      }
-    });
-
-    socket.on('disconnect', () => {
-      console.log('[electron] Client disconnected from /audio');
-    });
-  });
-
-  // STEP 2: The '/viewer' namespace, for sending data to the front-end.
-  // On connection, immediately send the last known data frame to the new client.
-  const viewer = io.of('/viewer');
-  viewer.on('connection', (socket) => {
-    if (lastFrame) socket.emit('frame', lastFrame);
-  });
-
-  // STEP 1b: The '/ingest' namespace - unified ingestion for all data sources (back-compat)
-  // OptiTrack drives the frame rate, audio data is additive
-  const ingest = io.of('/ingest');
-  ingest.on('connection', (socket) => {
-    console.log('[electron] Client connected to /ingest');
-
-    // OptiTrack frame data - drives the emission rate
-    socket.on('frame', (payload) => {
-      if (!payload || typeof payload !== 'object') return;
-
-      // Create combined frame with OptiTrack data + latest audio
-      const combinedFrame = {
-        ...payload,
-        timestamp: Date.now()
-      };
-
-      // Add latest audio data if available
-      if (lastAudioData) {
-        combinedFrame.audio = lastAudioData;
-      }
-
-      lastFrame = combinedFrame;
-      viewer.emit('frame', combinedFrame);
-    });
-
-    socket.on('disconnect', () => {
-      console.log('[electron] Client disconnected from /ingest');
-    });
-  });
-
-  server.listen(PORT, '127.0.0.1', () => {
-    console.log(`[electron] HTTP server on http://127.0.0.1:${PORT}`);
-  });
+// Starts the integrated web server via the shared hub.
+async function startHttpServer() {
+  hub = await createHub({ port: PORT, host: '127.0.0.1', publicDir: path.join(__dirname, '..', 'public') });
 }
 
 // Creates and configures the main application window.
@@ -180,8 +75,8 @@ function createWindow(shader, usePerfMode) {
 }
 
 // Electron's initialization is asynchronous. This block executes once the app is ready.
-app.whenReady().then(() => {
-  startHttpServer();
+app.whenReady().then(async () => {
+  await startHttpServer();
 
   const choice = dialog.showMessageBoxSync({
     type: 'question',
@@ -209,7 +104,7 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   // On Windows and Linux, quit the app. On macOS, apps typically stay running.
   if (process.platform !== 'darwin') {
-    server?.close?.();
+    hub?.close();
     app.quit();
   }
 });

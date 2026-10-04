@@ -314,6 +314,7 @@
 
         // Use the first body (if any) to drive the parent “cursor”
         // so molten reacts immediately; fluid receives splats for ALL bodies.
+        const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__?.debug === true;
         let bodyPartsIndex = {};
         fetch('/body_map.json')
           .then(response => response.json())
@@ -339,16 +340,16 @@
             const wantSeeds = seedGateActive;
 
             // calculate euclidian distance between left hand and right hand
-            if (payload.rigidbodies.length >= 2) {
-                const lh = payload.rigidbodies[bodyPartsIndex['left_hand']];
-                const rh = payload.rigidbodies[bodyPartsIndex['right_hand']];
-                const dx = lh.x - rh.x;
-                const dy = lh.y - rh.y;
-                const dist = Math.sqrt(dx*dx + dy*dy);
+            // Bodies are looked up by ID (body_map.json), never by array position.
+            // A hand that is not tracked this frame is undefined and its input is skipped.
+            {
+                const lh = payload.rigidbodies.find(rb => rb.ID === bodyPartsIndex['left_hand']);
+                const rh = payload.rigidbodies.find(rb => rb.ID === bodyPartsIndex['right_hand']);
+                const dist = (lh && rh) ? Math.hypot(lh.x - rh.x, lh.y - rh.y) : Infinity;
 
                 // If hands are close together, use their midpoint as cursor and always switch to fluid
-                if (dist < 200 && lh.z < 2700 && rh.z < 2700) {
-                    console.log('Clapping hands detected, using midpoint for cursor');
+                if (lh && rh && dist < 200 && lh.z < 2700 && rh.z < 2700) {
+                    if (DEBUG) console.log('Clapping hands detected, using midpoint for cursor');
                     // Initiating transition to molten
                     if (gateDominant !== 0) {
                         triggerTransition(0);
@@ -365,7 +366,7 @@
                 }
 
                 // if left hand above 2500 in z, switch to molten and keep cursor on left hand
-                else if (lh.z > 2700) {
+                else if (lh && lh.z > 2700) {
                     // Initiating transition to molten
                     if (gateDominant !== 1) {
                         triggerTransition(1);
@@ -382,7 +383,7 @@
                 }
 
                 // if right hand above 2500 in z, switch to ink and keep cursor on right hand
-                else if (rh.z > 2700) {
+                else if (rh && rh.z > 2700) {
                     // Initiating transition to ink
                     if (gateDominant !== 2) {
                         triggerTransition(2);
@@ -399,8 +400,8 @@
                 }
 
                 // Adding current positions to end of history and removing oldest if length exceeds 5
-                leftHandHistory.push({x: lh.x, y: lh.y, z: lh.z});
-                rightHandHistory.push({x: rh.x, y: rh.y, z: rh.z});
+                if (lh) leftHandHistory.push({x: lh.x, y: lh.y, z: lh.z});
+                if (rh) rightHandHistory.push({x: rh.x, y: rh.y, z: rh.z});
                 if (leftHandHistory.length > 5) leftHandHistory.shift();
 
             }
@@ -618,7 +619,7 @@
         function addSeed(nx, ny) {
             if (!material) return;
             const count = material.uniforms.uSeedCount.value;
-            const MAX = 300;
+            const MAX = 64; // must equal MAX_SEEDS in the shader and seedArray length
             const now = material.uniforms.uTime.value;
             if (count < MAX) {
             const arr = material.uniforms.uSeeds.value;
@@ -630,7 +631,7 @@
             for (let i = 1; i < MAX; i++) arr[i - 1].copy(arr[i]);
             arr[MAX - 1].set(nx, ny, now);
             }
-            console.log(`addSeed ${nx.toFixed(2)},${ny.toFixed(2)} count=${material.uniforms.uSeedCount.value}`);
+            if (DEBUG) console.log(`addSeed ${nx.toFixed(2)},${ny.toFixed(2)} count=${material.uniforms.uSeedCount.value}`);
         }
 
         function clearSeeds() {

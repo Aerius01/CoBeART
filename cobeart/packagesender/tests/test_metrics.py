@@ -38,7 +38,7 @@ def test_first_sighting_returns_zeros(clock: FakeClock) -> None:
 
 
 def test_velocity_math_with_fake_clock(clock: FakeClock) -> None:
-    tracker = MetricsTracker(max_vel=1000.0, clock=clock)
+    tracker = MetricsTracker(max_vel=1000.0, max_gap_s=10.0, clock=clock)
     tracker.update(1, 0, 0, 0, 0, 0, 0, 1)
     clock.advance(0.5)
     m = tracker.update(1, 300, 400, 50, *quat(Rotation.from_rotvec([0, 0, 10], degrees=True)))
@@ -98,17 +98,9 @@ def test_angular_velocity_matches_scipy_rotvec(clock: FakeClock) -> None:
 
 def test_norm_velocity_zeroes_only_after_full_window(clock: FakeClock) -> None:
     window = 4
-    tracker = MetricsTracker(max_vel=1000.0, window_length=window, clock=clock)
+    tracker = MetricsTracker(max_vel=1000.0, window_length=window, max_gap_s=10.0, clock=clock)
     tracker.update(1, 0, 0, 0, 0, 0, 0, 1)
-    # Window starts full of ones, so stationary frames hold 1.0 until all ones are pushed out.
-    results: list[float] = []
-    for _ in range(window + 1):
-        clock.advance(1.0)
-        results.append(tracker.update(1, 0, 0, 0, 0, 0, 0, 1).norm_abs_velocity)
-    assert results[: window - 1] == [1.0] * (window - 1)
-    assert results[window - 1] == 0.0
-    assert results[window] == 0.0
-    # A single movement sample is held as the window max, then decays to zero.
+    # A single movement sample is held as the window max, then decays to zero once pushed out.
     clock.advance(1.0)
     moving = tracker.update(1, 500, 0, 0, 0, 0, 0, 1)
     assert moving.norm_abs_velocity == 0.5
@@ -117,11 +109,43 @@ def test_norm_velocity_zeroes_only_after_full_window(clock: FakeClock) -> None:
         clock.advance(1.0)
         held.append(tracker.update(1, 500, 0, 0, 0, 0, 0, 1).norm_abs_velocity)
     assert held == [0.5] * (window - 1) + [0.0]
+    # Still zero after a further full window of zeros.
+    clock.advance(1.0)
+    assert tracker.update(1, 500, 0, 0, 0, 0, 0, 1).norm_abs_velocity == 0.0
+
+
+def test_new_still_body_never_reports_speed(clock: FakeClock) -> None:
+    tracker = MetricsTracker(window_length=4, clock=clock)
+    for _ in range(10):
+        m = tracker.update(1, 0, 0, 0, 0, 0, 0, 1)
+        assert m.norm_abs_velocity == 0.0
+        clock.advance(0.01)
+
+
+def test_gap_longer_than_max_gap_resets_to_first_sighting(clock: FakeClock) -> None:
+    tracker = MetricsTracker(max_vel=1000.0, max_gap_s=0.25, clock=clock)
+    tracker.update(1, 0, 0, 0, 0, 0, 0, 1)
+    clock.advance(0.1)
+    assert tracker.update(1, 100, 0, 0, 0, 0, 0, 1).abs_velocity == pytest.approx(1000.0)
+    clock.advance(0.3)
+    m = tracker.update(1, 5000, 0, 0, *quat(Rotation.from_euler("z", 90, degrees=True)))
+    assert np.array_equal(m.velocity, np.zeros(3))
+    assert np.array_equal(m.angular_velocity, np.zeros(3))
+    assert m.norm_abs_velocity == 0.0
+
+
+def test_gap_below_max_gap_computes_velocity(clock: FakeClock) -> None:
+    tracker = MetricsTracker(max_vel=1000.0, max_gap_s=0.25, clock=clock)
+    tracker.update(1, 0, 0, 0, 0, 0, 0, 1)
+    clock.advance(0.2)
+    m = tracker.update(1, 100, 0, 0, *quat(Rotation.from_euler("z", 18, degrees=True)))
+    assert np.allclose(m.velocity, [500.0, 0.0, 0.0])
+    assert np.allclose(m.angular_velocity, [0.0, 0.0, 90.0])
 
 
 def test_interleaved_bodies_do_not_share_smoothing(clock: FakeClock) -> None:
     window = 3
-    tracker = MetricsTracker(max_vel=1000.0, window_length=window, clock=clock)
+    tracker = MetricsTracker(max_vel=1000.0, window_length=window, max_gap_s=10.0, clock=clock)
     tracker.update(1, 0, 0, 0, 0, 0, 0, 1)
     tracker.update(2, 0, 0, 0, 0, 0, 0, 1)
     last_fast: BodyMetrics | None = None

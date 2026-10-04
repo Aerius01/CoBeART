@@ -1,5 +1,4 @@
 """Per-body velocity metrics derived from successive OptiTrack poses."""
-import logging
 import math
 import time
 from collections import deque
@@ -9,12 +8,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import numpy.typing as npt
 
-logger: logging.Logger = logging.getLogger(__name__)
-
 Vector = npt.NDArray[np.float64]
 
 DEFAULT_MAX_VEL: float = 13000.0
 DEFAULT_WINDOW_LENGTH: int = 15
+DEFAULT_MAX_GAP_S: float = 0.25
 
 
 def _zeros() -> Vector:
@@ -45,7 +43,7 @@ class BodyState:
 
 def calc_abs_velocity(vx: float, vy: float) -> float:
     """Absolute velocity from x and y components."""
-    return float(np.linalg.norm([vx, vy]))
+    return math.hypot(vx, vy)
 
 
 def normalize_abs_velocity(abs_vel: float, max_vel: float = DEFAULT_MAX_VEL) -> float:
@@ -81,10 +79,12 @@ class MetricsTracker:
         max_vel: float = DEFAULT_MAX_VEL,
         window_length: int = DEFAULT_WINDOW_LENGTH,
         clock: Callable[[], float] = time.time,
+        max_gap_s: float = DEFAULT_MAX_GAP_S,
     ) -> None:
         self._max_vel: float = max_vel
         self._window_length: int = window_length
         self._clock: Callable[[], float] = clock
+        self._max_gap_s: float = max_gap_s
         self._bodies: dict[int, BodyState] = {}
 
     def update(
@@ -96,13 +96,14 @@ class MetricsTracker:
         orientation: Vector = np.array([qx, qy, qz, qw])
 
         state: BodyState | None = self._bodies.get(id)
-        if state is None:
-            # Window starts full of ones so norm velocity is not zeroed before real data arrives.
+        if state is None or now - state.timestamp > self._max_gap_s:
+            # First sighting, or return after a dropout: start fresh. The window starts full of zeros so a
+            # newly appearing still body does not report speed.
             state = BodyState(
                 position=position,
                 orientation=orientation,
                 timestamp=now,
-                norm_vel_history=deque([1.0] * self._window_length, maxlen=self._window_length),
+                norm_vel_history=deque([0.0] * self._window_length, maxlen=self._window_length),
             )
             state.last_metrics = BodyMetrics(
                 id=id,
@@ -143,5 +144,4 @@ class MetricsTracker:
             abs_velocity=abs_velocity,
             norm_abs_velocity=norm_abs_velocity,
         )
-        logger.debug("metrics for ID %s: %s", id, state.last_metrics)
         return state.last_metrics

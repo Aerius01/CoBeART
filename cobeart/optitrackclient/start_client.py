@@ -27,10 +27,13 @@ from cobeart.packagesender import sender
 from cobeart.optitrackclient.NatNetClient import NatNetClient
 import cobeart.optitrackclient.DataDescriptions as DataDescriptions
 import cobeart.optitrackclient.MoCapData as MoCapData
-from cobeart.optitrackclient.transform import ArenaPose, Quaternion, Vec3, pose_to_arena
+from cobeart.optitrackclient.tracked_bodies import apply_rigid_body
+from cobeart.optitrackclient.transform import Quaternion, Vec3
 
 # global variable to store and update the tracked rigid bodies
 rigid_bodies = {}
+# IDs of bodies currently dropped out, so dropout and return are each logged once
+dropped_body_ids: set[int] = set()
 payload_sender = sender.PayloadSender(framerate=otsettings.package_framerate)
 
 
@@ -49,12 +52,11 @@ def receive_new_frame(data_dict):
 
 
 # This is a callback function that gets connected to the NatNet client. It is called once per rigid body per frame
-def receive_rigid_body_frame(new_id: int, position: Vec3, rotation: Quaternion) -> None:
+def receive_rigid_body_frame(new_id: int, position: Vec3, rotation: Quaternion, tracking_valid: bool) -> None:
     # update rigid bodies global data that will be only written with every frame to the file
     if new_id < otsettings.max_num_objects:
-        pose: ArenaPose = pose_to_arena(position, rotation)
-        # [x, y, z, qx, qy, qz, qw] in arena axes (see transform.py)
-        rigid_bodies[new_id] = [*pose.position, *pose.orientation]
+        # [x, y, z, qx, qy, qz, qw] in arena axes (see transform.py); untracked or invalid bodies are removed
+        apply_rigid_body(rigid_bodies, dropped_body_ids, new_id, position, rotation, tracking_valid)
     else:
         print(f"Rigid body ID is too high: {new_id}. The maximum number of tracked rigid"
               f" bodies is {otsettings.max_num_objects}! Update settings if necessary.")

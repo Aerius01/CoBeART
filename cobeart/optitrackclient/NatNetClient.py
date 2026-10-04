@@ -11,6 +11,7 @@
 #WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #See the License for the specific language governing permissions and
 #limitations under the License.
+# Modified by CoBeART: rigid_body_listener is called after tracking_valid is parsed and receives it as a fourth argument.
 
 # OptiTrack NatNet direct depacketization library for Python 3.x
 
@@ -340,10 +341,6 @@ class NatNetClient:
 
         rigid_body = MoCapData.RigidBody(new_id, pos, rot)
 
-        # Send information to any listener.
-        if self.rigid_body_listener is not None:
-            self.rigid_body_listener( new_id, pos, rot )
-
         # RB Marker Data ( Before version 3.0.  After Version 3.0 Marker data is in description )
         if( major < 3  and major != 0) :
             # Marker count (4 bytes)
@@ -399,6 +396,13 @@ class NatNetClient:
                 rigid_body.tracking_valid = True
             else:
                 rigid_body.tracking_valid = False
+        else:
+            # Flag is not sent before NatNet 2.6
+            tracking_valid = True
+
+        # Send information to any listener.
+        if self.rigid_body_listener is not None:
+            self.rigid_body_listener( rigid_body.id_num, rigid_body.pos, rigid_body.rot, tracking_valid )
 
         return offset, rigid_body
 

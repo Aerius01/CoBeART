@@ -26,6 +26,7 @@ Vec3 = tuple[float, float, float]
 Quaternion = tuple[float, float, float, float]  # (qx, qy, qz, qw), scalar last
 
 METRES_TO_MM: float = 1000.0
+MIN_QUATERNION_NORM: float = 1e-9
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,13 @@ class ArenaPose:
     """Rigid-body pose in arena axes."""
     position: Vec3  # [mm]
     orientation: Quaternion  # unit quaternion (qx, qy, qz, qw)
+
+
+def is_valid_pose(position: Vec3, rotation: Quaternion) -> bool:
+    """True if all 7 values are finite and the quaternion has non-zero length."""
+    if not all(math.isfinite(v) for v in (*position, *rotation)):
+        return False
+    return math.sqrt(sum(c * c for c in rotation)) >= MIN_QUATERNION_NORM
 
 
 def position_to_arena(position: Vec3) -> Vec3:
@@ -45,7 +53,7 @@ def quaternion_to_arena(rotation: Quaternion) -> Quaternion:
     """Map an OptiTrack orientation quaternion to a unit quaternion in arena axes."""
     qx, qy, qz, qw = rotation
     norm: float = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
-    if norm < 1e-9:
+    if norm < MIN_QUATERNION_NORM:
         raise ValueError(f"Cannot remap a zero-length orientation quaternion: {rotation}")
     return (-qx / norm, qz / norm, qy / norm, qw / norm)
 

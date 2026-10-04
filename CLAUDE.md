@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CoBeART is an audio-visual art project using Spatial Augmented Reality. It combines real-time body tracking via OptiTrack with WebGL-based fluid/particle simulations rendered through Electron. The system captures motion data from OptiTrack cameras and audio from microphones, processes them in Python, and streams to a Node.js/Electron frontend for visualization.
 
+## Refactor in progress
+
+A phased refactor is under way. `ROADMAP.md` is the plan and the source of truth for its status, the master-agent protocol for parallel worktree agents, and per-WP carry-over notes; read it before any refactor work. Parts of this file predate it (WP 4.2 rewrites it). Where they disagree, trust the code, `contract/` (message schemas) and `config/cobeart.yaml` over the sections below.
+
 ## Architecture
 
 ### Three-Layer System
@@ -233,7 +237,7 @@ To add a new background shader:
 
 ## Testing
 
-No automated test suite currently exists. Manual testing workflow:
+Automated: `~/miniconda3/envs/splat-env/bin/python -m pytest` (repo root), `npm test` (in `cobeart-app/`), `flake8 cobeart`. Offline motion and audio: `python -m cobeart.simulator --help`. Hardware workflow:
 1. Start OptiTrack Motive and ensure streaming is enabled
 2. Run `start-optitrack-client` in terminal (should show connection info)
 3. Run `start-audio-client` in another terminal (should show audio metrics)

@@ -10,6 +10,7 @@ def get_socketio_url() -> str:
     """
     return os.getenv("COBEART_SOCKETIO_URL", "http://127.0.0.1:3000")
 
+
 def select_audio_device():
     """
     Lists all available microphones, including loopback devices,

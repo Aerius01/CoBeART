@@ -39,14 +39,12 @@ payload_sender = sender.PayloadSender(framerate=otsettings.package_framerate)
 
 def generate_output(obj_positions):
     """Generating json with positions."""
-    global payload_sender
     payload_sender.send_payload(obj_positions)
 
 
 # This is a callback function that gets connected to the NatNet client
 # and called once per mocap frame.
 def receive_new_frame(data_dict):
-    global rigid_bodies
     list_to_write = [[key, *value] for key, value in rigid_bodies.items()]
     generate_output(list_to_write)
 
@@ -96,7 +94,7 @@ def print_configuration(natnet_client):
     print(
         "    ServerVersion  %d %d %d %d" % (server_version[0], server_version[1], server_version[2], server_version[3]))
     print("  NatNet Bitstream Requested")
-    print("    NatNetVersion  %d %d %d %d" % (nat_net_requested_version[0], nat_net_requested_version[1], \
+    print("    NatNetVersion  %d %d %d %d" % (nat_net_requested_version[0], nat_net_requested_version[1],
                                               nat_net_requested_version[2], nat_net_requested_version[3]))
     # print("command_socket = %s"%(str(natnet_client.command_socket)))
     # print("data_socket    = %s"%(str(natnet_client.data_socket)))

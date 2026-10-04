@@ -7,8 +7,6 @@ to a file for latency analysis.
 """
 
 import time
-import sys
-from collections import deque
 from cobeart.audiocapture.capture import AudioCapturer
 from cobeart.audiocapture.beat.predictor import PredictiveBeatLayer
 
@@ -79,7 +77,7 @@ def test_predictive_layer_realtime(log_file="predictive_beat_test.log"):
     try:
         while True:
             # Read audio chunk (keeps buffer filled)
-            audio_data = capturer.read_chunk()
+            capturer.read_chunk()
 
             # Check for predicted beats that FIRE (beat has arrived)
             predicted_beat, predicted_tempo, predicted_timestamp = predictor.get_next_beat()
@@ -121,7 +119,8 @@ def test_predictive_layer_realtime(log_file="predictive_beat_test.log"):
                         bpm_str = f"{actual_bpm:.1f}" if actual_bpm else "N/A"
 
                         # Write to log
-                        log.write(f"{beat_number:<8} | {pred_timestamp:17.3f} | {actual_timestamp:17.3f} | {diff_ms:+12.1f} | {bpm_str:<8}\n")
+                        log.write(f"{beat_number:<8} | {pred_timestamp:17.3f} | {actual_timestamp:17.3f} | "
+                                  f"{diff_ms:+12.1f} | {bpm_str:<8}\n")
                         log.flush()
 
                         latencies.append(diff_ms)
@@ -150,25 +149,25 @@ def test_predictive_layer_realtime(log_file="predictive_beat_test.log"):
 
     if len(latencies) > 0:
         import numpy as np
-        log.write(f"\nTimestamp Difference Statistics:\n")
+        log.write("\nTimestamp Difference Statistics:\n")
         log.write(f"  Mean:   {np.mean(latencies):+.1f} ms\n")
         log.write(f"  Median: {np.median(latencies):+.1f} ms\n")
         log.write(f"  Std:    {np.std(latencies):.1f} ms\n")
         log.write(f"  Min:    {np.min(latencies):+.1f} ms\n")
         log.write(f"  Max:    {np.max(latencies):+.1f} ms\n")
-        log.write(f"\n")
-        log.write(f"Interpretation:\n")
-        log.write(f"  Negative difference = predictor timestamp was EARLIER than actual\n")
-        log.write(f"  Positive difference = predictor timestamp was LATER than actual\n")
-        log.write(f"  Near-zero mean = predictions are accurately aligned with actual beats\n")
+        log.write("\n")
+        log.write("Interpretation:\n")
+        log.write("  Negative difference = predictor timestamp was EARLIER than actual\n")
+        log.write("  Positive difference = predictor timestamp was LATER than actual\n")
+        log.write("  Near-zero mean = predictions are accurately aligned with actual beats\n")
 
     # Get predictor stats
     stats = predictor.get_stats()
-    log.write(f"\nPredictor Statistics:\n")
+    log.write("\nPredictor Statistics:\n")
     log.write(f"  Predictions generated: {stats['predictions_generated']}\n")
     log.write(f"  Predictions consumed:  {stats['predictions_consumed']}\n")
 
-    log.write(f"\n")
+    log.write("\n")
     log.write(f"Ended: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     log.write("=" * 80 + "\n")
     log.close()
@@ -181,7 +180,7 @@ def test_predictive_layer_realtime(log_file="predictive_beat_test.log"):
     print(f"Beat pairs logged: {len(latencies)}")
     if len(latencies) > 0:
         print(f"Average timestamp difference: {np.mean(latencies):+.1f} ms")
-        print(f"  (near-zero = predictions align well with actual beats)")
+        print("  (near-zero = predictions align well with actual beats)")
     print(f"\nFull results written to: {log_file}")
     print("=" * 70)
 

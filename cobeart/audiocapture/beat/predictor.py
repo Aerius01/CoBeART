@@ -125,13 +125,13 @@ class PredictiveBeatLayer:
         # Poll detector if enough time has passed (minimal overhead: ~100-200ns)
         if current_time - self._last_poll_time >= self._poll_interval:
             if self.debug:
-                print(f"[predict] Poll interval elapsed, polling detector")
+                print("[predict] Poll interval elapsed, polling detector")
             last_beat_time, beat_interval, tempo_bpm = self._poll_detector()
 
             # If detector reports unstable and we have a queued prediction, invalidate it
             if last_beat_time is None and self._next_beat_time is not None:
                 if self.debug:
-                    print(f"[predict] Tempo unstable, invalidating queued prediction")
+                    print("[predict] Tempo unstable, invalidating queued prediction")
                 self._next_beat_time = None
                 self._current_tempo = None
                 return False, None, None
@@ -139,7 +139,7 @@ class PredictiveBeatLayer:
             # If detector reports stable tempo and no prediction queued, generate one
             elif last_beat_time is not None and self._next_beat_time is None:
                 if self.debug:
-                    print(f"[predict] Stable tempo detected, generating prediction")
+                    print("[predict] Stable tempo detected, generating prediction")
                 self._generate_prediction(last_beat_time, beat_interval, tempo_bpm)
                 return False, tempo_bpm, None
 
@@ -151,7 +151,7 @@ class PredictiveBeatLayer:
             # Check if current time has reached the prediction
             if current_time >= self._next_beat_time:
                 if self.debug:
-                    print(f"[predict] Time reached, consuming beat")
+                    print("[predict] Time reached, consuming beat")
                 self._stats['predictions_consumed'] += 1
 
                 beat_time = self._next_beat_time
@@ -227,7 +227,8 @@ class PredictiveBeatLayer:
         self._stats['predictions_generated'] += 1
 
         if self.debug:
-            print(f"[predict] Generated prediction from last_beat={last_beat_time:.3f}s, interval={beat_interval:.3f}s ({tempo_bpm:.1f} BPM)")
+            print(f"[predict] Generated prediction from last_beat={last_beat_time:.3f}s, "
+                  f"interval={beat_interval:.3f}s ({tempo_bpm:.1f} BPM)")
             print(f"[predict]   Next beat: {self._next_beat_time:.3f}s")
 
     def get_stats(self) -> dict:

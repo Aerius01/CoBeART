@@ -5,6 +5,7 @@ from matplotlib.animation import FuncAnimation
 from cobeart.audiocapture.utils import select_audio_device
 import threading
 
+
 def main():
     """Sets up and runs a low-latency audio visualizer using Matplotlib."""
     mic = select_audio_device()
@@ -66,7 +67,9 @@ def main():
 
     print("\nStarting visualizer... Close the plot window to stop.")
 
-    ani = FuncAnimation(fig, update_plot, init_func=lambda: (line,), blit=False, interval=1, save_count=0, cache_frame_data=False)
+    ani = FuncAnimation(  # noqa: F841 (matplotlib stops an animation that nothing references)
+        fig, update_plot, init_func=lambda: (line,), blit=False, interval=1, save_count=0, cache_frame_data=False)
+
     def _on_close(event):
         stop_event.set()
     fig.canvas.mpl_connect('close_event', _on_close)
@@ -77,6 +80,7 @@ def main():
     stop_event.set()
     capture_thread.join(timeout=1.0)
     print("\nVisualizer stopped.")
+
 
 if __name__ == '__main__':
     main()

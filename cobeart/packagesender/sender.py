@@ -13,6 +13,7 @@ sio.connect(SIO_URL, transports=["websocket"], namespaces=["/ingest"])
 def connect():
     print("[python] connected to /ingest")
 
+
 @sio.event(namespace="/ingest")
 def disconnect():
     print("[python] disconnected from /ingest")

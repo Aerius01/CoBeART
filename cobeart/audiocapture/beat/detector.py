@@ -303,7 +303,7 @@ class BeatDetector:
                     beat_list += f", ... ({len(beats)-10} more)"
                 print(f"[beat]   Raw: [{beat_list}]")
             else:
-                print(f"[beat]   (no beats)")
+                print("[beat]   (no beats)")
 
         return beats_abs
 
@@ -343,7 +343,7 @@ class BeatDetector:
                 print(f"[beat]   Passed: {len(beats_in_new_region)} beats (filtered {filtered_count})")
                 print(f"[beat]   [{beat_list}]")
             else:
-                print(f"[beat]   All beats filtered (all in old region)")
+                print("[beat]   All beats filtered (all in old region)")
 
         return beats_in_new_region
 
@@ -375,7 +375,7 @@ class BeatDetector:
                 print(f"[beat]   Passed: {len(new_beats)} beats (filtered {filtered_count})")
                 print(f"[beat]   [{beat_list}]")
             else:
-                print(f"[beat]   All beats filtered (too close to last beat)")
+                print("[beat]   All beats filtered (too close to last beat)")
 
         return new_beats
 
@@ -420,7 +420,8 @@ class BeatDetector:
 
             # Log state transitions
             if old_state != self._tempo_state and self.debug:
-                print(f"[beat] Tempo state changed: {old_state} → {self._tempo_state} (variance={variance_ratio*100:.1f}%)")
+                print(f"[beat] Tempo state changed: {old_state} → {self._tempo_state} "
+                      f"(variance={variance_ratio*100:.1f}%)")
 
             if self._tempo_state == "stable":
                 # Return tempo grid parameters
@@ -489,7 +490,7 @@ class BeatDetector:
             # All beats are off-grid - tempo likely changed or grid corrupted
             # Reset to unstable state by clearing history
             if len(new_beats) > 0:
-                print(f"[beat-filter] All beats off-grid, resetting to unstable state (clearing history)")
+                print("[beat-filter] All beats off-grid, resetting to unstable state (clearing history)")
                 self._beat_history.clear()
                 self._tempo_state = "unstable"
                 # Accept the first new beat to start rebuilding
@@ -525,7 +526,8 @@ class BeatDetector:
             if self._consecutive_rejections >= self._max_consecutive_rejections:
                 # Force recovery: accept any beat from madmom's raw output
                 if len(beats_abs) > 0:
-                    print(f"[beat-filter] Force recovery after {self._consecutive_rejections} rejections, accepting beat from raw output")
+                    print(f"[beat-filter] Force recovery after {self._consecutive_rejections} rejections, "
+                          "accepting beat from raw output")
                     # Take the most recent beat from madmom
                     forced_beat = beats_abs[-1]
                     new_beats = np.array([forced_beat])
@@ -566,8 +568,10 @@ class BeatDetector:
         if self._beat_logger:
             processing_latency = time.time() - process_start_time
             log_time = process_start_time + processing_latency  # Same value, no extra syscall
-            interval = new_beat_time - self._last_reported_beat if self._last_reported_beat > _NO_BEAT_SENTINEL else None
-            self._beat_logger.log_beat(new_beat_time, log_time, interval, self._estimated_bpm, len(self._beat_history), processing_latency, timings)
+            interval = (new_beat_time - self._last_reported_beat
+                        if self._last_reported_beat > _NO_BEAT_SENTINEL else None)
+            self._beat_logger.log_beat(new_beat_time, log_time, interval, self._estimated_bpm,
+                                       len(self._beat_history), processing_latency, timings)
 
         # Calculate BPM from beat history (average intervals)
         if len(self._beat_history) >= 2:
@@ -582,7 +586,7 @@ class BeatDetector:
         # Debug logging: beat selection and timing
         if self.debug:
             time_since_last = new_beat_time - self._last_reported_beat
-            print(f"[beat] ✓ BEAT DETECTED:")
+            print("[beat] ✓ BEAT DETECTED:")
             print(f"[beat]   Selected: {new_beat_time:.3f}s")
             print(f"[beat]   Time since last: {time_since_last:.3f}s ({time_since_last*1000:.0f}ms)")
             if self._beat_interval is not None:
@@ -590,7 +594,7 @@ class BeatDetector:
                 print(f"[beat]   Expected interval: {self._beat_interval:.3f}s (@ {self._estimated_bpm:.1f} BPM)")
                 print(f"[beat]   Deviation: {deviation:+.0f}ms")
             else:
-                print(f"[beat]   BPM not yet estimated")
+                print("[beat]   BPM not yet estimated")
 
         # Update last reported beat
         self._last_reported_beat = new_beat_time
@@ -618,7 +622,7 @@ class BeatDetector:
                 print(f"[beat]   Next processing @ t={self._next_process_time:.3f}s (+{next_interval:.3f}s)")
                 print()  # Blank line for readability
             else:
-                print(f"[beat] ✗ No beat detected")
+                print("[beat] ✗ No beat detected")
                 print(f"[beat]   Next processing @ t={self._next_process_time:.3f}s (+{next_interval:.3f}s)")
                 print()  # Blank line for readability
 
@@ -753,7 +757,6 @@ def main():
 
     # Process in chunks (simulating real-time capture)
     chunk_size = 1024
-    chunk_interval = chunk_size / sample_rate
     detected_beats = []
 
     print("Processing chunks...")

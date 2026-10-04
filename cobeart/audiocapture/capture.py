@@ -4,10 +4,13 @@ import time
 import threading
 from cobeart.audiocapture.utils import select_audio_device
 
+
 class AudioCapturer:
     """A class to capture audio from a user-selected input device."""
 
-    def __init__(self, chunk_size=1024, sample_rate=48000, spectrum_bins=128, spectrum_history=16, enable_beat_detection=False, enable_emit=False, socketio_url=None, socketio_namespace="/audio", debug=False):
+    def __init__(self, chunk_size=1024, sample_rate=48000, spectrum_bins=128, spectrum_history=16,
+                 enable_beat_detection=False, enable_emit=False, socketio_url=None, socketio_namespace="/audio",
+                 debug=False):
         """
         Initializes the AudioCapturer by selecting a device.
         A larger chunk_size (e.g., 1024) is better for frequency resolution of metrics.
@@ -118,7 +121,7 @@ class AudioCapturer:
                     capture_sample_rate=self.sample_rate,
                     debug=self.debug
                 )
-                
+
                 # Only enable logging if debug mode is active
                 if self.debug:
                     self._beat_detector.enable_logging()
@@ -139,7 +142,7 @@ class AudioCapturer:
         if self.is_recording:
             print("Stream is already running.")
             return
-        
+
         print("Audio stream started.")
         # Capture in ~10 ms blocks for stability; maintain a rolling window of chunk_size
         base10 = int(round(self.sample_rate / 100))  # ~10 ms
@@ -166,7 +169,8 @@ class AudioCapturer:
 
                         # Feed to beat detector if enabled
                         if self.enable_beat_detection and self._beat_detector is not None:
-                            self._beat_detector.add_chunk(block[:n] if n < self.chunk_size else block[-self.chunk_size:])
+                            self._beat_detector.add_chunk(
+                                block[:n] if n < self.chunk_size else block[-self.chunk_size:])
 
                         # Compute metrics and push to emitter immediately (if enabled)
                         if self.enable_emit and self._emitter is not None:
@@ -300,11 +304,11 @@ class AudioCapturer:
         if current_rms_db > self._rms_db_envelope:
             # Attack: follow increases quickly
             self._rms_db_envelope = (self._envelope_attack * self._rms_db_envelope +
-                                      (1.0 - self._envelope_attack) * current_rms_db)
+                                     (1.0 - self._envelope_attack) * current_rms_db)
         else:
             # Release: blend slowly toward current value (not multiplicative decay)
             self._rms_db_envelope = (self._envelope_release * self._rms_db_envelope +
-                                      (1.0 - self._envelope_release) * current_rms_db)
+                                     (1.0 - self._envelope_release) * current_rms_db)
 
         return float(self._rms_db_envelope)
 
@@ -547,6 +551,7 @@ class AudioCapturer:
             "beat_timestamp": beat_timestamp if beat_timestamp is not None else None,
         }
 
+
 def main():
     """Main function to run audio capture with optional Socket.IO emission."""
     import argparse
@@ -636,6 +641,7 @@ def main():
         print("\nStopping metric capture.")
     finally:
         capturer.stop_stream()
+
 
 if __name__ == "__main__":
     main()

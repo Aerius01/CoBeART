@@ -143,7 +143,7 @@ class OnsetVisualizer:
         # interval in ms = 1000 / sample_rate_hz
         interval_ms = int(1000 / self.sample_rate_hz)
 
-        ani = animation.FuncAnimation(
+        ani = animation.FuncAnimation(  # noqa: F841 (matplotlib stops an animation that nothing references)
             self.fig,
             self.animate,
             interval=interval_ms,

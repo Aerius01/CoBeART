@@ -64,11 +64,15 @@ class BeatLogger:
             self.log_path = Path(log_dir) / f"beat_history_{timestamp}.log"
             self.log_file = open(self.log_path, 'w')
             self.log_file.write("# Beat History Log\n")
-            self.log_file.write("# Format: beat_time(s), processing_time_since_start(s), latency(ms), interval_from_last(ms), bpm, history_size, processing_latency(ms), resample(ms), beat_proc(ms), track_proc(ms)\n")
-            self.log_file.write("# Columns: timestamp, processing_time, latency, interval, bpm, history_size, processing_latency, resample, beat_proc, track_proc\n")
+            self.log_file.write("# Format: beat_time(s), processing_time_since_start(s), latency(ms), "
+                                "interval_from_last(ms), bpm, history_size, processing_latency(ms), "
+                                "resample(ms), beat_proc(ms), track_proc(ms)\n")
+            self.log_file.write("# Columns: timestamp, processing_time, latency, interval, bpm, history_size, "
+                                "processing_latency, resample, beat_proc, track_proc\n")
             print(f"[beat-logger] Logging to {self.log_path}")
 
-    def log_beat(self, beat_time: float, processing_time_since_start: float, interval: Optional[float], bpm: Optional[float], history_size: int, processing_latency: float, timings: dict):
+    def log_beat(self, beat_time: float, processing_time_since_start: float, interval: Optional[float],
+                 bpm: Optional[float], history_size: int, processing_latency: float, timings: dict):
         """
         Log a beat timestamp with context.
 

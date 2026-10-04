@@ -18,46 +18,199 @@
 # Uses the Python NatNetClient.py library to establish a connection (by creating a NatNetClient),
 # and receive data via a NatNet connection and decode it using the NatNetClient library.
 
-import sys
+import argparse
+import logging
+import math
+import os
+import signal
+import threading
 import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from types import FrameType
+from typing import Any, Protocol
+from urllib.parse import urlsplit
+
+import socketio
 
 import cobeart.settings.streaming as otsettings
-from cobeart.packagesender import sender
+from cobeart.packagesender.metrics import MetricsTracker
+from cobeart.packagesender.sender import PayloadSender, StrictJson
 
 from cobeart.optitrackclient.NatNetClient import NatNetClient
 import cobeart.optitrackclient.DataDescriptions as DataDescriptions
 import cobeart.optitrackclient.MoCapData as MoCapData
 from cobeart.optitrackclient.tracked_bodies import apply_rigid_body
-from cobeart.optitrackclient.transform import Quaternion, Vec3
+from cobeart.optitrackclient.transform import ArenaPose, Quaternion, Vec3
 
-# global variable to store and update the tracked rigid bodies
-rigid_bodies = {}
-# IDs of bodies currently dropped out, so dropout and return are each logged once
-dropped_body_ids: set[int] = set()
-payload_sender = sender.PayloadSender(framerate=otsettings.package_framerate)
+logger: logging.Logger = logging.getLogger(__name__)
 
+SOCKETIO_URL_ENV: str = "COBEART_SOCKETIO_URL"
+DEFAULT_SOCKETIO_URL: str = "http://127.0.0.1:3000"
+SYNTHETIC_RATE_HZ: float = 240.0
+FAILURE_POLL_S: float = 0.1
 
-def generate_output(obj_positions):
-    """Generating json with positions."""
-    payload_sender.send_payload(obj_positions)
-
-
-# This is a callback function that gets connected to the NatNet client
-# and called once per mocap frame.
-def receive_new_frame(data_dict):
-    list_to_write = [[key, *value] for key, value in rigid_bodies.items()]
-    generate_output(list_to_write)
+FrameData = Mapping[str, Any]  # NatNet's per-frame dict; only "timestamp" (s since Motive start) is used
+FrameListener = Callable[[FrameData], None]
+RigidBodyListener = Callable[[int, Vec3, Quaternion, bool], None]
 
 
-# This is a callback function that gets connected to the NatNet client. It is called once per rigid body per frame
-def receive_rigid_body_frame(new_id: int, position: Vec3, rotation: Quaternion, tracking_valid: bool) -> None:
-    # update rigid bodies global data that will be only written with every frame to the file
-    if new_id < otsettings.max_num_objects:
-        # [x, y, z, qx, qy, qz, qw] in arena axes (see transform.py); untracked or invalid bodies are removed
-        apply_rigid_body(rigid_bodies, dropped_body_ids, new_id, position, rotation, tracking_valid)
-    else:
-        print(f"Rigid body ID is too high: {new_id}. The maximum number of tracked rigid"
-              f" bodies is {otsettings.max_num_objects}! Update settings if necessary.")
+class MotionSource(Protocol):
+    """A NatNet-style source that calls the rigid-body listener per body, then the frame listener, per frame."""
+
+    new_frame_listener: FrameListener | None
+    rigid_body_listener: RigidBodyListener | None
+
+    def run(self) -> bool: ...
+
+    def shutdown(self) -> None: ...
+
+
+class FramePipeline:
+    """Collects the bodies of one mocap frame and hands the frame to the sender with its mocap timestamp.
+
+    Both callbacks run on the motion source's receive thread, rigid bodies first, then the frame. An exception in
+    either is logged and sets `failure` instead of killing that thread; the main thread watches `failure` and exits.
+    """
+
+    def __init__(self, sender: PayloadSender, max_num_objects: int, failure: threading.Event) -> None:
+        self._sender: PayloadSender = sender
+        self._failure: threading.Event = failure
+        self._max_num_objects: int = max_num_objects
+        self._bodies: dict[int, list[float]] = {}  # [x, y, z, qx, qy, qz, qw] in arena axes (see transform.py)
+        self._dropped_ids: set[int] = set()  # so dropout and return are each logged once
+        self._warned_ids: set[int] = set()
+
+    def attach(self, source: MotionSource) -> None:
+        """Register this pipeline's callbacks on a motion source."""
+        source.new_frame_listener = self.receive_new_frame
+        source.rigid_body_listener = self.receive_rigid_body_frame
+
+    def receive_rigid_body_frame(self, new_id: int, position: Vec3, rotation: Quaternion, tracking_valid: bool) -> None:
+        """Store one body's arena pose for the current frame; untracked or invalid bodies are removed."""
+        if self._failure.is_set():
+            return
+        try:
+            self._store_rigid_body(new_id, position, rotation, tracking_valid)
+        except Exception:
+            logger.exception("Rigid-body callback failed for body %d; stopping the motion pipeline", new_id)
+            self._failure.set()
+
+    def receive_new_frame(self, data_dict: FrameData) -> None:
+        """Pass the frame's bodies to the sender, clocked by the mocap frame timestamp."""
+        if self._failure.is_set():
+            return
+        try:
+            self._send_frame(data_dict)
+        except Exception:
+            logger.exception("Frame callback failed; stopping the motion pipeline")
+            self._failure.set()
+
+    def _store_rigid_body(self, new_id: int, position: Vec3, rotation: Quaternion, tracking_valid: bool) -> None:
+        if new_id < self._max_num_objects:
+            apply_rigid_body(self._bodies, self._dropped_ids, new_id, position, rotation, tracking_valid)
+        elif new_id not in self._warned_ids:
+            self._warned_ids.add(new_id)
+            logger.warning("Ignoring rigid body ID %d: IDs must be below max_num_objects (%d), see settings",
+                           new_id, self._max_num_objects)
+
+    def _send_frame(self, data_dict: FrameData) -> None:
+        bodies: dict[int, ArenaPose] = {
+            body_id: ArenaPose(position=(v[0], v[1], v[2]), orientation=(v[3], v[4], v[5], v[6]))
+            for body_id, v in self._bodies.items()
+        }
+        self._sender.handle_frame(float(data_dict["timestamp"]), bodies)
+
+
+@dataclass(frozen=True, slots=True)
+class CirclePath:
+    """A body walking a horizontal circle about the arena centre, counterclockwise seen from above, facing forward."""
+    body_id: int
+    radius_mm: float
+    period_s: float
+    height_mm: float
+    phase_rad: float = 0.0
+
+    @property
+    def speed_mm_s(self) -> float:
+        return 2.0 * math.pi * self.radius_mm / self.period_s
+
+
+DEFAULT_SYNTHETIC_PATHS: tuple[CirclePath, ...] = (
+    CirclePath(body_id=0, radius_mm=1500.0, period_s=6.0, height_mm=1200.0),
+    CirclePath(body_id=1, radius_mm=900.0, period_s=4.0, height_mm=1000.0, phase_rad=math.pi),
+    CirclePath(body_id=2, radius_mm=2200.0, period_s=10.0, height_mm=1700.0, phase_rad=math.pi / 2),
+)
+
+
+def arena_pose_on_circle(path: CirclePath, t: float) -> ArenaPose:
+    """Arena pose (mm, quaternion) of a circle-walking body at time t; heading is the direction of travel."""
+    theta: float = path.phase_rad + 2.0 * math.pi * t / path.period_s
+    # Identity faces +y; yaw theta about +z turns it to (-sin, cos), the counterclockwise tangent at angle theta.
+    return ArenaPose(
+        position=(path.radius_mm * math.cos(theta), path.radius_mm * math.sin(theta), path.height_mm),
+        orientation=(0.0, 0.0, math.sin(theta / 2.0), math.cos(theta / 2.0)),
+    )
+
+
+def arena_to_optitrack(pose: ArenaPose) -> tuple[Vec3, Quaternion]:
+    """Inverse of the D5 remap (x = -X, y = Z, z = Y): arena mm and quaternion to OptiTrack metres and quaternion."""
+    x, y, z = pose.position
+    qx, qy, qz, qw = pose.orientation
+    return (-x / 1000.0, z / 1000.0, y / 1000.0), (-qx, qz, qy, qw)
+
+
+class SyntheticNatNetSource:
+    """Offline MotionSource: emits scripted OptiTrack-native poses through the NatNet callbacks at a fixed rate."""
+
+    def __init__(
+        self,
+        paths: Sequence[CirclePath],
+        rate_hz: float = SYNTHETIC_RATE_HZ,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.new_frame_listener: FrameListener | None = None
+        self.rigid_body_listener: RigidBodyListener | None = None
+        self._paths: tuple[CirclePath, ...] = tuple(paths)
+        self._rate_hz: float = rate_hz
+        self._clock: Callable[[], float] = clock
+        self._frame_number: int = 0
+        self._stop: threading.Event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def step(self) -> None:
+        """Emit the next frame synchronously; its timestamp is frame_number / rate_hz seconds."""
+        if self.new_frame_listener is None or self.rigid_body_listener is None:
+            raise RuntimeError("SyntheticNatNetSource listeners must be set before frames are emitted")
+        t: float = self._frame_number / self._rate_hz
+        for path in self._paths:
+            position, rotation = arena_to_optitrack(arena_pose_on_circle(path, t))
+            self.rigid_body_listener(path.body_id, position, rotation, True)
+        self.new_frame_listener({"frame_number": self._frame_number, "timestamp": t})
+        self._frame_number += 1
+
+    def run(self) -> bool:
+        """Start emitting frames on a background thread."""
+        if self.new_frame_listener is None or self.rigid_body_listener is None:
+            raise RuntimeError("SyntheticNatNetSource listeners must be set before run()")
+        self._thread = threading.Thread(target=self._loop, name="synthetic-natnet", daemon=True)
+        self._thread.start()
+        return True
+
+    def shutdown(self) -> None:
+        """Stop emitting frames."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+
+    def _loop(self) -> None:
+        start: float = self._clock()
+        first_frame: int = self._frame_number
+        while not self._stop.is_set():
+            self.step()
+            delay: float = start + (self._frame_number - first_frame) / self._rate_hz - self._clock()
+            if delay > 0:
+                self._stop.wait(delay)
 
 
 def add_lists(totals, totals_tmp):
@@ -156,68 +309,132 @@ def test_classes():
     print("[SKIP] Count = %3.1d" % totals[2])
 
 
-def my_parse_args(arg_list, args_dict):
-    # set up base values
-    arg_list_len = len(arg_list)
-    if arg_list_len > 1:
-        args_dict["serverAddress"] = arg_list[1]
-        if arg_list_len > 2:
-            args_dict["clientAddress"] = arg_list[2]
-        if arg_list_len > 3:
-            if len(arg_list[3]):
-                args_dict["use_multicast"] = True
-                if arg_list[3][0].upper() == "U":
-                    args_dict["use_multicast"] = False
-
-    return args_dict
+def hub_url(value: str) -> str:
+    """argparse type: an http(s) URL with a host, e.g. http://127.0.0.1:3000."""
+    try:
+        parts = urlsplit(value)
+        host: str | None = parts.hostname
+        parts.port  # raises ValueError on a malformed port
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid hub URL {value!r}: {exc}") from exc
+    if parts.scheme not in {"http", "https"} or not host:
+        raise argparse.ArgumentTypeError(f"invalid hub URL {value!r}: expected http(s)://host[:port]")
+    return value
 
 
-def start():
-    """Fully from OptiTrack NatNet SDK"""
-    optionsDict = {}
-    optionsDict["clientAddress"] = otsettings.client_address
-    optionsDict["serverAddress"] = otsettings.server_address
-    optionsDict["use_multicast"] = otsettings.use_multicast
+def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    """Command line: optional NatNet addresses (positional, as in the NatNet sample) plus --simulate and --url."""
+    parser = argparse.ArgumentParser(description="Stream OptiTrack rigid bodies to the CoBeART hub.")
+    parser.add_argument("server_address", nargs="?", default=otsettings.server_address,
+                        help="OptiTrack (Motive) machine address")
+    parser.add_argument("client_address", nargs="?", default=otsettings.client_address,
+                        help="address of this machine")
+    parser.add_argument("transport", nargs="?", default=None,
+                        help="'u...' for unicast, anything else for multicast (default from settings)")
+    parser.add_argument("--simulate", action="store_true",
+                        help="use scripted synthetic bodies instead of a NatNet connection")
+    parser.add_argument("--url", type=hub_url, default=os.environ.get(SOCKETIO_URL_ENV, DEFAULT_SOCKETIO_URL),
+                        help=f"hub Socket.IO URL (default ${SOCKETIO_URL_ENV} or {DEFAULT_SOCKETIO_URL})")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    return parser.parse_args(argv)
 
-    # This will create a new NatNet client
-    optionsDict = my_parse_args(sys.argv, optionsDict)
 
+def build_natnet_client(args: argparse.Namespace) -> NatNetClient:
+    """A NatNet client configured from the command line and settings."""
+    use_multicast: bool = otsettings.use_multicast if args.transport is None else args.transport[:1].upper() != "U"
     streaming_client = NatNetClient()
-    streaming_client.set_client_address(optionsDict["clientAddress"])
-    streaming_client.set_server_address(optionsDict["serverAddress"])
-    streaming_client.set_use_multicast(optionsDict["use_multicast"])
+    streaming_client.set_client_address(args.client_address)
+    streaming_client.set_server_address(args.server_address)
+    streaming_client.set_use_multicast(use_multicast)
+    return streaming_client
 
-    # Configure the streaming client to call our rigid body handler on the emulator to send data out.
-    streaming_client.new_frame_listener = receive_new_frame
-    streaming_client.rigid_body_listener = receive_rigid_body_frame
 
-    # Start up the streaming client now that the callbacks are set up.
+def run_simulated(source: SyntheticNatNetSource, failure: threading.Event) -> None:
+    """Run the synthetic source until SIGINT or SIGTERM; exit non-zero if the pipeline fails."""
+    stop = threading.Event()
+
+    def _request_stop(signum: int, frame: FrameType | None) -> None:
+        logger.info("Received signal %d, stopping", signum)
+        stop.set()
+
+    previous_int = signal.signal(signal.SIGINT, _request_stop)
+    previous_term = signal.signal(signal.SIGTERM, _request_stop)
+    try:
+        source.run()
+        logger.info("Simulating NatNet frames at %.0f Hz; Ctrl+C to stop", SYNTHETIC_RATE_HZ)
+        while not stop.is_set() and not failure.is_set():
+            stop.wait(FAILURE_POLL_S)
+    finally:
+        source.shutdown()
+        signal.signal(signal.SIGINT, previous_int)
+        signal.signal(signal.SIGTERM, previous_term)
+    if failure.is_set():
+        raise SystemExit("ERROR: motion pipeline failed, see the log above")
+
+
+def _interrupt_main_on_failure(failure: threading.Event) -> None:
+    """Wake the main thread out of a blocking input() with SIGINT once the pipeline has failed."""
+    failure.wait()
+    main_id: int | None = threading.main_thread().ident
+    if main_id is not None:
+        signal.pthread_kill(main_id, signal.SIGINT)
+
+
+def start(argv: Sequence[str] | None = None) -> None:
+    """Stream rigid bodies from NatNet (or the synthetic source with --simulate) to the hub."""
+    args = parse_args(argv)
+    logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    failure = threading.Event()
+    sender = PayloadSender(
+        client=socketio.Client(reconnection=False, json=StrictJson),
+        tracker=MetricsTracker(),
+        url=args.url,
+        framerate=otsettings.package_framerate,
+        failure=failure,
+    )
+    pipeline = FramePipeline(sender, otsettings.max_num_objects, failure)
+    sender.connect()
+    try:
+        if args.simulate:
+            source = SyntheticNatNetSource(DEFAULT_SYNTHETIC_PATHS)
+            pipeline.attach(source)
+            run_simulated(source, failure)
+        else:
+            streaming_client = build_natnet_client(args)
+            pipeline.attach(streaming_client)
+            run_natnet(streaming_client, failure)
+    finally:
+        sender.stop()
+
+
+def run_natnet(streaming_client: NatNetClient, failure: threading.Event) -> None:
+    """Start the NatNet client and run its console; exit non-zero if the pipeline fails."""
     # This will run perpetually, and operate on a separate thread.
-    is_running = streaming_client.run()
-    if not is_running:
-        print("ERROR: Could not start streaming client.")
-        try:
-            sys.exit(1)
-        except SystemExit:
-            print("...")
-        finally:
-            print("exiting")
+    if not streaming_client.run():
+        raise SystemExit("ERROR: Could not start streaming client.")
 
-    is_looping = True
     time.sleep(1)
     if streaming_client.connected() is False:
-        print("ERROR: Could not connect properly.  Check that Motive streaming is on.")
-        try:
-            sys.exit(2)
-        except SystemExit:
-            print("...")
-        finally:
-            print("exiting")
+        streaming_client.shutdown()
+        raise SystemExit("ERROR: Could not connect properly.  Check that Motive streaming is on.")
 
     print_configuration(streaming_client)
     print("\n")
     print_commands(streaming_client.can_change_bitstream_version())
 
+    threading.Thread(target=_interrupt_main_on_failure, args=(failure,), name="failure-watch", daemon=True).start()
+    try:
+        natnet_console(streaming_client)
+    except KeyboardInterrupt:
+        streaming_client.shutdown()
+        if failure.is_set():
+            raise SystemExit("ERROR: motion pipeline failed, see the log above")
+
+
+def natnet_console(streaming_client: NatNetClient) -> None:
+    """Interactive NatNet command console (from the OptiTrack NatNet SDK)."""
+    is_looping = True
     while is_looping:
         inchars = input('Enter command or (\'h\' for list of commands)\n')
         if len(inchars) > 0:

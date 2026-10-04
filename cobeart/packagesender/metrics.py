@@ -1,8 +1,6 @@
 """Per-body velocity metrics derived from successive OptiTrack poses."""
 import math
-import time
 from collections import deque
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -13,6 +11,7 @@ Vector = npt.NDArray[np.float64]
 DEFAULT_MAX_VEL: float = 13000.0
 DEFAULT_WINDOW_LENGTH: int = 15
 DEFAULT_MAX_GAP_S: float = 0.25
+DEFAULT_MIN_DT_S: float = 0.0005
 
 
 def _zeros() -> Vector:
@@ -72,37 +71,41 @@ def calc_angular_velocity(q_prev: Vector, q_now: Vector, time_diff: float) -> Ve
 
 
 class MetricsTracker:
-    """Computes velocities per body, each with its own smoothing window."""
+    """Computes velocities per body, each with its own smoothing window.
+
+    Timestamps are supplied by the caller (the mocap frame clock), so dt is capture time, not arrival time.
+    Not thread-safe: call from one thread, or serialize calls.
+    """
 
     def __init__(
         self,
         max_vel: float = DEFAULT_MAX_VEL,
         window_length: int = DEFAULT_WINDOW_LENGTH,
-        clock: Callable[[], float] = time.time,
         max_gap_s: float = DEFAULT_MAX_GAP_S,
+        min_dt_s: float = DEFAULT_MIN_DT_S,
     ) -> None:
         self._max_vel: float = max_vel
         self._window_length: int = window_length
-        self._clock: Callable[[], float] = clock
         self._max_gap_s: float = max_gap_s
+        self._min_dt_s: float = min_dt_s
         self._bodies: dict[int, BodyState] = {}
 
     def update(
-        self, id: int, x: float, y: float, z: float, qx: float, qy: float, qz: float, qw: float
+        self, id: int, timestamp: float, x: float, y: float, z: float, qx: float, qy: float, qz: float, qw: float
     ) -> BodyMetrics:
-        """Record an arena pose (mm, unit quaternion) for a body and return its current metrics."""
-        now: float = self._clock()
+        """Record an arena pose (mm, unit quaternion) at `timestamp` (s) and return the body's current metrics."""
         position: Vector = np.array([x, y, z])
         orientation: Vector = np.array([qx, qy, qz, qw])
 
         state: BodyState | None = self._bodies.get(id)
-        if state is None or now - state.timestamp > self._max_gap_s:
-            # First sighting, or return after a dropout: start fresh. The window starts full of zeros so a
-            # newly appearing still body does not report speed.
+        time_diff: float = timestamp - state.timestamp if state is not None else 0.0
+        if state is None or time_diff < 0.0 or time_diff > self._max_gap_s:
+            # First sighting, return after a dropout, or the clock went backwards (Motive restart or take loop):
+            # start fresh. The window starts full of zeros so a newly appearing still body does not report speed.
             state = BodyState(
                 position=position,
                 orientation=orientation,
-                timestamp=now,
+                timestamp=timestamp,
                 norm_vel_history=deque([0.0] * self._window_length, maxlen=self._window_length),
             )
             state.last_metrics = BodyMetrics(
@@ -117,14 +120,22 @@ class MetricsTracker:
             self._bodies[id] = state
             return state.last_metrics
 
-        time_diff: float = now - state.timestamp
-        if time_diff > 0:
-            velocity: Vector = (position - state.position) / time_diff
-            angular_velocity: Vector = calc_angular_velocity(state.orientation, orientation, time_diff)
-        else:
-            velocity = _zeros()
-            angular_velocity = _zeros()
+        if time_diff < self._min_dt_s:
+            # Too close to the reference pose to divide by: report the new pose with the previous velocities and
+            # keep the reference, so the next frame differentiates over the full interval.
+            prev: BodyMetrics = state.last_metrics
+            return BodyMetrics(
+                id=id,
+                position=position,
+                orientation=orientation,
+                velocity=prev.velocity,
+                angular_velocity=prev.angular_velocity,
+                abs_velocity=prev.abs_velocity,
+                norm_abs_velocity=prev.norm_abs_velocity,
+            )
 
+        velocity: Vector = (position - state.position) / time_diff
+        angular_velocity: Vector = calc_angular_velocity(state.orientation, orientation, time_diff)
         abs_velocity: float = calc_abs_velocity(velocity[0], velocity[1])
         state.norm_vel_history.append(normalize_abs_velocity(abs_velocity, self._max_vel))
         # Zero only after a full window of zeros, otherwise hold the window maximum.
@@ -134,7 +145,7 @@ class MetricsTracker:
 
         state.position = position
         state.orientation = orientation
-        state.timestamp = now
+        state.timestamp = timestamp
         state.last_metrics = BodyMetrics(
             id=id,
             position=position,

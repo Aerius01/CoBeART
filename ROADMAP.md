@@ -129,7 +129,7 @@ Everything here is either a new file or a file nobody else touches in this phase
 
 **Phase 1 gate review:** `code-optimizer-reviewer` on WP 1.3 (`metrics.py` runs at 240 Hz × bodies).
 
-**Phase 1 gate:** `pytest`, `flake8 cobeart`, `npm test` in `cobeart-app`. Simulated smoke run: `npm start`, then `python -m cobeart.simulator --scenario hands --audio beat`. Splat and composite both respond. Re-check WP 1.4 with `--scenario missing-body` and `--scenario shuffled`. Audio check: `start-audio-client` with a real mic, in parallel with the motion-only simulator (`--audio none`).
+**Phase 1 gate:** `pytest`, `flake8 cobeart`, `npm test` in `cobeart-app`. Simulated smoke run: `npm start`, then `python -m cobeart.simulator --scenario hands --audio beat`. Splat and composite both respond. Re-check WP 1.4 with `--scenario missing-body` and `--scenario shuffled`. Audio check: `start-audio-client --emit` with a real mic (emission is off by default until WP 3.1), in parallel with the motion-only simulator (`--audio none`).
 
 ---
 
@@ -196,7 +196,7 @@ Depends on: `config/cobeart.yaml` (1.8), the rewritten sender/emitter (2.2, 2.3)
 ### WP 3.1: Python reads the shared config (§4.2, P1 #7)
 - **Model:** Sonnet. Broad but mechanical: one loader, many injection sites.
 - **Owns:** `cobeart/settings/` (replace `streaming.py`), `cobeart/audiocapture/utils.py`, `cobeart/packagesender/sender.py`, `cobeart/packagesender/metrics.py`, `cobeart/audiocapture/emitter.py`, `cobeart/optitrackclient/start_client.py`, `cobeart/simulator/`, `cobeart/audiocapture/capture.py` (`main()` only), `pyproject.toml`
-- **Scope:** Frozen `Settings` dataclass tree loaded once from `config/cobeart.yaml` (path overridable by `COBEART_CONFIG`), `COBEART_SOCKETIO_URL` still overrides the URL. Delete `streaming.py` and `get_socketio_url`; inject settings into sender, tracker, emitter, client, and simulator (which uses the arena bounds, body map IDs and rates instead of its own defaults). Add `pyyaml`. Register `start-simulator = "cobeart.simulator.__main__:main"`. In `capture.py` `main()`, build `AudioCapturer` from the `audio` settings section (including `beat_detection`); leave the class itself and its DSP defaults to WP 3.4 (not in scope per review).
+- **Scope:** Frozen `Settings` dataclass tree loaded once from `config/cobeart.yaml` (path overridable by `COBEART_CONFIG`), `COBEART_SOCKETIO_URL` still overrides the URL. Delete `streaming.py` and `get_socketio_url`; inject settings into sender, tracker, emitter, client, and simulator (which uses the arena bounds, body map IDs and rates instead of its own defaults). Add `pyyaml`. Register `start-simulator = "cobeart.simulator.__main__:main"`. In `capture.py` `main()`, make emission the default (the Phase 3 gate runs `start-audio-client` with no flags; keep a `--no-emit` for local metering) and build `AudioCapturer` from the `audio` settings section (including `beat_detection`); leave the class itself and its DSP defaults to WP 3.4 (not in scope per review).
 - **Test:** loader parses the real file; missing required key raises a specific error naming the key.
 - **Accept:** pytest passes; both clients start using only the config file.
 

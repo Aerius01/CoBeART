@@ -26,6 +26,9 @@ import backgroundRegistry from '../backgrounds/registry.js';
 
 'use strict';
 
+// When embedded, fluid-bridge.js adds ?debug to this iframe's URL if the embedding page has it.
+const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__?.debug === true;
+
 // Mobile promo section
 
 //const promoPopup = document.getElementsByClassName('promo')[0];
@@ -1640,10 +1643,8 @@ window.addEventListener('touchend', e => {
     }
 });
 
-// Accept cursor events from composite parent
-window.addEventListener('message', (e) => {
-    const m = e.data;
-    if (!m || m.type !== 'cursor') return;
+// Cursor events from the composite parent: { type: 'cursor', x: 0..1, y: 0..1, down?, up? }
+function handleCursorMessage(m) {
     const px = m.x * canvas.width;
     const py = (1.0 - m.y) * canvas.height;
     const pointer = pointers[0] || new pointerPrototype();
@@ -1655,7 +1656,7 @@ window.addEventListener('message', (e) => {
     } else {
         updatePointerMoveData(pointer, px, py);
     }
-});
+}
 
 window.addEventListener('keydown', e => {
     if (e.code === 'KeyP')
@@ -1674,9 +1675,9 @@ window.addEventListener('keydown', e => {
     }
 });
 
-// Make external messages (postMessage) act like mouse drags.
-// Each message should look like: { type: 'splat', x: 0..1, y: 0..1, id?: number, color?: [r,g,b] }
-(function () {
+// Make splat messages (postMessage) act like mouse drags.
+// Each message follows contract/splat.schema.json: a rigid body (ID, x/y/z in arena mm, ...) plus type and color.
+const handleSplatMessage = (function () {
     // Map rigid body IDs → pointer indices, so multiple bodies can paint at once (optional)
     const idToIndex = new Map();
 
@@ -1799,21 +1800,16 @@ window.addEventListener('keydown', e => {
     //PATTERN 11 params
     let microsplatActive = false; // can be turned on by putting hands together above head
 
-    window.addEventListener('message', (e) => {
-        const m = e.data;
-        //    printing receuived data
-        //console.log('Received message:', m);
-        if (!m || m.type !== 'splat') return;
-
+    return function handleSplatMessage(m) {
         // Track latest angular velocities from the incoming message
-        latestAngVel.wx = typeof m.wx === 'number' ? m.wx : 0;
-        latestAngVel.wy = typeof m.wy === 'number' ? m.wy : 0;
-        latestAngVel.wz = typeof m.wz === 'number' ? m.wz : 0;
+        latestAngVel.wx = m.wx;
+        latestAngVel.wy = m.wy;
+        latestAngVel.wz = m.wz;
 
-        latestNormVel = m.normVel
-        latestZ[m.id] = m.z
+        latestNormVel = m.norm_abs_vel
+        latestZ[m.ID] = m.z
 
-        // Incoming coords are [0..1]. Convert to CSS px, then to device px using scaleByPixelRatio
+        // Incoming x and y are arena mm. Normalize to [0..1], convert to CSS px, then to device px using scaleByPixelRatio
         const arena_x = 3000; // Assuming a fixed arena size of 3000x3000
         const arena_y = 3000;
 
@@ -1826,10 +1822,10 @@ window.addEventListener('keydown', e => {
         const posY = scaleByPixelRatio(cssY);
 
         //    showing final position on console
-        console.log(`Pointer position: (${posX}, ${posY})`);
+        if (DEBUG) console.log(`Pointer position: (${posX}, ${posY})`);
 
         // Pick a pointer (by body ID if provided)
-        const pointer = pointerForId(m.id);
+        const pointer = pointerForId(m.ID);
 
         // Press if not already down, mirroring the mousedown logic in the file
         if (!pointer.down) {
@@ -1852,7 +1848,7 @@ window.addEventListener('keydown', e => {
 
 
         // If the tracked object is a hand we dynamically adjust splat radius
-        if (m.id === bodyPartsIndex['right_hand'] || m.id === bodyPartsIndex['left_hand']) {
+        if (m.ID === bodyPartsIndex['right_hand'] || m.ID === bodyPartsIndex['left_hand']) {
             const posZ = m.z;
             if (typeof posZ === 'number') {
                 // below dynRadiusBelowZ z we increase splat radius according to depth
@@ -1870,8 +1866,8 @@ window.addEventListener('keydown', e => {
         const maxBloomZ = 1500; // z at which bloom is maximum
         const maxBloomValue = 0.15; // maximum bloom intensity
         const lowerZThreshold = 200; // z below which no bloom is applied and from which smooth change of bloom is applied
-        if ((m.id === bodyPartsIndex['right_foot'] && posZ > leftFootZBefore) ||
-            (m.id === bodyPartsIndex['left_foot'] && posZ > rightFootZBefore)
+        if ((m.ID === bodyPartsIndex['right_foot'] && posZ > leftFootZBefore) ||
+            (m.ID === bodyPartsIndex['left_foot'] && posZ > rightFootZBefore)
         ) {
             if (typeof posZ === 'number') {
                 if (posZ > lowerZThreshold) {
@@ -1884,12 +1880,12 @@ window.addEventListener('keydown', e => {
             //console.log("Setting BLOOM_INTENSITY to ", config.BLOOM_INTENSITY);
         }
 
-        // PATTERN 10: Using objects, e.g. if m.id in stick, rope or object
+        // PATTERN 10: Using objects, e.g. if m.ID in stick, rope or object
         // First we check if any of the objects are closer to the right hand than 200, if so, we turn on tracking for them
         let turnOnDistance = 300;
         for (const objID of objectIDs) {
-            if (m.id === objID) {
-                console.log("OBJECT Checking distances for object ID ", objID);
+            if (m.ID === objID) {
+                if (DEBUG) console.log("OBJECT Checking distances for object ID ", objID);
                 const objPos = [m.x, m.y, m.z];
                 const rightHandPos = rightHandBefore.length === 3 ? rightHandBefore : null;
                 const leftHandPos = leftHandBefore.length === 3 ? leftHandBefore : null;
@@ -1899,9 +1895,9 @@ window.addEventListener('keydown', e => {
                         (objPos[1] - rightHandPos[1]) ** 2 +
                         (objPos[2] - rightHandPos[2]) ** 2
                     );
-                    console.log("OBJECT Distance between object ID ", objID, " and right hand: ", distance);
+                    if (DEBUG) console.log("OBJECT Distance between object ID ", objID, " and right hand: ", distance);
                     if (distance < turnOnDistance) {
-                        console.log("OBJECT Turning ON tracking for object ID ", objID);
+                        if (DEBUG) console.log("OBJECT Turning ON tracking for object ID ", objID);
                         trackedObjects[objID] = true;
                     };
                 }
@@ -1912,7 +1908,7 @@ window.addEventListener('keydown', e => {
                         (objPos[2] - leftHandPos[2]) ** 2
                     );
                     if (distance < turnOnDistance) {
-                        console.log("OBJECT Turning OFF tracking for object ID ", objID);
+                        if (DEBUG) console.log("OBJECT Turning OFF tracking for object ID ", objID);
                         trackedObjects[objID] = false;
                     };
                 }
@@ -1920,17 +1916,17 @@ window.addEventListener('keydown', e => {
         }
 
         // If the current tracked object is set to true, we set a bright color for it and make a splat
-        if (objectIDs.includes(m.id)) {
-            if (trackedObjects[m.id]) {
-                console.log("OBJECT ", m.id);
+        if (objectIDs.includes(m.ID)) {
+            if (trackedObjects[m.ID]) {
+                if (DEBUG) console.log("OBJECT ", m.ID);
                 pointer.color = { r: 3.0, g: 3.0, b: 0.0 }; // bright yellow
                 //appendning id to trackedBodyParts if not already there
-                if (!trackedBodyParts.includes(m.id)) {
-                    trackedBodyParts.push(m.id);
+                if (!trackedBodyParts.includes(m.ID)) {
+                    trackedBodyParts.push(m.ID);
                 }
             } else {
                 // remove id from trackedBodyParts if exists
-                const index = trackedBodyParts.indexOf(m.id);
+                const index = trackedBodyParts.indexOf(m.ID);
                 if (index > -1) {
                     trackedBodyParts.splice(index, 1);
                 }
@@ -1938,26 +1934,22 @@ window.addEventListener('keydown', e => {
         }
 
         //PATTERN 3: Color Speed: change color according to linear velocity of the tracked object
-        if (typeof m.normVel === 'number') {
-            const speed = m.normVel;
-            // Map speed to an index in the color palette. normVel is between 0 and 1 we need the output to be between 0 and 99
-            let colorIndex = Math.floor(Math.max(0, Math.min(speed, 1.0)) * 99);
-            console.log("Setting color index to ", colorIndex, " for speed ", speed);
-            const newColor = colorPalette[colorIndex];
-            console.log("Setting pointer color to ", newColor);
-            pointer.color = newColor;
-        }
+        // Map speed to an index in the color palette. norm_abs_vel is between 0 and 1 we need the output to be between 0 and 99
+        const colorIndex = Math.floor(Math.max(0, Math.min(m.norm_abs_vel, 1.0)) * 99);
+        if (DEBUG) console.log("Setting color index to ", colorIndex, " for speed ", m.norm_abs_vel);
+        pointer.color = colorPalette[colorIndex];
+        if (DEBUG) console.log("Setting pointer color to ", pointer.color);
 
         //PATTERN 4: Density Control: change density diffusion according to hand-hand closeness
         const minDensityDissipation = 0.01;
         const maxDensityDissipation = 4.5;
-        if ((m.id === bodyPartsIndex['left_hand'] && rightHandBefore.length === 3) ||
-            (m.id === bodyPartsIndex['right_hand'] && leftHandBefore.length === 3)) {
+        if ((m.ID === bodyPartsIndex['left_hand'] && rightHandBefore.length === 3) ||
+            (m.ID === bodyPartsIndex['right_hand'] && leftHandBefore.length === 3)) {
             var handLeftPos = leftHandBefore;
             var handRightPos = rightHandBefore;
-            if (m.id === bodyPartsIndex['left_hand']) {
+            if (m.ID === bodyPartsIndex['left_hand']) {
                 handLeftPos = [m.x, m.y, m.z];
-            } else if (m.id === bodyPartsIndex['right_hand']) {
+            } else if (m.ID === bodyPartsIndex['right_hand']) {
                 handRightPos = [m.x, m.y, m.z];
             }
 
@@ -1980,12 +1972,12 @@ window.addEventListener('keydown', e => {
             } else {
                 config.DENSITY_DISSIPATION = maxDensityDissipation;
             }
-            console.log("Setting DENSITY_DISSIPATION to ", config.DENSITY_DISSIPATION);
+            if (DEBUG) console.log("Setting DENSITY_DISSIPATION to ", config.DENSITY_DISSIPATION);
         }
 
         //PATTERN 5: Unique Feet: Feet are tracked with black (at 0) to gray (at 2000) splat colors according to height
         if (handsOn) {
-            if (m.id === bodyPartsIndex['left_foot'] || m.id === bodyPartsIndex['right_foot']) {
+            if (m.ID === bodyPartsIndex['left_foot'] || m.ID === bodyPartsIndex['right_foot']) {
                 const posZ = m.z;
                 if (typeof posZ === 'number') {
                     const z = Math.max(0, Math.min(posZ, 2000)) / 8000;
@@ -2052,7 +2044,7 @@ window.addEventListener('keydown', e => {
         }
 
         if (fallExplosionStarted && (Date.now() - fallExplosionStartTime) > fallExplosionDT) {
-            console.log("Generating fall explosion splats at coordinates: ", fallExplosionSplashCoordinates);
+            if (DEBUG) console.log("Generating fall explosion splats at coordinates: ", fallExplosionSplashCoordinates);
 
             fallExplosionSplashCoordinates.forEach((coord, index) => {
                 const posX = scaleByPixelRatio(coord[0]);
@@ -2069,7 +2061,7 @@ window.addEventListener('keydown', e => {
                 updatePointerDownData(pointer, -1, posX, posY);
                 pointer.color = fallExplosionPalette[fallExplosionColorIndex];
                 fallExplosionColorIndex = Math.min(fallExplosionColorIndex + 1, fallExplosionPalette.length - 1);
-                console.log("Fall corner pointer DOWN: ", pointer.color);
+                if (DEBUG) console.log("Fall corner pointer DOWN: ", pointer.color);
                 updatePointerMoveData(pointer, posX, posY);
 
                 // force the splat in case delta ends up 0
@@ -2077,7 +2069,7 @@ window.addEventListener('keydown', e => {
                 // map radius between 0.5 and 2 according to distance from target
                 pointer.splatRadius = 0.5 + normDist * (2.0 - 0.5);
 
-                console.log("Fall corner pointer: ", pointer);
+                if (DEBUG) console.log("Fall corner pointer: ", pointer);
             });
 
             fallExplosionStartTime = Date.now();
@@ -2139,11 +2131,11 @@ window.addEventListener('keydown', e => {
         //                let dirX = 0;
         //                let dirY = 1; // fallback
         //
-        //                if (m.id === bodyPartsIndex['right_foot'] && rightFootBefore.length === 3) {
+        //                if (m.ID === bodyPartsIndex['right_foot'] && rightFootBefore.length === 3) {
         //                    // posX, posY are the *current* arena coords of the right foot
         //                    dirX = m.x - rightFootBefore[0];
         //                    dirY = m.y - rightFootBefore[1];
-        //                } else if (m.id === bodyPartsIndex['left_foot'] && leftFootBefore.length === 3) {
+        //                } else if (m.ID === bodyPartsIndex['left_foot'] && leftFootBefore.length === 3) {
         //                    // same for left foot
         //                    dirX = m.x - leftFootBefore[0];
         //                    dirY = m.y - leftFootBefore[1];
@@ -2269,7 +2261,7 @@ window.addEventListener('keydown', e => {
         //            }
         //        }
 
-        //PATTERN 9: Head Tilt Color Palette Shift: changing the color palette slice according to the roll of the head
+        //PATTERN 9: Head Tilt Color Palette Shift: changing the color palette slice according to the forward lean (pitch) of the head
         // Head tilt color mode activation by moving right hand close to head and keeping still for 50 timesteps while
         // right-left hand distance are above threshold
         const headProximityThreshold = 400; // distance below which head tilt color mode is activated
@@ -2278,9 +2270,9 @@ window.addEventListener('keydown', e => {
         const velTh = 150; // maximum velocity to consider hand as still
         if (leftHandBefore.length === 3 && rightHandBefore.length === 3 &&
             (Date.now() - timeWhenLastTrigger) > 5000) {
-            const headX = m.id === bodyPartsIndex['head'] ? m.x : 0;
-            const headY = m.id === bodyPartsIndex['head'] ? m.y : 0;
-            const headZ = m.id === bodyPartsIndex['head'] ? m.z : 0;
+            const headX = m.ID === bodyPartsIndex['head'] ? m.x : 0;
+            const headY = m.ID === bodyPartsIndex['head'] ? m.y : 0;
+            const headZ = m.ID === bodyPartsIndex['head'] ? m.z : 0;
 
             const distanceToHeadLeft = Math.sqrt(
                 (leftHandBefore[0] - headX) ** 2 +
@@ -2309,7 +2301,7 @@ window.addEventListener('keydown', e => {
                 Math.abs(leftHandVelBefore[1]) < velTh &&
                 Math.abs(leftHandVelBefore[2]) < velTh) {
                 triggerCounter += 1;
-                console.log("PATTERN9 Trigger counter: ", triggerCounter);
+                if (DEBUG) console.log("PATTERN9 Trigger counter: ", triggerCounter);
             }
 
             if (distanceToHeadRight < headProximityThreshold &&
@@ -2320,7 +2312,7 @@ window.addEventListener('keydown', e => {
                 Math.abs(rightHandVelBefore[1]) < velTh &&
                 Math.abs(rightHandVelBefore[2]) < velTh) {
                 triggerOffCounter += 1;
-                console.log("PATTERN9 Trigger OFF counter: ", triggerCounter);
+                if (DEBUG) console.log("PATTERN9 Trigger OFF counter: ", triggerCounter);
             }
 
             //PATTERN 12 trigger
@@ -2332,7 +2324,7 @@ window.addEventListener('keydown', e => {
                 rightHandBefore[2] > headBefore[2] &&
                 (Date.now() - timeWhenLastTriggerHandsOn) > 5000) {
                 handsOnTriggerCounter += 1;
-                console.log("PATTERN12 Hands-on Trigger counter: ", handsOnTriggerCounter);
+                if (DEBUG) console.log("PATTERN12 Hands-on Trigger counter: ", handsOnTriggerCounter);
             }
         }
 
@@ -2377,7 +2369,7 @@ window.addEventListener('keydown', e => {
             }
 
             for (let i = 0; i < 20; i++) {
-                console.log("PATTERN9 Creating swirl splats to signal activation");
+                if (DEBUG) console.log("PATTERN9 Creating swirl splats to signal activation");
                 let normX = (-((leftHandBefore[0] + rightHandBefore[0]) / 2) + arena_x) / (2 * arena_x);
                 let normY = (((leftHandBefore[1] + rightHandBefore[1]) / 2) + arena_y) / (2 * arena_y);
                 let swirlPosXstart = normX * canvas.clientWidth;
@@ -2412,7 +2404,7 @@ window.addEventListener('keydown', e => {
             timeWhenLastTrigger = Date.now();
             // Showing on status
             for (let i = 0; i < 20; i++) {
-                console.log("PATTERN9 Creating swirl splats to signal activation");
+                if (DEBUG) console.log("PATTERN9 Creating swirl splats to signal activation");
                 let normX = (-((leftHandBefore[0] + rightHandBefore[0]) / 2) + arena_x) / (2 * arena_x);
                 let normY = (((leftHandBefore[1] + rightHandBefore[1]) / 2) + arena_y) / (2 * arena_y);
                 let swirlPosXstart = normX * canvas.clientWidth;
@@ -2443,7 +2435,7 @@ window.addEventListener('keydown', e => {
             triggerOffCounter = 0;
             timeWhenLastTrigger = Date.now();
             for (let i = 0; i < 20; i++) {
-                console.log("PATTERN9 Creating swirl splats to signal activation");
+                if (DEBUG) console.log("PATTERN9 Creating swirl splats to signal activation");
                 let normX = (-((leftHandBefore[0] + rightHandBefore[0]) / 2) + arena_x) / (2 * arena_x);
                 let normY = (((leftHandBefore[1] + rightHandBefore[1]) / 2) + arena_y) / (2 * arena_y);
                 let swirlPosXstart = normX * canvas.clientWidth;
@@ -2553,11 +2545,11 @@ window.addEventListener('keydown', e => {
         let maxVz = 3500;
         let dynNumSwirlSplatMax = 6;
         // Carrying out microsplats if active
-        if (microsplatActive && (m.id === bodyPartsIndex['right_hand'] || m.id === bodyPartsIndex['left_hand'])) {
+        if (microsplatActive && (m.ID === bodyPartsIndex['right_hand'] || m.ID === bodyPartsIndex['left_hand'])) {
             if (typeof m.vz === 'number') {
                 const vz = m.vz; // vertical velocity
                 if (Math.abs(vz) > activatedSwirlVelocityThreshold) {
-                    console.log("Creating swirl for hand ID ", m.id, " with vz ", vz);
+                    if (DEBUG) console.log("Creating swirl for hand ID ", m.ID, " with vz ", vz);
                     // calculating number of splats according to vz magnitude, normalizing between minVz and maxVz
                     let dynNumSwirlSplat = Math.floor((Math.abs(m.vz) - minVz) / (maxVz - minVz) * dynNumSwirlSplatMax);
                     for (let i = 0; i < dynNumSwirlSplat; i++) {
@@ -2583,7 +2575,7 @@ window.addEventListener('keydown', e => {
                             swirlPointer.moved = true; // force the splat
                             swirlPointer.splatRadius = 0.05 + Math.random() * 0.1; // small random radius
                         }
-                        console.log("Swirl pointer: ", swirlPointer);
+                        if (DEBUG) console.log("Swirl pointer: ", swirlPointer);
                     }
                 }
             }
@@ -2591,7 +2583,7 @@ window.addEventListener('keydown', e => {
 
 
         // Change color according to head tilt if mode is activated
-        if (headTiltColorMode && m.id === bodyPartsIndex['head']) {
+        if (headTiltColorMode && m.ID === bodyPartsIndex['head']) {
             // Forward lean = asin(-forward.z), forward = q applied to (0, 1, 0); degrees, positive leaning forward
             const forwardZ = 2 * (m.qy * m.qz + m.qw * m.qx);
             let pitch = Math.asin(Math.max(-1, Math.min(1, -forwardZ))) * 180 / Math.PI;
@@ -2611,7 +2603,7 @@ window.addEventListener('keydown', e => {
                 const rgb = HSVtoRGB((hue + 360) % 360 / 360, 1.0, 1.0);
                 colorPalette.push(rgb);
             }
-            console.log("Head raw pitch: ", rawPitch, "clamped: ", pitch, " setting color palette hues between: ", minHue, "-", maxHue);
+            if (DEBUG) console.log("Head raw pitch: ", rawPitch, "clamped: ", pitch, " setting color palette hues between: ", minHue, "-", maxHue);
         }
 
         // set back to default palette if mode is not activated
@@ -2621,19 +2613,19 @@ window.addEventListener('keydown', e => {
 
 
         // Updating memory variables
-        leftFootZBefore = m.id === bodyPartsIndex['left_foot'] ? m.z : leftFootZBefore;
-        rightFootZBefore = m.id === bodyPartsIndex['right_foot'] ? m.z : rightFootZBefore;
-        leftHandBefore = m.id === bodyPartsIndex['left_hand'] ? [m.x, m.y, m.z] : leftHandBefore;
-        rightHandBefore = m.id === bodyPartsIndex['right_hand'] ? [m.x, m.y, m.z] : rightHandBefore;
-        chestFrontBefore = m.id === bodyPartsIndex['chest_front'] ? [m.x, m.y, m.z] : chestFrontBefore;
-        chestBackBefore = m.id === bodyPartsIndex['chest_back'] ? [m.x, m.y, m.z] : chestBackBefore;
-        leftFootBefore = m.id === bodyPartsIndex['left_foot'] ? [m.x, m.y, m.z] : leftFootBefore;
-        rightFootBefore = m.id === bodyPartsIndex['right_foot'] ? [m.x, m.y, m.z] : rightFootBefore;
-        headBefore = m.id === bodyPartsIndex['head'] ? [m.x, m.y, m.z] : headBefore;
-        leftHandVelBefore = m.id === bodyPartsIndex['left_hand'] ? [m.vx, m.vy, m.vz] : leftHandVelBefore;
-        rightHandVelBefore = m.id === bodyPartsIndex['right_hand'] ? [m.vx, m.vy, m.vz] : rightHandVelBefore;
+        leftFootZBefore = m.ID === bodyPartsIndex['left_foot'] ? m.z : leftFootZBefore;
+        rightFootZBefore = m.ID === bodyPartsIndex['right_foot'] ? m.z : rightFootZBefore;
+        leftHandBefore = m.ID === bodyPartsIndex['left_hand'] ? [m.x, m.y, m.z] : leftHandBefore;
+        rightHandBefore = m.ID === bodyPartsIndex['right_hand'] ? [m.x, m.y, m.z] : rightHandBefore;
+        chestFrontBefore = m.ID === bodyPartsIndex['chest_front'] ? [m.x, m.y, m.z] : chestFrontBefore;
+        chestBackBefore = m.ID === bodyPartsIndex['chest_back'] ? [m.x, m.y, m.z] : chestBackBefore;
+        leftFootBefore = m.ID === bodyPartsIndex['left_foot'] ? [m.x, m.y, m.z] : leftFootBefore;
+        rightFootBefore = m.ID === bodyPartsIndex['right_foot'] ? [m.x, m.y, m.z] : rightFootBefore;
+        headBefore = m.ID === bodyPartsIndex['head'] ? [m.x, m.y, m.z] : headBefore;
+        leftHandVelBefore = m.ID === bodyPartsIndex['left_hand'] ? [m.vx, m.vy, m.vz] : leftHandVelBefore;
+        rightHandVelBefore = m.ID === bodyPartsIndex['right_hand'] ? [m.vx, m.vy, m.vz] : rightHandVelBefore;
 
-        if (trackedBodyParts.includes(m.id)) {
+        if (trackedBodyParts.includes(m.ID)) {
             // Defining the parameters of the splat to be visualized and save it in the pointer move data
             updatePointerMoveData(pointer, posX, posY, splatRadius = splatRadius);
             //console.log("Fall body part pointer: ", pointer);
@@ -2644,8 +2636,17 @@ window.addEventListener('keydown', e => {
                 updatePointerUpData(pointer);
             }, 60); // ms; tweak to taste for smoother/continuous drags
         };
-    });
+    };
 })();
+
+// Single postMessage dispatcher for the sim, keyed on message type
+window.addEventListener('message', (e) => {
+    const m = e.data;
+    switch (m?.type) {
+        case 'splat': handleSplatMessage(m); break;
+        case 'cursor': handleCursorMessage(m); break;
+    }
+});
 
 function updatePointerDownData(pointer, id, posX, posY) {
     pointer.id = id;

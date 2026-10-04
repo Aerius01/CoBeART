@@ -1,9 +1,37 @@
 (function () {
+  const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__?.debug === true;
+  const BRIDGE_FRAMERATE_HZ = 120;
+  const SPLAT_COLOR = Object.freeze([1, 0.6, 0.2]);
+
+  // A splat is the frame's rigid-body entry unchanged plus type and color (contract/splat.schema.json).
+  const toSplat = (rigidBody) => ({ type: 'splat', ...rigidBody, color: SPLAT_COLOR });
+
+  function createOverlay(frameEl) {
+    const overlay = document.createElement('div');
+    overlay.id = 'textOverlay';
+    Object.assign(overlay.style, {
+      position: 'absolute',
+      top: `${frameEl.offsetTop}px`,
+      left: `${frameEl.offsetLeft}px`,
+      width: `${frameEl.offsetWidth}px`,
+      height: `${frameEl.offsetHeight}px`,
+      pointerEvents: 'none',
+      color: 'white',
+      backgroundColor: 'rgba(0, 0, 0, 0.0)',
+      fontFamily: 'monospace',
+      fontSize: '12px',
+      overflowY: 'auto',
+      padding: '10px',
+    });
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
   function init() {
     // Finds the id=fluidFrame iframe element that was created in the index.html file,
     // and that holds the embedded fluid simulation.
-    let frameEl = document.getElementById('fluidFrame') 
-            || document.getElementById('moltenFrame') 
+    let frameEl = document.getElementById('fluidFrame')
+            || document.getElementById('moltenFrame')
             || document.getElementById('inkFrame');
      if (!frameEl) {
        frameEl = document.createElement('iframe');
@@ -18,25 +46,19 @@
        host.appendChild(frameEl);
      }
 
-//     Create the overlay element for logging
-     let overlay = document.getElementById('textOverlay');
-     if (!overlay) {
-       overlay = document.createElement('div');
-       overlay.id = 'textOverlay';
-       overlay.style.position = 'absolute';
-       overlay.style.top = `${frameEl.offsetTop}px`;
-       overlay.style.left = `${frameEl.offsetLeft}px`;
-       overlay.style.width = `${frameEl.offsetWidth}px`;
-       overlay.style.height = `${frameEl.offsetHeight}px`;
-       overlay.style.pointerEvents = 'none';
-       overlay.style.color = 'white';
-       overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.0)';
-       overlay.style.fontFamily = 'monospace';
-       overlay.style.fontSize = '12px';
-       overlay.style.overflowY = 'auto';
-       overlay.style.padding = '10px';
-       document.body.appendChild(overlay);
-     }
+    // Debug only: give embedded sims ?debug too (their own URL has no query string; one reload at startup)
+    if (DEBUG) {
+      for (const frame of document.querySelectorAll('iframe[src]')) {
+        const url = new URL(frame.src, location.href);
+        if (!url.searchParams.has('debug')) {
+          url.searchParams.set('debug', '');
+          frame.src = url.href;
+        }
+      }
+    }
+
+    // Debug only: overlay with the latest rigid-body and audio values
+    const overlay = DEBUG ? (document.getElementById('textOverlay') ?? createOverlay(frameEl)) : null;
 
     // Connects to the /viewer namespace on the server hosted in electron/main.js
     const socket = window.viewerSocket || io('/viewer', { transports: ['websocket'] });
@@ -44,126 +66,58 @@
     socket.on('connect', () => console.log('[fluid-bridge] socket connected', socket.id));
     socket.on('disconnect', () => console.log('[fluid-bridge] socket disconnected'));
 
-    let fluidReady = true;
-    const outbox = [];
-
-    // posting messages to all iframes, and to the window itself
-    function postToWindow(msg) {
-      for (const frame of document.querySelectorAll('iframe')) {
-        if (frame.contentWindow) {
-          frame.contentWindow.postMessage(msg, '*');
-        }
+    // Post a message to the given iframes, and to the window itself (for top-level scripts)
+    function postToWindows(msg, frames) {
+      for (const frame of frames) {
+        frame.contentWindow?.postMessage(msg, '*');
       }
-      // Also broadcast to self (for top-level scripts)
       window.postMessage(msg, '*');
     }
 
-    //create posting frequency stable
-    let latestFrame = null; // Store the latest frame
-    let latestAudio = null; // Store the latest audio metrics
-    const bridgeFramerate = 120; // Target bridge framerate in Hz
+    let latestFrame = null; // Latest /viewer frame not yet forwarded
+    let latestAudio = null; // Latest audio metrics seen in any frame
 
-    // Receive frames emitted by the electron/main.js server and store the latest one
+    // Receive frames emitted by the hub and keep only the latest one
     socket.on('frame', (payload) => {
-      if (payload) {
-        console.log('[fluid-bridge] received frame', payload);
-        latestFrame = payload; // Overwrite with the latest frame
-        if (payload.audio && typeof payload.audio === 'object') {
-          latestAudio = payload.audio;
-        }
-        showOverlay();
-      }
+      if (DEBUG) console.log('[fluid-bridge] received frame', payload);
+      latestFrame = payload;
+      if (payload.audio) latestAudio = payload.audio;
     });
 
-    // Update the overlay with the latest frame data
-    function showOverlay() {
-      if (latestFrame) {
-        const list = Array.isArray(latestFrame.rigidbodies) ? latestFrame.rigidbodies : [];
-        let overlayText = '';
-
-        if (latestAudio) {
-          const rms = Number(latestAudio.rms) || 0;
-          const peak = Number(latestAudio.peak) || 0;
-          const zcr = Number(latestAudio.zcr) || 0;
-          const f0 = Number(latestAudio.dominant_frequency) || 0;
-          overlayText += `Audio — RMS: ${rms.toFixed(4)} | Peak: ${peak.toFixed(4)} | ZCR: ${zcr.toFixed(4)} | f0: ${f0.toFixed(1)} Hz<br><br>`;
-        }
-        for (const rb of list) {
-          const id = Number(rb.ID ?? rb.id ?? 0);
-          const x = rb.x || 0;
-          const y = rb.y || 0;
-          const z = rb.z || 0;
-          const vx = rb.vx || 0;
-          const vy = rb.vy || 0;
-          const vz = rb.vz || 0;
-          const qx = rb.qx ?? 0;
-          const qy = rb.qy ?? 0;
-          const qz = rb.qz ?? 0;
-          const qw = rb.qw ?? 1;
-          const wx = rb.wx || 0;
-          const wy = rb.wy || 0;
-          const wz = rb.wz || 0;
-          const absVel = rb.abs_vel || 0;
-          const normVel = rb.norm_abs_vel || 0;
-
-          overlayText += `Splat ID: ${id}<br>
-Position: (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})<br>
-Velocity: (${vx.toFixed(2)}, ${vy.toFixed(2)}, ${vz.toFixed(2)})<br>
-|V|: ${absVel.toFixed(2)} (norm: ${normVel.toFixed(2)})<br>
-Orientation q: (${qx.toFixed(3)}, ${qy.toFixed(3)}, ${qz.toFixed(3)}, ${qw.toFixed(3)})<br>
-Angular Velocity: (wx: ${wx.toFixed(2)}, wy: ${wy.toFixed(2)}, wz: ${wz.toFixed(2)}) deg/s<br><br>`;
-        }
-//        console.log('[fluid-bridge] updating overlay', overlayText);
-        overlay.innerHTML = overlayText; // Update the overlay text
+    // Update the overlay with the given frame's data
+    function showOverlay(frame) {
+      let overlayText = '';
+      if (latestAudio) {
+        const { rms, peak, zcr, dominant_frequency: f0 } = latestAudio;
+        overlayText += `Audio: RMS: ${rms.toFixed(4)} | Peak: ${peak.toFixed(4)} | ZCR: ${zcr.toFixed(4)} | f0: ${f0.toFixed(1)} Hz<br><br>`;
       }
-    };
+      for (const rb of frame.rigidbodies) {
+        overlayText += `Splat ID: ${rb.ID}<br>
+Position: (${rb.x.toFixed(2)}, ${rb.y.toFixed(2)}, ${rb.z.toFixed(2)})<br>
+Velocity: (${rb.vx.toFixed(2)}, ${rb.vy.toFixed(2)}, ${rb.vz.toFixed(2)})<br>
+|V|: ${rb.abs_vel.toFixed(2)} (norm: ${rb.norm_abs_vel.toFixed(2)})<br>
+Orientation q: (${rb.qx.toFixed(3)}, ${rb.qy.toFixed(3)}, ${rb.qz.toFixed(3)}, ${rb.qw.toFixed(3)})<br>
+Angular Velocity: (wx: ${rb.wx.toFixed(2)}, wy: ${rb.wy.toFixed(2)}, wz: ${rb.wz.toFixed(2)}) deg/s<br><br>`;
+      }
+      overlay.innerHTML = overlayText;
+    }
 
-
-    // Timer to send the latest frame at the bridge framerate
-    // setInterval is a function that calls a function repeatedly at a fixed interval.
+    // Forward the latest frame at the bridge framerate, one splat per rigid body
     setInterval(() => {
-      if (latestFrame) {
-        const list = Array.isArray(latestFrame.rigidbodies) ? latestFrame.rigidbodies : [];
-        console.log('DEBUG: preparing to send splats', list);
-        for (const rb of list) {
-          const id = Number(rb.ID ?? rb.id ?? 0);
-          const x = rb.x || 0;
-          const y = rb.y || 0;
-          const z = rb.z || 0;
-          const vx = rb.vx || 0;
-          const vy = rb.vy || 0;
-          const vz = rb.vz || 0;
-          const qx = rb.qx ?? 0;
-          const qy = rb.qy ?? 0;
-          const qz = rb.qz ?? 0;
-          const qw = rb.qw ?? 1;
-          const wx = rb.wx || 0;
-          const wy = rb.wy || 0;
-          const wz = rb.wz || 0;
-          const color = [1, 0.6, 0.2];
-          const absVel = rb.abs_vel;
-          const normVel = rb.norm_abs_vel;
-          postToWindow({ type: 'splat', id, x, y, z, vx, vy, vz, qx, qy, qz, qw, wx, wy, wz, absVel, normVel, color });
-//          console.log('DEBUG: sent splat', absVel, normVel);
-          //          const consoleMessage = `[fluid-bridge] sent splat id:${id} pos:(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) vel:(${vx.toFixed(2)}, ${vy.toFixed(2)}, ${vz.toFixed(2)})`;
-          //          console.log('[fluid-bridge] sent splat', { id, x, y , z, vx, vy, vz, qx, qy, qz, qw, wx, wy, wz });
-        }
-        latestFrame = null; // Clear the frame after sending
+      if (!latestFrame) return;
+      const frame = latestFrame;
+      latestFrame = null;
+      if (DEBUG) console.log('[fluid-bridge] sending splats', frame.rigidbodies);
+      const frames = document.querySelectorAll('iframe');
+      for (const rb of frame.rigidbodies) {
+        postToWindows(toSplat(rb), frames);
       }
-    }, 1000 / bridgeFramerate);
+      if (DEBUG) showOverlay(frame);
+    }, 1000 / BRIDGE_FRAMERATE_HZ);
   }
 
-  // This block instructs the browser to call the init function only once the DOM is fully loaded, 
+  // This block instructs the browser to call the init function only once the DOM is fully loaded,
   // such that the script does not reference elements that don't exist.
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 })();
-
-
-
-
-
-
-
-
-

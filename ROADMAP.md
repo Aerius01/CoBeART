@@ -2,7 +2,7 @@
 
 Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point into that review.
 
-**Status (2026-10-04):** Phases 0 and 1 are done and merged into `main` (pushed). Next: Phase 2, branched from `main`. Phase 1 changed several WP texts below (D5 is now a quaternion contract; WP 2.2 and 3.2 gained scope) and added **Carry-over from Phase 1** notes to later WPs: pass them to the agent with the WP block.
+**Status (2026-10-04):** Phases 0, 1 and 2 are done and merged into `main` (pushed). Next: Phase 3, branched from `main`. Earlier phases added **Carry-over from Phase 1** and **Carry-over from Phase 2** notes to later WPs: pass them to the agent with the WP block.
 
 ## How this roadmap is meant to run
 
@@ -31,6 +31,13 @@ Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point
 - **JS hub in worktrees:** a worktree has no `node_modules`. Run `npm ci` in its `cobeart-app/` before anything that boots the hub, including `pytest cobeart` (the simulator integration tests skip without it).
 - **Playwright:** the MCP browser (Firefox) is installed in `~/.cache/ms-playwright/`. Agents share one browser, so console errors from another agent's page can appear. Screenshots land in `.playwright-mcp/` (gitignored).
 - Agents call the interpreter directly, `~/miniconda3/envs/splat-env/bin/python`, never `conda run` (it masks output). The project CLAUDE.md says the same as of Phase 0.
+- **Phase 2 lessons (master and agents):**
+  - Never `pkill -f "<pattern>"` with a pattern that also appears in the running shell command (it kills its own shell) or that matches other agents' hubs (`node server.js`). Stop a hub by the PID from `ss -ltnp | grep ':<port> '`.
+  - The hub's reject log is rate-limited per kind (5 s), so run each `--fault` check against a fresh hub.
+  - Merged `/viewer` frames with audio are about 48 KB (the 16x128 spectrum). A Python `/viewer` watcher cannot decode 240 of them per second and falls behind, so time-based checks must use the hub's `timestamp` fields, not receipt time. A newly connected viewer also gets the hub's stored `lastFrame` first, however old.
+  - Playwright screenshots must be saved under the repo (`.playwright-mcp/`); the scratchpad is outside its allowed roots.
+  - Parallel agents share one scratchpad directory: each uses its own subfolder.
+  - The Splat view only paints hands, feet and tracked objects (`trackedBodyParts` in `fluid/script.js`, from `body_map.json`); the head and other IDs drive patterns but draw nothing. `--simulate` sends IDs 0-2, so Splat shows two bodies and Ink shows three.
 
 ### Shared conventions (every agent follows these)
 
@@ -207,6 +214,12 @@ Depends on: `config/cobeart.yaml` (1.8), the rewritten sender/emitter (2.2, 2.3)
 ### WP 3.1: Python reads the shared config (§4.2, P1 #7)
 - **Model:** Sonnet. Broad but mechanical: one loader, many injection sites.
 - **Owns:** `cobeart/settings/` (replace `streaming.py`), `cobeart/audiocapture/utils.py`, `cobeart/packagesender/sender.py`, `cobeart/packagesender/metrics.py`, `cobeart/audiocapture/emitter.py`, `cobeart/optitrackclient/start_client.py`, `cobeart/simulator/`, `cobeart/audiocapture/capture.py` (`main()` only), `pyproject.toml`
+- **Carry-over from Phase 2:**
+  - `start_client.py` resolves the hub URL from `--url` / `COBEART_SOCKETIO_URL` (validated by `hub_url` at parse time) and passes it to `PayloadSender`; `get_socketio_url()` in `audiocapture/utils.py` is still used by the audio emitter. Replace both with `Settings`. `PayloadSender(reconnect_interval_s)` and `MetricsTracker(min_dt_s)` are constructor args ready for config.
+  - `sender.py` builds the client with `json=StrictJson` (`allow_nan=False`). python-socketio applies a `json=` codec process-wide, not per client.
+  - The simulator dies with `BadNamespaceError` after `--fault nan` (the hub drops the connection on the NaN literal). Make it log and exit cleanly, or reconnect.
+  - `capture.py` `main()` still uses `print`, the interactive device prompt (no `--device` flag; the gate pipes a number into stdin), and `select_audio_device` calls bare `exit()` when no microphone exists. `main()` already exits 1 when `capturer.capture_error` is set (WP 2.3).
+  - Audio producers should also serialize with `allow_nan=False`, like the motion sender.
 - **Scope:** Frozen `Settings` dataclass tree loaded once from `config/cobeart.yaml` (path overridable by `COBEART_CONFIG`), `COBEART_SOCKETIO_URL` still overrides the URL. Delete `streaming.py` and `get_socketio_url`; inject settings into sender, tracker, emitter, client, and simulator (which uses the arena bounds, body map IDs and rates instead of its own defaults). Add `pyyaml`. Register `start-simulator = "cobeart.simulator.__main__:main"`. In `capture.py` `main()`, make emission the default (the Phase 3 gate runs `start-audio-client` with no flags; keep a `--no-emit` for local metering) and build `AudioCapturer` from the `audio` settings section (including `beat_detection`); leave the class itself and its DSP defaults to WP 3.4 (not in scope per review).
 - **Test:** loader parses the real file; missing required key raises a specific error naming the key.
 - **Accept:** pytest passes; both clients start using only the config file.
@@ -214,6 +227,11 @@ Depends on: `config/cobeart.yaml` (1.8), the rewritten sender/emitter (2.2, 2.3)
 ### WP 3.2: Electron and frontend read the shared config (§4.2, §3.3.C, P1 #7, #10)
 - **Model:** Sonnet. Same pattern as 3.1 on the JS side.
 - **Owns:** `cobeart-app/electron/main.js`, `cobeart-app/electron/hub.js`, `cobeart-app/server.js`, `cobeart-app/package.json`, `cobeart-app/public/fluid-bridge.js`, `cobeart-app/public/composite/composite.js`, `cobeart-app/test/`
+- **Carry-over from Phase 2:**
+  - `main.js` has a pure `resolveViewUrl(shader, usePerfMode)`, a module-level `PORT`, and `DEBUG = process.env.COBEART_DEBUG === '1'` gating DevTools: move `PORT` and `DEBUG` to config. Startup failures exit 1 via a `.catch` on `app.whenReady()`.
+  - `createHub` takes `audioMaxAgeMs` and `now`; it reads `contract/*.schema.json` at runtime from `../../contract`, which any future Electron packaging must include. The hub caps messages at 256 KiB (`MAX_PAYLOAD_BYTES`), rejects producer-sent `audio` and duplicate IDs, and has no CORS. There is no body-count cap: add `maxItems` from `max_num_objects` (contract or config).
+  - `fluid-bridge.js` has `SPLAT_COLOR` as a module constant and creates its overlay only when `DEBUG`. In debug mode it appends `?debug` to every iframe `src` (one reload) so embedded sims see the flag; when `__COBEART_CONFIG__` lands, iframes must get it too (the sims read only their own `window`).
+  - `composite.js:~668` posts old-shape splats (`id`, x/y as 0..1, no `norm_abs_vel`) inside `try{}catch(_){}`: conform them to `splat.schema.json`.
 - **Scope:** Load `config/cobeart.yaml` once in the main process (`js-yaml`), pass port and `audioMaxAgeMs` to `createHub`, window size to `BrowserWindow`, inject the frontend subset as `window.__COBEART_CONFIG__` (replacing `__SOCKET_PORT__`; also serve it at `/config.json` so `npm run web` pages get it). `composite.js` uses injected arena, z-threshold, clap distance, and `show_interactive_elements` (config sets it `false`, code today has `true`: an intended visible change); trim `rightHandHistory` like `leftHandHistory`; fix the debug splats (~667) to match `splat.schema.json`; delete its commented-out blocks; gate per-frame logs. `fluid-bridge.js` uses injected framerate and color.
 - **Accept:** changing arena in the YAML changes composite normalization with no JS edit; `npm test` passes.
 
@@ -231,6 +249,7 @@ Depends on: `config/cobeart.yaml` (1.8), the rewritten sender/emitter (2.2, 2.3)
 - **Model:** Opus. Real-time threading, madmom latency, and a convergence test that must be robust rather than tuned to pass.
 - **Owns:** `cobeart/audiocapture/capture.py` (`AudioCapturer` class only, not `main()`), `cobeart/audiocapture/beat/`, `cobeart/audiocapture/tests/`
 - **Carry-over from Phase 1:** with beat detection off (today's default) `tempo_bpm` stays null forever, which the schema cannot tell apart from "not yet stable"; turning detection on by default resolves it.
+- **Carry-over from Phase 2:** the capture thread now records failures in `capture_error` (WP 2.3); the beat processing thread has no equivalent and should surface errors the same way. `AudioCapturer.__init__` still silently falls back to the requested `sample_rate` when `sc.default_samplerate()` raises. `AudioCapturer(mic=...)` accepts an injected `AudioSource` Protocol, so the click-track test needs no device.
 - **Scope:**
   - `AudioCapturer(enable_beat_detection=True)` by default. Remove the code that silently turns beat detection off when madmom is missing (`capture.py:~143`), so a missing madmom fails at startup with a clear error.
   - In `beat/detector.py`, replace the lazy "optional" import with a normal top-level import, since madmom is now required.
@@ -290,6 +309,13 @@ Depends on everything above.
 - **Split `AudioCapturer`** into capture, analysis, emission (P2 #15). Only if the audio module keeps growing.
 - **Shared `SocketIOEmitter` base** for `sender.py` and `emitter.py`. Worth doing only if a third producer appears; until then the two mirror the same pattern.
 - **Composite canvas-capture robustness** (§3.3.C first bullet). No concrete fix proposed in the review.
+- **Found in Phase 2 (no owner yet):**
+  - `molten/index.html` and `ink/index.html` each load `fluid-bridge.js`, so the composite page runs three bridges and three `/viewer` sockets, and molten and ink receive splats twice.
+  - Molten and ink duplicate the same splat handler; its `seenIds` set is rebuilt per message and so does nothing.
+  - `/viewer` bandwidth: each merged frame carries the full audio spectrum (~48 KB) at 240 Hz, about 11 MB/s per viewer. Consider sending the spectrum at the audio rate only, or a slimmer audio subset on frames.
+  - The hub replays its stored `lastFrame` to new viewers regardless of age.
+  - A body that disappears from the NatNet stream entirely (rather than arriving with `tracking_valid=False`) is never pruned from `FramePipeline`.
+  - `frame.schema.json`'s `audio` description still says staleness is "once implemented"; it is implemented (WP 2.1).
 
 ---
 

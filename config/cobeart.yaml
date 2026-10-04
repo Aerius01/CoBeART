@@ -1,0 +1,49 @@
+# Shared CoBeART configuration. Read by Python and Node (not yet wired up).
+# Validated by config/cobeart.schema.json.
+
+network:
+  client_address: 192.168.0.104   # CoBe computer (this machine), IPv4
+  server_address: 192.168.0.105   # OptiTrack/Motive computer, IPv4
+  use_multicast: true             # multicast vs unicast NatNet streaming
+  socketio:
+    host: 127.0.0.1               # hub bind address and client target
+    port: 3000                    # hub TCP port
+
+tracking:
+  use_optitrack_client: true
+  tracking_framerate: 240         # Hz, rate data is received from OptiTrack
+  package_framerate: 240          # Hz, rate frames are sent to the hub
+  max_num_objects: 10             # rigid bodies; ids >= this are dropped
+  x_rescale: 3.5                  # arena length along x, meters
+  y_rescale: 3.5                  # arena length along y, meters
+
+arena:                            # millimeters, [min, max]
+  x: [-3000, 3000]
+  y: [-3000, 3000]
+  z: [0, 2500]
+
+metrics:
+  max_vel: 13000.0                # mm/s, velocity mapped to normVel = 1
+  history_window: 15              # samples in the normVel smoothing window
+
+hub:
+  audio_max_age_ms: 500           # audio older than this is treated as stale
+
+window:
+  width: 1050                     # px
+  height: 1050                    # px
+
+frontend:
+  bridge_framerate: 120           # Hz, bridge-to-simulation forwarding loop
+  splat_color: [1.0, 0.6, 0.2]    # RGB, 0..1
+  composite:
+    z_threshold: 2700             # mm, hand height that triggers a switch
+    clap_distance: 200            # mm, hand separation counted as a clap
+    show_interactive_elements: false
+
+debug: false
+
+audio:
+  chunk_size: 1024                # samples per analysis chunk
+  sample_rate: 48000              # Hz, fallback when no device default exists
+  beat_detection: true

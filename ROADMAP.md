@@ -125,7 +125,7 @@ Everything here is either a new file or a file nobody else touches in this phase
   - **CLI:** `python -m cobeart.simulator --scenario hands --audio beat --rate 240 --duration 30 --seed 0 --url http://127.0.0.1:3000`. Same seed, same stream. Log the parameters at startup. No `pyproject.toml` entry for now; WP 3.1 adds the `start-simulator` script.
   - The scenario generators are pure functions `(t: float, rng) -> Frame`, separate from the emitter loop, so tests and the e2e harness (WP 4.3) can call them without a socket.
 - **Test:** pure scenario tests (`hands` produces a clap within 200 mm at the expected time; `shuffled` keeps the ID set intact; all generated frames match the payload shape from the review sections above). An integration test boots the WP 1.1-equivalent hub if it is present, otherwise a minimal `python-socketio` server fixture, and asserts that frames arrive.
-- **Accept:** with `npm run web` running, `python -m cobeart.simulator --scenario orbit --audio beat` drives the splat visualization visibly, and audio modulation is visible.
+- **Accept:** with `npm run web` running, `python -m cobeart.simulator --scenario orbit --audio beat` drives the splat visualization visibly, and the merged audio values reach the viewer (debug overlay). No visual reacts to audio yet; that is feature work (see Deferred).
 
 **Phase 1 gate review:** `code-optimizer-reviewer` on WP 1.3 (`metrics.py` runs at 240 Hz × bodies).
 
@@ -267,6 +267,13 @@ Depends on everything above.
 
 - **Record and replay real sessions.** At the next session with the real system, record raw NatNet rigid-body callbacks (ID, position, quaternion, timestamp) to a file, and add a `ReplaySource` that plays them back through the `MotionSource` seam from WP 2.2. That replaces synthetic motion with real movement for regression tests, and is the only offline way to check that the D5 orientation convention matches real performers.
 - **On-site validation spikes** (cannot be done offline, per §5): NatNet multicast from the Debian box, and an end-to-end latency check with real bodies.
+- **On-site tuning checklist** (found during Phase 1):
+  - D5 identity orientation and lean sign: each rigid body must be created in Motive aligned to the global axes with the performer facing OptiTrack +Z.
+  - Rigid-body IDs vs `body_map.json` (0-based): Motive Streaming IDs are often 1-based.
+  - Composite `frontend.composite.z_threshold` (2700 mm): above the 2500 mm arena ceiling and likely above a raised hand, so hand-up transitions may never fire.
+  - Head-tilt palette lean clamp (-40..30 deg in `fluid/script.js`).
+  - Dropout gap `max_gap_s` (0.25 s) in `MetricsTracker`.
+- **Audio-reactive visuals.** Nothing consumes audio yet (the bridge only shows it in the overlay). Candidate: optional `audio` subset (`rms_envelope`, `beat`, `onset_strength`) on `splat`, splat radius/brightness scaled by envelope with a decaying boost on `beat`, one tunable strength constant.
 - **Split `AudioCapturer`** into capture, analysis, emission (P2 #15). Only if the audio module keeps growing.
 - **Shared `SocketIOEmitter` base** for `sender.py` and `emitter.py`. Worth doing only if a third producer appears; until then the two mirror the same pattern.
 - **Composite canvas-capture robustness** (§3.3.C first bullet). No concrete fix proposed in the review.

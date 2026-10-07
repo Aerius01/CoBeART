@@ -1,10 +1,10 @@
 import numpy as np
-import soundcard as sc
 import time
 import threading
 import logging
 import sys
 from typing import ContextManager, Optional, Protocol
+from cobeart.audiocapture.beat import BeatDetector, PredictiveBeatLayer, StreamClock
 from cobeart.audiocapture.utils import select_audio_device
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -27,9 +27,13 @@ class AudioSource(Protocol):
 class AudioCapturer:
     """A class to capture audio from a user-selected input device."""
 
-    def __init__(self, chunk_size=1024, sample_rate=48000, spectrum_bins=128, spectrum_history=16,
-                 enable_beat_detection=False, enable_emit=False, socketio_url=None, socketio_namespace="/audio",
-                 debug=False, mic: Optional[AudioSource] = None):
+    _BEAT_POLL_SECONDS: float = 0.02  # beat thread wake-up period (two 10 ms model frames)
+    _BEAT_STATS_SECONDS: float = 5.0  # period of the beat-thread load log when debug is on
+
+    def __init__(self, chunk_size: int = 1024, sample_rate: int = 48000, spectrum_bins: int = 128,
+                 spectrum_history: int = 16, enable_beat_detection: bool = True, enable_emit: bool = False,
+                 socketio_url: Optional[str] = None, socketio_namespace: str = "/audio", debug: bool = False,
+                 mic: Optional[AudioSource] = None):
         """
         Initializes the AudioCapturer by selecting a device.
         A larger chunk_size (e.g., 1024) is better for frequency resolution of metrics.
@@ -37,20 +41,16 @@ class AudioCapturer:
 
         Args:
             chunk_size: Number of audio samples per chunk
-            sample_rate: Audio sample rate in Hz
+            sample_rate: Audio sample rate in Hz, requested from the device (beat detection needs a multiple of 100)
             spectrum_bins: Number of frequency bins for spectrum analysis
             spectrum_history: Number of historical spectrum frames to keep
-            enable_beat_detection: Enable real-time beat detection (requires madmom)
-            debug: Enable debug logging in beat detection components
+            enable_beat_detection: Run real-time beat detection (madmom) and fill the beat fields
+            debug: Log beat-thread load statistics (frames, processing time, backlog) every few seconds
             mic: Capture source to use instead of prompting for a device (injected in tests)
         """
         self.mic = mic if mic is not None else select_audio_device()
         self.chunk_size = chunk_size
-        # Prefer device default samplerate if available to avoid resampling.
-        try:
-            self.sample_rate = sc.default_samplerate()
-        except Exception:
-            self.sample_rate = sample_rate
+        self.sample_rate = sample_rate
         self.is_recording = False
         # Threaded capture state
         self._stop_event = threading.Event()
@@ -91,14 +91,14 @@ class AudioCapturer:
         self._spectrum_smoothing = 0.3
         self._last_spectrum = np.zeros(spectrum_bins, dtype=np.float32)
 
-        # Beat detection (optional)
+        # Beat detection: the capture thread feeds samples, a separate thread runs the models
         self.enable_beat_detection = enable_beat_detection
         self.debug = debug
-        self._beat_detector = None
-        self._beat_predictor = None  # Predictive beat layer for low-latency predictions
-        self._current_tempo = None
-        self._beat_lock = threading.Lock()
-        self._beat_processing_thread = None
+        self._beat_detector: Optional[BeatDetector] = None
+        self._beat_predictor: Optional[PredictiveBeatLayer] = None
+        self._stream_clock = StreamClock(self.sample_rate)
+        self._beat_processing_thread: Optional[threading.Thread] = None
+        self._beat_error: Optional[BaseException] = None
 
         # RMS envelope (dB-scaled with attack/decay smoothing)
         self._rms_db_envelope = 0.0
@@ -130,46 +130,28 @@ class AudioCapturer:
                 socketio_url=socketio_url,
                 namespace=socketio_namespace
             )
-            print(f"[audio] Emitter initialized for {socketio_namespace}")
+            logger.info("Emitter initialized for %s", socketio_namespace)
 
         if self.enable_beat_detection:
-            try:
-                from cobeart.audiocapture.beat.detector import BeatDetector
-                from cobeart.audiocapture.beat.predictor import PredictiveBeatLayer
-                print("[audio] Initializing beat detection...")
-                self._beat_detector = BeatDetector(
-                    buffer_seconds=2,
-                    capture_sample_rate=self.sample_rate,
-                    debug=self.debug
-                )
-
-                # Only enable logging if debug mode is active
-                if self.debug:
-                    self._beat_detector.enable_logging()
-
-                # Initialize predictive layer for low-latency beat prediction
-                self._beat_predictor = PredictiveBeatLayer(
-                    beat_detector=self._beat_detector,
-                    poll_interval=0.05,  # 50ms polling when no prediction
-                    debug=self.debug
-                )
-                print("[audio] Beat detection and prediction enabled")
-            except ImportError as e:
-                print(f"[audio] Warning: Could not enable beat detection: {e}")
-                self.enable_beat_detection = False
+            self._beat_detector = BeatDetector(sample_rate=self.sample_rate)
+            self._beat_predictor = PredictiveBeatLayer(self._beat_detector, self._stream_clock)
+            logger.info("Beat detection on: %s", self._beat_detector.describe())
+        else:
+            logger.info("Beat detection off: beat stays false and tempo_bpm null")
 
     def start_stream(self):
         """Starts the audio recording stream."""
         if self.is_recording:
-            print("Stream is already running.")
+            logger.warning("Stream is already running.")
             return
 
-        print("Audio stream started.")
+        logger.info("Audio stream started at %d Hz.", self.sample_rate)
         # Capture in ~10 ms blocks for stability; maintain a rolling window of chunk_size
         base10 = int(round(self.sample_rate / 100))  # ~10 ms
         capture_frames = max(base10, 240)
         self._stop_event.clear()
         self._capture_error = None
+        self._beat_error = None
 
         def _capture_loop():
             try:
@@ -181,6 +163,7 @@ class AudioCapturer:
                         if data is None:
                             continue
                         block = data.reshape(-1)
+                        self._stream_clock.advance(len(block))
                         with self._ring_lock:
                             n = min(len(block), self.chunk_size)
                             if n < self.chunk_size:
@@ -189,10 +172,9 @@ class AudioCapturer:
                             else:
                                 self._ring[:] = block[-self.chunk_size:]
 
-                        # Feed to beat detector if enabled
-                        if self.enable_beat_detection and self._beat_detector is not None:
-                            self._beat_detector.add_chunk(
-                                block[:n] if n < self.chunk_size else block[-self.chunk_size:])
+                        # Every sample goes to the beat detector; this only copies, the models run elsewhere
+                        if self._beat_detector is not None:
+                            self._beat_detector.add_samples(block)
 
                         # Compute metrics and push to emitter immediately (if enabled)
                         if self.enable_emit and self._emitter is not None:
@@ -207,40 +189,17 @@ class AudioCapturer:
         self._capture_thread = threading.Thread(target=_capture_loop, name="audio-capture", daemon=True)
         self._capture_thread.start()
 
-        # Start beat processing thread if enabled
-        if self.enable_beat_detection and self._beat_detector is not None:
-            def _beat_processing_loop():
-                """Background thread that continuously processes beat detection."""
-                while not self._stop_event.is_set():
-                    # Check if processing is due
-                    if self._beat_detector.should_process():
-                        # Process beat detection
-                        beat, tempo = self._beat_detector.process()
-
-                        # Update shared state atomically
-                        # Beat timestamps are tracked in beat_history - consumers pull from there
-                        with self._beat_lock:
-                            if tempo is not None:
-                                self._current_tempo = tempo
-                    else:
-                        # Calculate exact sleep time until next processing window
-                        sleep_time = max(0.001, self._beat_detector._next_process_time - time.time())
-                        time.sleep(sleep_time)
-
+        if self._beat_detector is not None:
             self._beat_processing_thread = threading.Thread(
-                target=_beat_processing_loop,
-                name="beat-processing",
-                daemon=True
-            )
+                target=self._beat_processing_loop, args=(self._beat_detector,), name="beat-processing", daemon=True)
             self._beat_processing_thread.start()
-            print("[audio] Beat processing thread started")
 
         self.is_recording = True
 
     def stop_stream(self):
         """Stops the audio recording stream."""
         if not self.is_recording:
-            print("Stream is not running.")
+            logger.warning("Stream is not running.")
             return
 
         self._stop_event.set()
@@ -253,12 +212,33 @@ class AudioCapturer:
         if self._emitter is not None:
             self._emitter.stop()
         self.is_recording = False
-        print("Audio stream stopped.")
+        logger.info("Audio stream stopped.")
+
+    def _beat_processing_loop(self, detector: BeatDetector) -> None:
+        """Beat thread: analyse pending audio every few ms; a failure is recorded and surfaced via capture_error."""
+        busy = 0.0
+        frames = 0
+        stats_start = time.perf_counter()
+        try:
+            while not self._stop_event.wait(self._BEAT_POLL_SECONDS):
+                started = time.perf_counter()
+                frames += detector.process_pending()
+                busy += time.perf_counter() - started
+                elapsed = time.perf_counter() - stats_start
+                if self.debug and elapsed >= self._BEAT_STATS_SECONDS:
+                    logger.info(
+                        "Beat thread: %d frames in %.1f s, %.2f ms/frame, busy %.1f%%, backlog %.3f s, tempo %s",
+                        frames, elapsed, 1000 * busy / max(frames, 1), 100 * busy / elapsed,
+                        detector.backlog_seconds, detector.tempo_bpm)
+                    busy, frames, stats_start = 0.0, 0, time.perf_counter()
+        except Exception as exc:
+            logger.exception("Beat processing thread failed")
+            self._beat_error = exc
 
     @property
     def capture_error(self) -> Optional[BaseException]:
-        """The exception that terminated the capture thread, or None while it is healthy."""
-        return self._capture_error
+        """The exception that terminated the capture or beat-processing thread, or None while both are healthy."""
+        return self._capture_error if self._capture_error is not None else self._beat_error
 
     def read_chunk(self):
         """Reads a chunk of audio data from the stream."""
@@ -530,7 +510,7 @@ class AudioCapturer:
             - tempo_bpm: Current tempo estimate (None if not yet determined)
             - beat_timestamp: Predicted beat timestamp when beat_detected=True (None otherwise)
         """
-        if not self.enable_beat_detection or self._beat_predictor is None:
+        if self._beat_predictor is None:
             return False, None, None
 
         return self._beat_predictor.get_next_beat()
@@ -576,8 +556,8 @@ class AudioCapturer:
                 "freq_max": self.freq_max,
             },
             "beat": bool(beat),
-            "tempo_bpm": tempo_bpm if tempo_bpm is not None else None,
-            "beat_timestamp": beat_timestamp if beat_timestamp is not None else None,
+            "tempo_bpm": tempo_bpm,
+            "beat_timestamp": beat_timestamp,
         }
 
 

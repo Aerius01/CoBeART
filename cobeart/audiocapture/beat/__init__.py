@@ -1,9 +1,11 @@
-from .detector import BeatDetector
+from .clock import StreamClock
+from .detector import BeatBacklogError, BeatDetector, TempoState
 from .predictor import PredictiveBeatLayer
-from .logger import BeatLogger
 
 __all__ = [
+    "BeatBacklogError",
     "BeatDetector",
     "PredictiveBeatLayer",
-    "BeatLogger",
+    "StreamClock",
+    "TempoState",
 ]

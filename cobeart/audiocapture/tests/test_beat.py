@@ -1,16 +1,19 @@
 """Beat detection on synthetic click tracks: the detector offline, and the full AudioCapturer in real time."""
 import json
 import logging
-import threading
+import os
+import signal
 import time
 from contextlib import AbstractContextManager
 from types import TracebackType
+from typing import Any
 
 import numpy as np
 import pytest
 from jsonschema import Draft202012Validator
 
-from cobeart.audiocapture.beat import BeatBacklogError, BeatDetector
+from cobeart.audiocapture.beat import BeatBacklogError, BeatProcess, BeatProcessError, BeatTracker, TempoEstimator
+from cobeart.audiocapture.beat.tempo import DEFAULT_ANALYSIS_LAG_SECONDS
 from cobeart.audiocapture.capture import AudioCapturer
 
 SAMPLE_RATE: int = 48000
@@ -29,6 +32,16 @@ REALTIME_BEAT_TOLERANCE_S: float = 0.040
 # Stable tempo needs four consistent beats (three intervals) after the DBN's first beat, which comes about one
 # beat after the first click: about five beat periods, plus one for slack.
 LOCK_IN_BEATS: float = 6.0
+# Real time only: beat analysis may trail the live audio by up to the tolerated analysis lag (0.5 s) without
+# that being a fault, so tempo checks start that much later in stream time.
+ANALYSIS_LAG_S: float = DEFAULT_ANALYSIS_LAG_SECONDS
+# A real capture device buffers samples (PulseAudio/PipeWire record streams hold far more than 0.5 s by default),
+# so a late read loses nothing as long as the delay stays inside that buffer; the late samples are then read
+# back-to-back. Audio is lost only if the delay outgrows the buffer. The bound is 0.5 s, the analysis lag at
+# which beat detection warns that the CPU is struggling. A capture loop just 6% slower than real time exceeds it
+# within this 9 s run. With the models in their own process the capture thread stays within about 50 ms even
+# with every CPU core busy (it stalled for up to 1 s when they shared its GIL).
+MAX_READ_DELAY_S: float = DEFAULT_ANALYSIS_LAG_SECONDS
 
 
 def click_track(bpm: float, seconds: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
@@ -46,23 +59,25 @@ def click_track(bpm: float, seconds: float, seed: int) -> tuple[np.ndarray, np.n
     return audio, onsets
 
 
-def run_detector(audio: np.ndarray) -> tuple[BeatDetector, list[float], list[tuple[float, float | None]]]:
-    """Feed audio in capture-sized blocks; return the detector, its beats and (stream time, tempo) per block.
+def run_detector(audio: np.ndarray) -> tuple[TempoEstimator, list[float], list[tuple[float, float | None]]]:
+    """Track audio fed in capture-sized blocks, in process; return the tempo estimator, the beats found and
+    (analysed stream time, tempo) per block.
 
-    Processing runs after irregular numbers of blocks, as the real beat thread does, so batches vary in size.
+    Processing runs after irregular numbers of blocks, as the real beat process does, so batches vary in size.
     """
-    detector = BeatDetector(sample_rate=SAMPLE_RATE)
+    tracker = BeatTracker(sample_rate=SAMPLE_RATE)
+    tempo = TempoEstimator()
     beats: list[float] = []
     tempi: list[tuple[float, float | None]] = []
     for index, start in enumerate(range(0, len(audio), BLOCK)):
-        detector.add_samples(audio[start:start + BLOCK])
+        tracker.add_samples(audio[start:start + BLOCK])
         if index % 3 == 0 or index % 7 == 0:
-            detector.process_pending()
-        state = detector.get_prediction_state()
-        if state is not None and (not beats or state.last_beat != beats[-1]):
-            beats.append(state.last_beat)
-        tempi.append((detector.stream_seconds, None if state is None else state.bpm))
-    return detector, beats, tempi
+            found = tracker.process_pending()
+            beats.extend(found)
+            tempo.update(found, tracker.stream_seconds)
+        state = tempo.get_prediction_state((start + BLOCK) / SAMPLE_RATE)
+        tempi.append((tracker.stream_seconds, None if state is None else state.bpm))
+    return tempo, beats, tempi
 
 
 @pytest.mark.parametrize("bpm", [90.0, 120.0, 147.0])
@@ -73,9 +88,32 @@ def test_detector_locks_onto_click_track(bpm: float) -> None:
     after = [tempo for t, tempo in tempi if t >= lock_in]
     assert after and all(tempo is not None and abs(tempo - bpm) <= BPM_TOLERANCE for tempo in after), \
         f"tempo after {lock_in:.2f} s not within {BPM_TOLERANCE} of {bpm}: {sorted(set(after), key=str)[:5]}"
-    errors = [min(abs(onsets - beat)) for beat in beats]
-    assert max(errors) <= OFFLINE_BEAT_TOLERANCE_S, f"beat errors (s): {np.round(errors, 4)}"
-    assert len(beats) >= len(onsets[onsets >= lock_in]), "beats missed after lock-in"
+    errors = np.array([min(abs(onsets - beat)) for beat in beats])
+    assert errors.max() <= OFFLINE_BEAT_TOLERANCE_S, f"beat errors (s): {np.round(errors, 4)}"
+    beats_arr = np.array(beats)
+    missed = [round(o, 3) for o in onsets[onsets >= lock_in] if np.abs(beats_arr - o).min() > OFFLINE_BEAT_TOLERANCE_S]
+    assert not missed, f"clicks at {missed} s after lock-in produced no beat"
+
+
+def test_tempo_goes_stale_when_analysis_stops() -> None:
+    audio, _ = click_track(120.0, 6.0, seed=3)
+    tempo, beats, tempi = run_detector(audio)
+    analysed = tempi[-1][0]
+    assert tempo.get_prediction_state(analysed) is not None
+    # Live audio moves on while nothing more is analysed: stale after 2 intervals (1 s) plus the tolerated lag.
+    assert tempo.get_prediction_state(beats[-1] + 1.0 + ANALYSIS_LAG_S + 0.05) is None
+
+
+def test_tempo_restarts_from_the_beat_that_breaks_it() -> None:
+    tempo = TempoEstimator()
+    tempo.update([0.0, 0.5, 1.0, 1.5], 1.5)
+    assert tempo.get_prediction_state(1.5) is not None
+    # 1.5 -> 1.8 breaks the 0.5 s grid; the estimate restarts at 1.8, so three more consistent beats re-lock it.
+    tempo.update([1.8, 2.2, 2.6], 2.6)
+    assert tempo.get_prediction_state(2.6) is None
+    tempo.update([3.0], 3.0)
+    state = tempo.get_prediction_state(3.0)
+    assert state is not None and abs(state.interval - 0.4) < 1e-9
 
 
 def test_detector_reports_no_tempo_on_noise() -> None:
@@ -85,26 +123,49 @@ def test_detector_reports_no_tempo_on_noise() -> None:
     assert all(tempo is None for _, tempo in tempi)
 
 
-def test_detector_backlog_raises() -> None:
-    detector = BeatDetector(sample_rate=SAMPLE_RATE, max_backlog_seconds=0.1)
-    detector.add_samples(np.zeros(SAMPLE_RATE, dtype=np.float32))
+def test_tracker_backlog_raises() -> None:
+    tracker = BeatTracker(sample_rate=SAMPLE_RATE, max_backlog_seconds=0.1)
     with pytest.raises(BeatBacklogError, match="behind"):
-        detector.process_pending()
+        tracker.add_samples(np.zeros(SAMPLE_RATE, dtype=np.float32))
 
 
-def test_detector_rejects_sample_rate_without_whole_hop() -> None:
+def test_tracker_rejects_sample_rate_without_whole_hop() -> None:
     with pytest.raises(ValueError, match="multiple of 100"):
-        BeatDetector(sample_rate=22050)
+        BeatTracker(sample_rate=22050)
+
+
+def test_beat_process_warns_on_lag_once_and_fails_on_overflow(caplog: pytest.LogCaptureFixture) -> None:
+    beat = BeatProcess(sample_rate=SAMPLE_RATE, max_backlog_seconds=5.0)
+    with caplog.at_level(logging.WARNING, logger="cobeart.audiocapture.beat.process"):
+        beat.start()
+        try:
+            # 3 s arriving at once is 3 s of lag, well over the 0.5 s warning threshold.
+            beat.add_samples(np.zeros(3 * SAMPLE_RATE, dtype=np.float32))
+            deadline = time.time() + 5.0
+            while not any("behind the audio" in r.getMessage() for r in caplog.records):
+                assert time.time() < deadline, "no lag warning"
+                time.sleep(0.02)
+            beat.add_samples(np.zeros(SAMPLE_RATE // 2, dtype=np.float32))
+            time.sleep(0.1)
+            assert sum("behind the audio" in r.getMessage() for r in caplog.records) == 1
+            assert beat.error is None
+            beat.add_samples(np.zeros(6 * SAMPLE_RATE, dtype=np.float32))  # more than the ring can ever hold
+            assert isinstance(beat.error, BeatBacklogError)
+        finally:
+            beat.stop()
 
 
 class _PacedRecorder(AbstractContextManager["_PacedRecorder"]):
-    """Plays the audio back in real time, like a device: record() blocks until the samples would exist."""
+    """Plays the audio back in real time, like a device: record() blocks until the samples would exist.
+
+    A late read gets its samples at once, as from a device buffer, and its delay is recorded.
+    """
 
     def __init__(self, audio: np.ndarray) -> None:
         self.audio = audio
         self.position = 0
         self.start = 0.0
-        self.max_lateness = 0.0
+        self.read_delays: list[float] = []
 
     def __enter__(self) -> "_PacedRecorder":
         self.start = time.time()
@@ -119,8 +180,7 @@ class _PacedRecorder(AbstractContextManager["_PacedRecorder"]):
         wait = deadline - time.time()
         if wait > 0:
             time.sleep(wait)
-        else:
-            self.max_lateness = max(self.max_lateness, -wait)
+        self.read_delays.append(max(0.0, -wait))
         block = np.zeros((numframes, 1), dtype=np.float32)
         chunk = self.audio[self.position:self.position + numframes]
         block[:len(chunk), 0] = chunk
@@ -134,45 +194,102 @@ class _ClickMic:
 
     def recorder(self, samplerate: float, channels: list[int], blocksize: int) -> _PacedRecorder:
         assert samplerate == SAMPLE_RATE
+        assert blocksize == BLOCK
         return self.recorder_instance
+
+
+class _ListSink:
+    """Collects what the capture thread emits."""
+
+    def __init__(self) -> None:
+        self.payloads: list[dict[str, Any]] = []
+
+    def push_metrics(self, metrics: dict[str, Any]) -> None:
+        self.payloads.append(metrics)
+
+    def stop(self) -> None:
+        return None
+
+
+def _run_capturer(audio: np.ndarray, seconds: float) -> tuple[_PacedRecorder, list[dict[str, Any]]]:
+    """Run AudioCapturer with emission on the capture thread for `seconds`; return the device and the payloads."""
+    mic = _ClickMic(audio)
+    sink = _ListSink()
+    capturer = AudioCapturer(chunk_size=1024, sample_rate=SAMPLE_RATE, mic=mic, emitter=sink)
+    capturer.start_stream()
+    try:
+        end = time.time() + seconds
+        while time.time() < end:
+            assert capturer.capture_error is None
+            time.sleep(0.05)
+    finally:
+        capturer.stop_stream()
+    return mic.recorder_instance, sink.payloads
 
 
 def test_capturer_emits_beats_on_time(audio_validator: Draft202012Validator) -> None:
     bpm = 120.0
     seconds = 9.0
     audio, onsets = click_track(bpm, seconds, seed=7)
+    device, payloads = _run_capturer(audio, seconds)
+
+    # One payload per block, built on the capture thread, so payload i covers the stream up to (i + 1) blocks.
+    blocks = len(device.read_delays)
+    assert len(payloads) >= blocks - 1, f"{blocks} blocks read but only {len(payloads)} payloads emitted"
+    assert max(device.read_delays) < MAX_READ_DELAY_S, \
+        f"capture loop fell {max(device.read_delays):.3f} s behind the device; audio would be lost"
+    stream_end = (np.arange(len(payloads)) + 1) * BLOCK / SAMPLE_RATE
+
+    lock_in = FIRST_CLICK_S + LOCK_IN_BEATS * 60.0 / bpm + ANALYSIS_LAG_S
+    after = [p["tempo_bpm"] for p, t in zip(payloads, stream_end) if t >= lock_in]
+    assert after and all(tempo is not None and abs(tempo - bpm) <= BPM_TOLERANCE for tempo in after), \
+        f"tempo after stream {lock_in:.2f} s not within {BPM_TOLERANCE} of {bpm}: {sorted(set(after), key=str)[:5]}"
+
+    click_times = device.start + onsets
+    beat_payloads = [p for p in payloads if p["beat"]]
+    for p in beat_payloads:
+        audio_validator.validate(p)
+    beat_times = np.array([p["beat_timestamp"] for p in beat_payloads])
+    matched = [int(np.argmin(np.abs(click_times - b))) for b in beat_times]
+    errors = np.abs(click_times[matched] - beat_times)
+    assert len(errors) and errors.max() <= REALTIME_BEAT_TOLERANCE_S, f"beat errors (s): {np.round(errors, 4)}"
+    assert len(set(matched)) == len(matched), "a click produced more than one beat"
+    expected = np.nonzero((onsets >= lock_in) & (onsets <= stream_end[-1] - 0.05))[0]
+    assert len(expected) > 0
+    missed = sorted(set(expected.tolist()) - set(matched))
+    assert not missed, f"clicks {missed} after lock-in produced no beat"
+
+
+def test_dead_beat_process_stops_beats_and_tempo(caplog: pytest.LogCaptureFixture) -> None:
+    audio, _ = click_track(120.0, 12.0, seed=11)
     mic = _ClickMic(audio)
-    capturer = AudioCapturer(chunk_size=1024, sample_rate=SAMPLE_RATE, mic=mic)
-    payloads: list[tuple[float, dict]] = []
+    sink = _ListSink()
+    capturer = AudioCapturer(chunk_size=1024, sample_rate=SAMPLE_RATE, mic=mic, emitter=sink)
+    beat = capturer._beat_process
+    assert beat is not None
+
     capturer.start_stream()
     try:
-        end = time.time() + seconds
-        while time.time() < end:
-            payload = capturer.compute_metrics_payload(capturer.read_chunk())
-            assert payload is not None
-            payloads.append((time.time(), payload))
-            time.sleep(0.005)
-        assert capturer.capture_error is None
+        deadline = time.time() + 8.0
+        while not any(p["tempo_bpm"] is not None for p in sink.payloads[-5:]):
+            assert time.time() < deadline, "tempo never became stable"
+            time.sleep(0.05)
+        assert beat.pid is not None
+        os.kill(beat.pid, signal.SIGKILL)  # as the OOM killer would
+        deadline = time.time() + 2.0
+        while capturer.capture_error is None:
+            assert time.time() < deadline, "beat thread failure never surfaced"
+            time.sleep(0.01)
+        # Skip the payload that may have been in flight while the error was being recorded.
+        died_at = len(sink.payloads) + 1
+        time.sleep(1.5)  # three beat intervals that a stale predictor would keep extrapolating
     finally:
         capturer.stop_stream()
-
-    start = mic.recorder_instance.start
-    assert mic.recorder_instance.max_lateness < 0.05, "capture loop blocked: device reads fell behind"
-    lock_in = start + FIRST_CLICK_S + LOCK_IN_BEATS * 60.0 / bpm
-    after = [p["tempo_bpm"] for t, p in payloads if t >= lock_in]
-    assert after and all(tempo is not None and abs(tempo - bpm) <= BPM_TOLERANCE for tempo in after)
-
-    click_times = start + onsets
-    beat_times = [p["beat_timestamp"] for _, p in payloads if p["beat"]]
-    for _, p in payloads:
-        if p["beat"]:
-            audio_validator.validate(p)
-    matched = [int(np.argmin(np.abs(click_times - b))) for b in beat_times]
-    errors = [abs(click_times[i] - b) for i, b in zip(matched, beat_times)]
-    assert errors and max(errors) <= REALTIME_BEAT_TOLERANCE_S, f"beat errors (s): {np.round(errors, 4)}"
-    assert len(set(matched)) == len(matched), "a click produced more than one beat"
-    expected = click_times[(click_times >= lock_in) & (click_times <= payloads[-1][0] - 0.05)]
-    assert set(range(len(click_times))[-len(expected):]) <= set(matched), "beats missed after lock-in"
+    later = sink.payloads[died_at:]
+    assert len(later) > 100
+    assert isinstance(capturer.capture_error, BeatProcessError)
+    assert "exited unexpectedly" in str(capturer.capture_error)
+    assert all(not p["beat"] and p["tempo_bpm"] is None and p["beat_timestamp"] is None for p in later)
 
 
 def test_silent_payload_is_finite_json() -> None:
@@ -180,27 +297,3 @@ def test_silent_payload_is_finite_json() -> None:
     for _ in range(20):
         payload = capturer.compute_metrics_payload(np.zeros(1024, dtype=np.float32))
         json.dumps(payload, allow_nan=False)
-
-
-def test_beat_thread_failure_surfaces_as_capture_error(monkeypatch: pytest.MonkeyPatch,
-                                                       caplog: pytest.LogCaptureFixture) -> None:
-    capturer = AudioCapturer(chunk_size=1024, sample_rate=SAMPLE_RATE,
-                             mic=_ClickMic(np.zeros(SAMPLE_RATE, np.float32)))
-    assert capturer._beat_detector is not None
-    failed = threading.Event()
-
-    def fail() -> int:
-        failed.set()
-        raise BeatBacklogError("simulated overload")
-
-    monkeypatch.setattr(capturer._beat_detector, "process_pending", fail)
-    with caplog.at_level(logging.ERROR, logger="cobeart.audiocapture.capture"):
-        capturer.start_stream()
-        try:
-            assert failed.wait(2.0)
-            assert capturer._beat_processing_thread is not None
-            capturer._beat_processing_thread.join(timeout=2.0)
-            assert isinstance(capturer.capture_error, BeatBacklogError)
-        finally:
-            capturer.stop_stream()
-    assert any("Beat processing thread failed" in r.getMessage() for r in caplog.records)

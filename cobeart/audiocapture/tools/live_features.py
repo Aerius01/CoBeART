@@ -17,8 +17,8 @@ def main():
     print("\nPlay some music with varying dynamics to see the features in action!")
     print("Press Ctrl+C to stop.\n")
 
-    # Create capturer with default settings
-    capturer = AudioCapturer(chunk_size=1024)
+    # Beat detection is on by default; this meter does not show beats, so skip loading the models
+    capturer = AudioCapturer(chunk_size=1024, enable_beat_detection=False)
     capturer.start_stream()
 
     try:

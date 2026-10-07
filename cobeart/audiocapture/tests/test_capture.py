@@ -40,16 +40,19 @@ def test_payload_matches_contract(audio_validator: Draft202012Validator) -> None
 
 
 def test_capture_thread_failure_is_observable(caplog: pytest.LogCaptureFixture) -> None:
-    capturer = AudioCapturer(chunk_size=CHUNK_SIZE, mic=_FakeMic())
+    # Capture-thread behaviour only; beat failures are covered in test_beat.py.
+    capturer = AudioCapturer(chunk_size=CHUNK_SIZE, mic=_FakeMic(), enable_beat_detection=False)
     assert capturer.capture_error is None
     with caplog.at_level(logging.ERROR, logger="cobeart.audiocapture.capture"):
         capturer.start_stream()
-        assert capturer._capture_thread is not None
-        capturer._capture_thread.join(timeout=5.0)
+        try:
+            assert capturer._capture_thread is not None
+            capturer._capture_thread.join(timeout=5.0)
+        finally:
+            capturer.stop_stream()
     assert isinstance(capturer.capture_error, RuntimeError)
     assert "device unplugged" in str(capturer.capture_error)
     assert any("capture thread failed" in r.getMessage() for r in caplog.records)
-    capturer.stop_stream()
 
 
 def test_emitter_warns_once_while_hub_is_down(caplog: pytest.LogCaptureFixture) -> None:

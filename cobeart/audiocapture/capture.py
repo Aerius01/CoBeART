@@ -3,8 +3,8 @@ import time
 import threading
 import logging
 import sys
-from typing import ContextManager, Optional, Protocol
-from cobeart.audiocapture.beat import BeatDetector, PredictiveBeatLayer, StreamClock
+from typing import Any, ContextManager, Optional, Protocol
+from cobeart.audiocapture.beat import BeatProcess, PredictiveBeatLayer, StreamClock
 from cobeart.audiocapture.utils import select_audio_device
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -24,16 +24,21 @@ class AudioSource(Protocol):
     def recorder(self, samplerate: float, channels: list[int], blocksize: int) -> ContextManager[AudioRecorder]: ...
 
 
+class MetricsSink(Protocol):
+    """Where the capture thread sends each payload (satisfied by AudioEmitter)."""
+
+    def push_metrics(self, metrics: dict[str, Any]) -> None: ...
+
+    def stop(self) -> None: ...
+
+
 class AudioCapturer:
     """A class to capture audio from a user-selected input device."""
-
-    _BEAT_POLL_SECONDS: float = 0.02  # beat thread wake-up period (two 10 ms model frames)
-    _BEAT_STATS_SECONDS: float = 5.0  # period of the beat-thread load log when debug is on
 
     def __init__(self, chunk_size: int = 1024, sample_rate: int = 48000, spectrum_bins: int = 128,
                  spectrum_history: int = 16, enable_beat_detection: bool = True, enable_emit: bool = False,
                  socketio_url: Optional[str] = None, socketio_namespace: str = "/audio", debug: bool = False,
-                 mic: Optional[AudioSource] = None):
+                 mic: Optional[AudioSource] = None, emitter: Optional[MetricsSink] = None):
         """
         Initializes the AudioCapturer by selecting a device.
         A larger chunk_size (e.g., 1024) is better for frequency resolution of metrics.
@@ -44,9 +49,10 @@ class AudioCapturer:
             sample_rate: Audio sample rate in Hz, requested from the device (beat detection needs a multiple of 100)
             spectrum_bins: Number of frequency bins for spectrum analysis
             spectrum_history: Number of historical spectrum frames to keep
-            enable_beat_detection: Run real-time beat detection (madmom) and fill the beat fields
-            debug: Log beat-thread load statistics (frames, processing time, backlog) every few seconds
+            enable_beat_detection: Run real-time beat detection (madmom, in a child process) and fill the beat fields
+            debug: Log beat-process load statistics (frames, processing time, backlog) every few seconds
             mic: Capture source to use instead of prompting for a device (injected in tests)
+            emitter: Payload sink to use instead of building an AudioEmitter; turns emission on (injected in tests)
         """
         self.mic = mic if mic is not None else select_audio_device()
         self.chunk_size = chunk_size
@@ -91,14 +97,12 @@ class AudioCapturer:
         self._spectrum_smoothing = 0.3
         self._last_spectrum = np.zeros(spectrum_bins, dtype=np.float32)
 
-        # Beat detection: the capture thread feeds samples, a separate thread runs the models
+        # Beat detection: the capture thread copies samples to a child process that runs the models
         self.enable_beat_detection = enable_beat_detection
         self.debug = debug
-        self._beat_detector: Optional[BeatDetector] = None
+        self._beat_process: Optional[BeatProcess] = None
         self._beat_predictor: Optional[PredictiveBeatLayer] = None
         self._stream_clock = StreamClock(self.sample_rate)
-        self._beat_processing_thread: Optional[threading.Thread] = None
-        self._beat_error: Optional[BaseException] = None
 
         # RMS envelope (dB-scaled with attack/decay smoothing)
         self._rms_db_envelope = 0.0
@@ -121,10 +125,10 @@ class AudioCapturer:
         self._onset_minimum_flux = 0.3          # Absolute minimum to prevent noise
 
         # Socket.IO emission (optional)
-        self.enable_emit = enable_emit
-        self._emitter = None
+        self.enable_emit = enable_emit or emitter is not None
+        self._emitter: Optional[MetricsSink] = emitter
 
-        if self.enable_emit:
+        if self._emitter is None and self.enable_emit:
             from cobeart.audiocapture.emitter import AudioEmitter
             self._emitter = AudioEmitter(
                 socketio_url=socketio_url,
@@ -133,9 +137,9 @@ class AudioCapturer:
             logger.info("Emitter initialized for %s", socketio_namespace)
 
         if self.enable_beat_detection:
-            self._beat_detector = BeatDetector(sample_rate=self.sample_rate)
-            self._beat_predictor = PredictiveBeatLayer(self._beat_detector, self._stream_clock)
-            logger.info("Beat detection on: %s", self._beat_detector.describe())
+            self._beat_process = BeatProcess(sample_rate=self.sample_rate, debug=self.debug)
+            self._beat_predictor = PredictiveBeatLayer(self._beat_process, self._stream_clock)
+            logger.info("Beat detection on: %s", self._beat_process.describe())
         else:
             logger.info("Beat detection off: beat stays false and tempo_bpm null")
 
@@ -151,7 +155,8 @@ class AudioCapturer:
         capture_frames = max(base10, 240)
         self._stop_event.clear()
         self._capture_error = None
-        self._beat_error = None
+        if self._beat_process is not None:
+            self._beat_process.start()  # blocks until the models are loaded, raises BeatProcessError otherwise
 
         def _capture_loop():
             try:
@@ -172,9 +177,9 @@ class AudioCapturer:
                             else:
                                 self._ring[:] = block[-self.chunk_size:]
 
-                        # Every sample goes to the beat detector; this only copies, the models run elsewhere
-                        if self._beat_detector is not None:
-                            self._beat_detector.add_samples(block)
+                        # Every sample goes to the beat process; this only copies into shared memory
+                        if self._beat_process is not None:
+                            self._beat_process.add_samples(block)
 
                         # Compute metrics and push to emitter immediately (if enabled)
                         if self.enable_emit and self._emitter is not None:
@@ -189,11 +194,6 @@ class AudioCapturer:
         self._capture_thread = threading.Thread(target=_capture_loop, name="audio-capture", daemon=True)
         self._capture_thread.start()
 
-        if self._beat_detector is not None:
-            self._beat_processing_thread = threading.Thread(
-                target=self._beat_processing_loop, args=(self._beat_detector,), name="beat-processing", daemon=True)
-            self._beat_processing_thread.start()
-
         self.is_recording = True
 
     def stop_stream(self):
@@ -206,39 +206,19 @@ class AudioCapturer:
         if self._capture_thread is not None:
             self._capture_thread.join(timeout=1.0)
             self._capture_thread = None
-        if self._beat_processing_thread is not None:
-            self._beat_processing_thread.join(timeout=1.0)
-            self._beat_processing_thread = None
+        if self._beat_process is not None:
+            self._beat_process.stop()
         if self._emitter is not None:
             self._emitter.stop()
         self.is_recording = False
         logger.info("Audio stream stopped.")
 
-    def _beat_processing_loop(self, detector: BeatDetector) -> None:
-        """Beat thread: analyse pending audio every few ms; a failure is recorded and surfaced via capture_error."""
-        busy = 0.0
-        frames = 0
-        stats_start = time.perf_counter()
-        try:
-            while not self._stop_event.wait(self._BEAT_POLL_SECONDS):
-                started = time.perf_counter()
-                frames += detector.process_pending()
-                busy += time.perf_counter() - started
-                elapsed = time.perf_counter() - stats_start
-                if self.debug and elapsed >= self._BEAT_STATS_SECONDS:
-                    logger.info(
-                        "Beat thread: %d frames in %.1f s, %.2f ms/frame, busy %.1f%%, backlog %.3f s, tempo %s",
-                        frames, elapsed, 1000 * busy / max(frames, 1), 100 * busy / elapsed,
-                        detector.backlog_seconds, detector.tempo_bpm)
-                    busy, frames, stats_start = 0.0, 0, time.perf_counter()
-        except Exception as exc:
-            logger.exception("Beat processing thread failed")
-            self._beat_error = exc
-
     @property
     def capture_error(self) -> Optional[BaseException]:
-        """The exception that terminated the capture or beat-processing thread, or None while both are healthy."""
-        return self._capture_error if self._capture_error is not None else self._beat_error
+        """Why capture or beat detection stopped (capture thread or beat process), or None while both are healthy."""
+        if self._capture_error is not None:
+            return self._capture_error
+        return None if self._beat_process is None else self._beat_process.error
 
     def read_chunk(self):
         """Reads a chunk of audio data from the stream."""
@@ -510,7 +490,8 @@ class AudioCapturer:
             - tempo_bpm: Current tempo estimate (None if not yet determined)
             - beat_timestamp: Predicted beat timestamp when beat_detected=True (None otherwise)
         """
-        if self._beat_predictor is None:
+        if self._beat_predictor is None or (self._beat_process is not None and self._beat_process.error is not None):
+            # Failed beat detection must not leave the predictor extrapolating; the error is in capture_error.
             return False, None, None
 
         return self._beat_predictor.get_next_beat()

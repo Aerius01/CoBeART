@@ -1,11 +1,17 @@
 from .clock import StreamClock
-from .detector import BeatBacklogError, BeatDetector, TempoState
 from .predictor import PredictiveBeatLayer
+from .process import BeatProcess, BeatProcessError
+from .tempo import TempoEstimator, TempoSource, TempoState
+from .tracker import BeatBacklogError, BeatTracker
 
 __all__ = [
     "BeatBacklogError",
-    "BeatDetector",
+    "BeatProcess",
+    "BeatProcessError",
+    "BeatTracker",
     "PredictiveBeatLayer",
     "StreamClock",
+    "TempoEstimator",
+    "TempoSource",
     "TempoState",
 ]

@@ -42,6 +42,15 @@ class StreamClock:
         """Samples received so far."""
         return self._samples
 
+    @property
+    def seconds(self) -> float:
+        """Stream time of the newest sample received."""
+        return self._samples / self.sample_rate
+
+    def now(self) -> float:
+        """Wall-clock time of the newest sample received: the present as far as the audio stream knows it."""
+        return self.to_wall(self.seconds)
+
     def to_wall(self, stream_seconds: float) -> float:
         """Wall-clock time (Unix epoch seconds) of the given stream time."""
         offset = self._offset

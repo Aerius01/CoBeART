@@ -5,6 +5,15 @@
 
 export default {
     name: 'Zephyr',
+    setUniforms(gl, program, ctx) {
+        gl.uniform1f(program.uniforms.time, ctx.time);
+        gl.uniform2f(program.uniforms.resolution, ctx.resolution.width, ctx.resolution.height);
+        gl.uniform1f(program.uniforms.scaling, 0.7);
+        gl.uniform1f(program.uniforms.calm, 1.0);
+        gl.uniform1f(program.uniforms.contrast, 1.1);
+        gl.uniform3f(program.uniforms.color1, 0.9, 0.7, 0.2); // Warm gold
+        gl.uniform3f(program.uniforms.color2, 0.3, 0.7, 1.0); // Cool cyan
+    },
     fragmentShader: `
     precision highp float;
     varying vec2 vUv;

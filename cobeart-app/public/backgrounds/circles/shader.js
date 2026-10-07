@@ -4,6 +4,13 @@
 
 export default {
   name: 'Circles',
+  setUniforms(gl, program, ctx) {
+    gl.uniform1f(program.uniforms.time, ctx.time);
+    gl.uniform2f(program.uniforms.resolution, ctx.resolution.width, ctx.resolution.height);
+    gl.uniform1f(program.uniforms.circle_size, 0.9);
+    gl.uniform3f(program.uniforms.fill_color, 0.25, 0.7, 0.25);
+    gl.uniform3f(program.uniforms.grad_color, 1.0, 0.8, 0.0);
+  },
   fragmentShader: `
     precision highp float;
     varying vec2 vUv;

@@ -3,6 +3,10 @@
 
 export default {
   name: 'Electric Clouds',
+  setUniforms(gl, program, ctx) {
+    gl.uniform3f(program.uniforms.iResolution, ctx.resolution.width, ctx.resolution.height, 1.0);
+    gl.uniform1f(program.uniforms.iTime, ctx.time * 0.25); // Slow down time by 75%
+  },
   fragmentShader: `
     precision highp float;
     varying vec2 vUv;

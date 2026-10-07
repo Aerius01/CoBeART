@@ -1013,6 +1013,10 @@ const backgroundPrograms = backgroundRegistry.map(bg =>
     new Program(baseVertexShader, compileShader(gl.FRAGMENT_SHADER, bg.fragmentShader))
 );
 
+// Latest state handed to backgrounds as ctx (see backgrounds/registry.js)
+let latestAudio = null; // audio object of the latest 'audio' message
+const latestRigidBodies = new Map(); // ID -> latest splat message of that rigid body
+
 const displayMaterial = new Material(baseVertexShader, displayShaderSource);
 
 function initFramebuffers() {
@@ -1416,25 +1420,12 @@ function drawBackground(target, elapsedTime) {
 
     currentProgram.bind();
 
-    // Set uniforms based on which background is active
-    if (bgDef.name === 'Electric Clouds') {
-        gl.uniform3f(currentProgram.uniforms.iResolution, canvas.width, canvas.height, 1.0);
-        gl.uniform1f(currentProgram.uniforms.iTime, elapsedTime * 0.25); // Slow down time by 75%
-    } else if (bgDef.name === 'Circles') {
-        gl.uniform1f(currentProgram.uniforms.time, elapsedTime);
-        gl.uniform2f(currentProgram.uniforms.resolution, canvas.width, canvas.height);
-        gl.uniform1f(currentProgram.uniforms.circle_size, 0.9);
-        gl.uniform3f(currentProgram.uniforms.fill_color, 0.25, 0.7, 0.25);
-        gl.uniform3f(currentProgram.uniforms.grad_color, 1.0, 0.8, 0.0);
-    } else if (bgDef.name === 'Zephyr') {
-        gl.uniform1f(currentProgram.uniforms.time, elapsedTime);
-        gl.uniform2f(currentProgram.uniforms.resolution, canvas.width, canvas.height);
-        gl.uniform1f(currentProgram.uniforms.scaling, 0.7);
-        gl.uniform1f(currentProgram.uniforms.calm, 1.0);
-        gl.uniform1f(currentProgram.uniforms.contrast, 1.1);
-        gl.uniform3f(currentProgram.uniforms.color1, 0.9, 0.7, 0.2); // Warm gold
-        gl.uniform3f(currentProgram.uniforms.color2, 0.3, 0.7, 1.0); // Cool cyan
-    }
+    bgDef.setUniforms(gl, currentProgram, {
+        time: elapsedTime,
+        resolution: { width: canvas.width, height: canvas.height },
+        audio: latestAudio,
+        rigidbodies: [...latestRigidBodies.values()]
+    });
 
     blit(target);
 }
@@ -2644,7 +2635,11 @@ const handleSplatMessage = (function () {
 window.addEventListener('message', (e) => {
     const m = e.data;
     switch (m?.type) {
-        case 'splat': handleSplatMessage(m); break;
+        case 'splat':
+            latestRigidBodies.set(m.ID, m);
+            handleSplatMessage(m);
+            break;
+        case 'audio': latestAudio = m.audio; break;
         case 'cursor': handleCursorMessage(m); break;
     }
 });

@@ -2,7 +2,7 @@
 
 Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point into that review.
 
-**Status (2026-10-04):** Phases 0, 1 and 2 are done and merged into `main` (pushed). Next: Phase 3, branched from `main`. Earlier phases added **Carry-over from Phase 1** and **Carry-over from Phase 2** notes to later WPs: pass them to the agent with the WP block.
+**Status (2026-10-07):** Phases 0, 1 and 2 are done and merged into `main` (pushed). Phase 3 in progress on `refactor/phase-3`. Earlier phases added **Carry-over from Phase 1** and **Carry-over from Phase 2** notes to later WPs: pass them to the agent with the WP block.
 
 ## How this roadmap is meant to run
 
@@ -226,18 +226,19 @@ Depends on: `config/cobeart.yaml` (1.8), the rewritten sender/emitter (2.2, 2.3)
 
 ### WP 3.2: Electron and frontend read the shared config (§4.2, §3.3.C, P1 #7, #10)
 - **Model:** Sonnet. Same pattern as 3.1 on the JS side.
-- **Owns:** `cobeart-app/electron/main.js`, `cobeart-app/electron/hub.js`, `cobeart-app/server.js`, `cobeart-app/package.json`, `cobeart-app/public/fluid-bridge.js`, `cobeart-app/public/composite/composite.js`, `cobeart-app/test/`
+- **Owns:** `cobeart-app/electron/main.js`, `cobeart-app/electron/hub.js`, `cobeart-app/server.js`, `cobeart-app/package.json`, `cobeart-app/public/fluid-bridge.js`, `cobeart-app/public/composite/composite.js`, `cobeart-app/public/molten/molten.js`, `cobeart-app/public/ink/ink.js`, `cobeart-app/public/fluid/script.js` (arena normalization in `handleSplatMessage` only, ~1812-1817; WP 3.3 owns the registry regions), `cobeart-app/test/`
 - **Carry-over from Phase 2:**
   - `main.js` has a pure `resolveViewUrl(shader, usePerfMode)`, a module-level `PORT`, and `DEBUG = process.env.COBEART_DEBUG === '1'` gating DevTools: move `PORT` and `DEBUG` to config. Startup failures exit 1 via a `.catch` on `app.whenReady()`.
   - `createHub` takes `audioMaxAgeMs` and `now`; it reads `contract/*.schema.json` at runtime from `../../contract`, which any future Electron packaging must include. The hub caps messages at 256 KiB (`MAX_PAYLOAD_BYTES`), rejects producer-sent `audio` and duplicate IDs, and has no CORS. There is no body-count cap: add `maxItems` from `max_num_objects` (contract or config).
   - `fluid-bridge.js` has `SPLAT_COLOR` as a module constant and creates its overlay only when `DEBUG`. In debug mode it appends `?debug` to every iframe `src` (one reload) so embedded sims see the flag; when `__COBEART_CONFIG__` lands, iframes must get it too (the sims read only their own `window`).
   - `composite.js:~668` posts old-shape splats (`id`, x/y as 0..1, no `norm_abs_vel`) inside `try{}catch(_){}`: conform them to `splat.schema.json`.
 - **Scope:** Load `config/cobeart.yaml` once in the main process (`js-yaml`), pass port and `audioMaxAgeMs` to `createHub`, window size to `BrowserWindow`, inject the frontend subset as `window.__COBEART_CONFIG__` (replacing `__SOCKET_PORT__`; also serve it at `/config.json` so `npm run web` pages get it). `composite.js` uses injected arena, z-threshold, clap distance, and `show_interactive_elements` (config sets it `false`, code today has `true`: an intended visible change); trim `rightHandHistory` like `leftHandHistory`; fix the debug splats (~667) to match `splat.schema.json`; delete its commented-out blocks; gate per-frame logs. `fluid-bridge.js` uses injected framerate and color.
-- **Accept:** changing arena in the YAML changes composite normalization with no JS edit; `npm test` passes.
+- **Arena in the sims (added at Phase 3 start):** `molten.js:~80`, `ink.js:~343` and `fluid/script.js:~1813` hardcode `arena_x = arena_y = 3000`. Read the arena from the injected config instead. Config gives `[min, max]` per axis, so normalize with min/max (x flipped) rather than assuming a symmetric arena. The sims run in iframes and read only their own `window`, so pick one way for every page (iframe or standalone) to get the config.
+- **Accept:** changing arena in the YAML changes composite, Splat, Molten and Ink normalization with no JS edit; `npm test` passes.
 
 ### WP 3.3: One background-shader architecture (§3.3.D/E, P1 #9)
 - **Model:** Sonnet, spawned as the `glsl-shader-expert` agent type (`.claude/agents/glsl-shader-expert.md`, which sets `model: sonnet`).
-- **Owns:** `cobeart-app/public/backgrounds/**`, `cobeart-app/public/fluid/script.js` (registry compile region ~1008-1011 and `drawBackground` ~1410-1438)
+- **Owns:** `cobeart-app/public/backgrounds/**`, `cobeart-app/public/fluid/script.js` (registry compile region ~1008-1011 and `drawBackground` ~1410-1438; WP 3.2 owns the arena lines in `handleSplatMessage`)
 - **Scope:** Apply D2:
   - Delete `backgrounds/kaleidoscope/` and `backgrounds/particle-orbits/`.
   - Registry entry contract becomes `{ name, fragmentShader, setUniforms(gl, program, ctx) }`, documented with JSDoc in `registry.js`. `ctx` is `{ time, resolution, audio, rigidbodies }`, where `audio` and `rigidbodies` follow `contract/` (null/empty when absent). Move each shader's current uniform values out of the `if (bgDef.name === ...)` chain into its own `setUniforms`; delete the chain. Visual output of the three existing backgrounds must not change.
@@ -261,7 +262,7 @@ Depends on: `config/cobeart.yaml` (1.8), the rewritten sender/emitter (2.2, 2.3)
 
 **Phase 3 gate review:** `code-optimizer-reviewer` on WP 3.4 (beat detection inside the capture loop: no blocking, no dropped chunks).
 
-**Phase 3 gate:** Phase 2 gate plus `grep -rn "3000" cobeart-app/public cobeart` shows no arena or port literals outside `config/`; `start-audio-client` with no extra flags emits live beat fields from a real mic and music; every `/viewer` frame's `audio` carries the beat fields.
+**Phase 3 gate:** Phase 2 gate plus `grep -rn "3000" cobeart-app/public cobeart --include=*.js --include=*.py --include=*.html --exclude-dir=tests --exclude-dir=node_modules` shows no arena or port literals outside `config/` (unrelated values such as the `headDepth` default are fine); `start-audio-client` with no extra flags emits live beat fields from a real mic and music; every `/viewer` frame's `audio` carries the beat fields.
 
 ---
 
@@ -330,8 +331,9 @@ Shows which WP owns each contested file per phase (a dash means untouched). Use 
 | `server.js` | 1.1 | n/a | 3.2 | n/a |
 | `cobeart-app/package.json` | 1.1 | 2.1 | 3.2 | n/a |
 | `public/fluid-bridge.js` | 1.7 (orientation fields) | 2.4 | 3.2 | n/a |
-| `public/fluid/script.js` | 1.7 (head-tilt block, angular-velocity reads) | 2.4 (handlers) | 3.3 (registry, `drawBackground`) | n/a |
+| `public/fluid/script.js` | 1.7 (head-tilt block, angular-velocity reads) | 2.4 (handlers) | 3.2 (arena in `handleSplatMessage`), 3.3 (registry, `drawBackground`) | n/a |
 | `public/composite/composite.js` | 1.4 | n/a | 3.2 | n/a |
+| `public/molten/molten.js`, `public/ink/ink.js` | n/a | 2.5 | 3.2 (arena) | n/a |
 | `packagesender/sender.py` | 1.3 (call site), then 1.7 (orientation fields) | 2.2 | 3.1 | n/a |
 | `packagesender/metrics.py` | 1.3, then 1.7 (angular velocity, dropouts) | 2.2 (frame-time clock, dt floor) | 3.1 | n/a |
 | `optitrackclient/start_client.py` | 1.7 | 2.2 | 3.1 | n/a |

@@ -286,11 +286,14 @@
         let start = performance.now();
         let cursor = { x: 0.5, y: 0.5 };
 
+        const { arena, composite: compositeConfig } = window.__COBEART_CONFIG__;
+        const { z_threshold: Z_THRESHOLD, clap_distance: CLAP_DISTANCE } = compositeConfig;
+
         // Transition gating state
         // If true, we not only use the canvas visualizations, but
         // we place in the whole index.html of the active one after the animation
-        // SET TO FALSE FOR PRODUCTION, ONLY DEBUG, makes slight jump before transition
-        let showInteractiveElements = true;
+        // False in production (config frontend.composite.show_interactive_elements): makes slight jump before transition
+        const showInteractiveElements = compositeConfig.show_interactive_elements;
 
         // Seed mgmt and transition parameters
         let gateDominant = 0; // matches shader logic: 0 first half, 1 second half
@@ -305,8 +308,9 @@
         // Listening on viewer namespace
         const socket = window.viewerSocket || (window.io ? io('/viewer', { transports: ['websocket'] }) : null);
 
-        // Arena size
-        const arena = { x: 3000, y: 3000 };
+        // Normalizes arena mm to [0..1] in render space (x is flipped), from the configured [min, max] bounds
+        const normalizeX = (x) => (arena.x[1] - x) / (arena.x[1] - arena.x[0]);
+        const normalizeY = (y) => (y - arena.y[0]) / (arena.y[1] - arena.y[0]);
 
         // Next seed position
         var nx = 0;
@@ -314,7 +318,7 @@
 
         // Use the first body (if any) to drive the parent “cursor”
         // so molten reacts immediately; fluid receives splats for ALL bodies.
-        const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__?.debug === true;
+        const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__.debug === true;
         let bodyPartsIndex = {};
         fetch('/body_map.json')
           .then(response => response.json())
@@ -348,15 +352,15 @@
                 const dist = (lh && rh) ? Math.hypot(lh.x - rh.x, lh.y - rh.y) : Infinity;
 
                 // If hands are close together, use their midpoint as cursor and always switch to fluid
-                if (lh && rh && dist < 200 && lh.z < 2700 && rh.z < 2700) {
+                if (lh && rh && dist < CLAP_DISTANCE && lh.z < Z_THRESHOLD && rh.z < Z_THRESHOLD) {
                     if (DEBUG) console.log('Clapping hands detected, using midpoint for cursor');
                     // Initiating transition to molten
                     if (gateDominant !== 0) {
                         triggerTransition(0);
                     }
 
-                    nx = (- (lh.x + rh.x) / 2 + arena.x) / (2 * arena.x);
-                    ny = ( (lh.y + rh.y) / 2 + arena.y) / (2 * arena.y);
+                    nx = normalizeX((lh.x + rh.x) / 2);
+                    ny = normalizeY((lh.y + rh.y) / 2);
 
                     if (wantSeeds) {
                         if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1){
@@ -365,15 +369,15 @@
                     }
                 }
 
-                // if left hand above 2500 in z, switch to molten and keep cursor on left hand
-                else if (lh && lh.z > 2700) {
+                // if left hand above the z threshold, switch to molten and keep cursor on left hand
+                else if (lh && lh.z > Z_THRESHOLD) {
                     // Initiating transition to molten
                     if (gateDominant !== 1) {
                         triggerTransition(1);
                     }
 
-                    nx = (-lh.x + arena.x) / (2 * arena.x);
-                    ny = ( lh.y + arena.y) / (2 * arena.y);
+                    nx = normalizeX(lh.x);
+                    ny = normalizeY(lh.y);
 
                     if (wantSeeds) {
                         if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1){
@@ -382,15 +386,15 @@
                     }
                 }
 
-                // if right hand above 2500 in z, switch to ink and keep cursor on right hand
-                else if (rh && rh.z > 2700) {
+                // if right hand above the z threshold, switch to ink and keep cursor on right hand
+                else if (rh && rh.z > Z_THRESHOLD) {
                     // Initiating transition to ink
                     if (gateDominant !== 2) {
                         triggerTransition(2);
                     }
 
-                    nx = (-rh.x + arena.x) / (2 * arena.x);
-                    ny = ( rh.y + arena.y) / (2 * arena.y);
+                    nx = normalizeX(rh.x);
+                    ny = normalizeY(rh.y);
 
                     if (wantSeeds) {
                         if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1){
@@ -403,24 +407,10 @@
                 if (lh) leftHandHistory.push({x: lh.x, y: lh.y, z: lh.z});
                 if (rh) rightHandHistory.push({x: rh.x, y: rh.y, z: rh.z});
                 if (leftHandHistory.length > 5) leftHandHistory.shift();
+                if (rightHandHistory.length > 5) rightHandHistory.shift();
 
             }
 
-//            for (const rb of payload.rigidbodies) {
-//
-//                // TODO: divide on which rigid body to track for the transition animation and when to trigger
-//                nx = (-rb.x + arena.x) / (2 * arena.x);
-//                ny = ( rb.y + arena.y) / (2 * arena.y);
-//                console.log(`rb ${rb.ID} pos ${rb.x.toFixed(1)},${rb.y.toFixed(1)} => norm ${nx.toFixed(2)},${ny.toFixed(2)}`);
-//
-//                // For the transition animation we add seeds at the body position so that the
-//                // transition keeps following the tracked object
-//                if (wantSeeds) {
-//                    if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1){
-//                        if (seedGateActive) addSeed(nx, 1-ny);
-//                    };
-//                }
-//            }
             });
         }
 
@@ -541,8 +531,6 @@
 
           // Hide the currently visible iframe so the shader transition is visible
           setFrameVisibility(frames[gateDominant], false);
-//          setFrameVisibility(frames[gateDominant], true);
-//          setFrameVisibility(frames[toIndex], true);
 
           // Configure shader for a from→to transition
           const t = material.uniforms.uTime.value;
@@ -607,7 +595,7 @@
 
             if (seedGateActive && t >= seedEndTime) {
             endTransitionSeeds();
-            frames.forEach((f, i) => setFrameVisibility(f, i === gateDominant));
+            frames.forEach((f, i) => setFrameVisibility(f, showInteractiveElements && i === gateDominant));
 
             material.uniforms.uFrom.value = gateDominant;
             material.uniforms.uTo.value   = gateDominant;
@@ -664,9 +652,22 @@
         moltenFrame.addEventListener('load', tryBindSources);
         inkFrame.addEventListener('load', tryBindSources);
 
-        // Nudge fluid to start with a few splats (same as its GUI quickstart)
-        try { fluidFrame.contentWindow && fluidFrame.contentWindow.postMessage({ type: 'splat', x: 0.5, y: 0.5, id: 0, color: [1, 0.5, 0.2] }, '*'); } catch(_){}
-        try { fluidFrame.contentWindow && fluidFrame.contentWindow.postMessage({ type: 'splat', x: 0.25, y: 0.6, id: 1, color: [0.2, 0.6, 1.0] }, '*'); } catch(_){}
+        // Nudge fluid to start with a few splats (same as its GUI quickstart), as full contract splats
+        const startupSplat = (ID, nx, ny, color) => ({
+            type: 'splat',
+            ID,
+            x: Math.round(arena.x[1] - nx * (arena.x[1] - arena.x[0])),
+            y: Math.round(arena.y[0] + ny * (arena.y[1] - arena.y[0])),
+            z: 0,
+            qx: 0, qy: 0, qz: 0, qw: 1,
+            vx: 0, vy: 0, vz: 0,
+            wx: 0, wy: 0, wz: 0,
+            abs_vel: 0,
+            norm_abs_vel: 0,
+            color
+        });
+        fluidFrame.contentWindow.postMessage(startupSplat(0, 0.5, 0.5, [1, 0.5, 0.2]), '*');
+        fluidFrame.contentWindow.postMessage(startupSplat(1, 0.25, 0.6, [0.2, 0.6, 1.0]), '*');
         animate();
       });
 

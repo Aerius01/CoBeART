@@ -8,38 +8,41 @@ const path = require('path');
 
 // The hub (Express + Socket.IO) runs directly within the main process (self-contained).
 const { createHub } = require('./hub');
+const { loadConfig, resolvePort, frontendConfig } = require('./config');
 
-const PORT = 3000;
 let hub;
 
 // Starts the integrated web server via the shared hub.
-async function startHttpServer() {
-  hub = await createHub({ port: PORT, host: '127.0.0.1', publicDir: path.join(__dirname, '..', 'public') });
+async function startHttpServer(config, port) {
+  hub = await createHub({
+    port,
+    host: config.network.socketio.host,
+    publicDir: path.join(__dirname, '..', 'public'),
+    audioMaxAgeMs: config.hub.audio_max_age_ms,
+    maxBodies: config.tracking.max_num_objects,
+    frontendConfig: frontendConfig(config)
+  });
 }
 
 // Maps the dialog choice to the page the window loads.
-function resolveViewUrl(shader, usePerfMode) {
-  const base = `http://127.0.0.1:${PORT}`;
+function resolveViewUrl(origin, shader, usePerfMode) {
   switch (shader) {
     case 'molten':
-      return `${base}/molten/${usePerfMode ? '?performance=true' : ''}`;
+      return `${origin}/molten/${usePerfMode ? '?performance=true' : ''}`;
     case 'ink':
-      return `${base}/ink/`;
+      return `${origin}/ink/`;
     case 'mixed':
-      return `${base}/composite/`;
+      return `${origin}/composite/`;
     default:
-      return `${base}/`;
+      return `${origin}/`;
   }
 }
 
-// DevTools are opt-in: set COBEART_DEBUG=1.
-const DEBUG = process.env.COBEART_DEBUG === '1';
-
 // Creates and configures the main application window.
-function createWindow(shader, usePerfMode) {
+function createWindow(config, origin, shader, usePerfMode) {
   const win = new BrowserWindow({
-    width: 1050,
-    height: 1050,
+    width: config.window.width,
+    height: config.window.height,
     useContentSize: true,
     backgroundColor: '#000000',
     autoHideMenuBar: true,
@@ -56,16 +59,14 @@ function createWindow(shader, usePerfMode) {
   });
 
   // The window loads its content from the local server, just like a web browser.
-  const url = resolveViewUrl(shader, usePerfMode);
-  // Wait for the window to be ready before opening DevTools and injecting variables
+  const url = resolveViewUrl(origin, shader, usePerfMode);
+  // Wait for the window to be ready before opening DevTools
   win.webContents.on('did-finish-load', () => {
-    win.webContents.executeJavaScript(`window.__SOCKET_PORT__=${PORT}`);
-
     // Show window once content is loaded to prevent GPU errors
     win.show();
 
     // Opening devtools breaks ink visualization, so never open it there.
-    if (DEBUG && shader !== 'ink') {
+    if (config.debug && shader !== 'ink') {
       // Small delay to ensure page is fully initialized
       setTimeout(() => {
         win.webContents.openDevTools();
@@ -83,7 +84,10 @@ function createWindow(shader, usePerfMode) {
 
 // Electron's initialization is asynchronous. This block executes once the app is ready.
 app.whenReady().then(async () => {
-  await startHttpServer();
+  const config = loadConfig();
+  const port = resolvePort(config);
+  const origin = `http://${config.network.socketio.host}:${port}`;
+  await startHttpServer(config, port);
 
   const { response, checkboxChecked } = await dialog.showMessageBox({
     type: 'question',
@@ -99,11 +103,11 @@ app.whenReady().then(async () => {
   const shader = ['splat', 'molten', 'ink', 'mixed'][response];
   const usePerfMode = checkboxChecked;
 
-  createWindow(shader, usePerfMode);
+  createWindow(config, origin, shader, usePerfMode);
 
   // Handle macOS-specific behavior for re-creating a window.
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(shader, usePerfMode);
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(config, origin, shader, usePerfMode);
   });
 }).catch((err) => {
   console.error('Startup failed:', err);

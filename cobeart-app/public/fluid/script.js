@@ -1810,11 +1810,12 @@ const handleSplatMessage = (function () {
         latestZ[m.ID] = m.z
 
         // Incoming x and y are arena mm. Normalize to [0..1], convert to CSS px, then to device px using scaleByPixelRatio
-        const arena_x = 3000; // Assuming a fixed arena size of 3000x3000
-        const arena_y = 3000;
-
-        const norm_x = (-m.x + arena_x) / (2 * arena_x);
-        const norm_y = (m.y + arena_y) / (2 * arena_y);
+        const { x: [x_min, x_max], y: [y_min, y_max] } = window.__COBEART_CONFIG__.arena;
+        // Half-extents for the pattern code below, which assumes an arena centred on the origin
+        const arena_x = (x_max - x_min) / 2;
+        const arena_y = (y_max - y_min) / 2;
+        const norm_x = (x_max - m.x) / (x_max - x_min);
+        const norm_y = (m.y - y_min) / (y_max - y_min);
         const cssX = ((norm_x ?? 0) * canvas.clientWidth);
         const cssY = ((norm_y ?? 0) * canvas.clientHeight);
 

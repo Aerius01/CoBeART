@@ -1,7 +1,18 @@
 // Standalone web hub (no Electron window). Same pipeline as electron/main.js.
 const path = require('path');
 const { createHub } = require('./electron/hub');
+const { loadConfig, resolvePort, frontendConfig } = require('./electron/config');
 
-const port = Number(process.env.PORT ?? 3000);
+const config = loadConfig();
 
-createHub({ port, host: '127.0.0.1', publicDir: path.join(__dirname, 'public') });
+createHub({
+  port: resolvePort(config),
+  host: config.network.socketio.host,
+  publicDir: path.join(__dirname, 'public'),
+  audioMaxAgeMs: config.hub.audio_max_age_ms,
+  maxBodies: config.tracking.max_num_objects,
+  frontendConfig: frontendConfig(config)
+}).catch((err) => {
+  console.error('Startup failed:', err);
+  process.exit(1);
+});

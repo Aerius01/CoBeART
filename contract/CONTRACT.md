@@ -8,12 +8,14 @@ The JSON Schemas in this directory (draft 2020-12) are the single source of trut
 | `frame` (merged) | `frame.schema.json` | Hub | Socket.IO `/viewer`, event `frame` | `public/fluid-bridge.js`, `public/composite/composite.js` |
 | `audio_metrics` | `audio_metrics.schema.json` | Python audio producer (`cobeart/audiocapture/capture.py` via `emitter.py`) | Socket.IO `/audio`, event `audio_metrics` | Hub, which embeds it as `frame.audio` |
 | `splat` | `splat.schema.json` | `public/fluid-bridge.js` | `window.postMessage`, `type: "splat"` | `public/fluid/script.js`, `public/molten/molten.js`, `public/ink/ink.js` |
+| `audio` (bridge) | `audio_metrics.schema.json` (the `audio` field) | `public/fluid-bridge.js` | `window.postMessage`, `{ type: "audio", audio }` | `public/fluid/script.js` |
 
 ## Rules
 
 - **One shape per hop.** The same `frame` schema validates the producer's message on `/ingest` and the hub's message on `/viewer`. The hub only overwrites `timestamp` with its receipt time and adds `audio`; producers never send `audio`.
 - **`audio` inside a frame is a full `audio_metrics` message** (`$ref`, not a copy). It keeps its `schemaVersion` and must carry the hub's `timestamp`, which the hub adds when it stores the message.
 - **`splat` is a rigid-body entry plus `type` and `color`.** It reuses the frame's rigid-body field definitions, so names and units match the frame exactly (`ID`, `abs_vel`, `norm_abs_vel`). It has no `schemaVersion` because it never leaves the frontend.
+- **The bridge `audio` message is `{ type: "audio", audio }`,** where `audio` is the merged `frame.audio` object (an `audio_metrics` message plus the hub `timestamp`). The bridge posts it only when `audio.timestamp` differs from the last one posted, not on every frame. Listeners ignore any `type` they do not handle.
 - **Orientation is a quaternion, never Euler angles.** `qx, qy, qz, qw` (scalar last) is a unit quaternion in arena axes, and `wx, wy, wz` is angular velocity in deg/s about the arena axes. Euler angles have a singularity (gimbal lock) and wraparound jumps; consumers that need a scalar such as forward lean derive it from the quaternion directly (see the `rigidBodyFields` description in `frame.schema.json`).
 - **Rigid bodies are identified by `ID`** (upper case) and looked up by `ID`, never by position in `rigidbodies`.
 - **Times:** `timestamp` fields are Unix epoch milliseconds. `audio_metrics.beat_timestamp` is Unix epoch seconds from the Python clock. The schema ranges reject either one sent in the other unit.

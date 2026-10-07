@@ -1,7 +1,8 @@
 (function () {
-  const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__?.debug === true;
-  const BRIDGE_FRAMERATE_HZ = 120;
-  const SPLAT_COLOR = Object.freeze([1, 0.6, 0.2]);
+  const CONFIG = window.__COBEART_CONFIG__;
+  const DEBUG = new URLSearchParams(location.search).has('debug') || CONFIG.debug === true;
+  const BRIDGE_FRAMERATE_HZ = CONFIG.bridge_framerate;
+  const SPLAT_COLOR = Object.freeze([...CONFIG.splat_color]);
 
   // A splat is the frame's rigid-body entry unchanged plus type and color (contract/splat.schema.json).
   const toSplat = (rigidBody) => ({ type: 'splat', ...rigidBody, color: SPLAT_COLOR });
@@ -46,17 +47,6 @@
        host.appendChild(frameEl);
      }
 
-    // Debug only: give embedded sims ?debug too (their own URL has no query string; one reload at startup)
-    if (DEBUG) {
-      for (const frame of document.querySelectorAll('iframe[src]')) {
-        const url = new URL(frame.src, location.href);
-        if (!url.searchParams.has('debug')) {
-          url.searchParams.set('debug', '');
-          frame.src = url.href;
-        }
-      }
-    }
-
     // Debug only: overlay with the latest rigid-body and audio values
     const overlay = DEBUG ? (document.getElementById('textOverlay') ?? createOverlay(frameEl)) : null;
 
@@ -76,6 +66,7 @@
 
     let latestFrame = null; // Latest /viewer frame not yet forwarded
     let latestAudio = null; // Latest audio metrics seen in any frame
+    let postedAudioTimestamp = null; // Hub timestamp of the audio last forwarded to the simulations
 
     // Receive frames emitted by the hub and keep only the latest one
     socket.on('frame', (payload) => {
@@ -111,6 +102,11 @@ Angular Velocity: (wx: ${rb.wx.toFixed(2)}, wy: ${rb.wy.toFixed(2)}, wz: ${rb.wz
       const frames = document.querySelectorAll('iframe');
       for (const rb of frame.rigidbodies) {
         postToWindows(toSplat(rb), frames);
+      }
+      // Audio is large (spectrum) and updates at the chunk rate, so forward it only when it changed
+      if (latestAudio && latestAudio.timestamp !== postedAudioTimestamp) {
+        postedAudioTimestamp = latestAudio.timestamp;
+        postToWindows({ type: 'audio', audio: latestAudio }, frames);
       }
       if (DEBUG) showOverlay(frame);
     }, 1000 / BRIDGE_FRAMERATE_HZ);

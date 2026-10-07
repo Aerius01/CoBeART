@@ -13,6 +13,8 @@ const connectNamespace = (baseUrl, namespace) =>
   });
 
 const AUDIO_MAX_AGE_MS = 200;
+const MAX_BODIES = 2;
+const FRONTEND_CONFIG = { debug: false, arena: { x: [-1, 1], y: [-1, 1], z: [0, 1] } };
 const SETTLE_MS = 100;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,7 +64,9 @@ before(async () => {
     port: 0,
     host: '127.0.0.1',
     publicDir: path.join(__dirname, '..', 'public'),
-    audioMaxAgeMs: AUDIO_MAX_AGE_MS
+    audioMaxAgeMs: AUDIO_MAX_AGE_MS,
+    maxBodies: MAX_BODIES,
+    frontendConfig: FRONTEND_CONFIG
   });
   baseUrl = `http://127.0.0.1:${hub.server.address().port}`;
   viewer = await connectNamespace(baseUrl, '/viewer');
@@ -127,6 +131,31 @@ test('does not forward a malformed frame', async () => {
   });
 
   assert.deepEqual(frames, []);
+});
+
+test('rejects a frame with more rigid bodies than maxBodies', async () => {
+  const bodies = [0, 1, 2].map((ID) => ({ ...validBody(), ID }));
+
+  const frames = await framesAfter(() => ingest.emit('frame', { ...validFrame(), rigidbodies: bodies }));
+
+  assert.deepEqual(frames, []);
+});
+
+test('serves the frontend config at /config.json and injects it into every HTML page', async () => {
+  assert.deepEqual(await (await fetch(`${baseUrl}/config.json`)).json(), FRONTEND_CONFIG);
+
+  const injection = `<script>window.__COBEART_CONFIG__=${JSON.stringify(FRONTEND_CONFIG)};</script>`;
+  for (const page of ['/', '/index.html', '/fluid/', '/molten/', '/ink/', '/composite/']) {
+    const html = await (await fetch(`${baseUrl}${page}`)).text();
+    assert.ok(html.includes(injection), `${page} has no injected config`);
+    assert.ok(html.indexOf(injection) < html.indexOf('<script', html.indexOf(injection) + 1), `${page}: config is not first`);
+  }
+});
+
+test('does not serve HTML outside the public directory', async () => {
+  const response = await fetch(`${baseUrl}/..%2Fpackage.json`);
+
+  assert.notEqual(response.status, 200);
 });
 
 test('rejects a frame with the wrong schemaVersion', async () => {

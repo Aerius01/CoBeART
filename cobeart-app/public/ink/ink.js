@@ -340,10 +340,9 @@ function init() {
             entity.stationaryTimer = null;
         }
 
-        const arena_x = 3000;
-        const arena_y = 3000;
-        const norm_x = (-m.x + arena_x) / (2 * arena_x);
-        const norm_y = (m.y + arena_y) / (2 * arena_y);
+        const { x: [x_min, x_max], y: [y_min, y_max] } = window.__COBEART_CONFIG__.arena;
+        const norm_x = (x_max - m.x) / (x_max - x_min);
+        const norm_y = (m.y - y_min) / (y_max - y_min);
         const pixelRatio = window.devicePixelRatio;
         const screenX = norm_x * window.innerWidth * pixelRatio;
         const screenY = (1.0 - norm_y) * window.innerHeight * pixelRatio;

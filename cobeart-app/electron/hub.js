@@ -44,16 +44,52 @@ function createRejectLogger(now) {
   };
 }
 
+/** Returns the absolute path of the HTML page a request URL path maps to inside `publicDir`, or null. */
+function htmlPageFor(publicDir, urlPath) {
+  const relative = decodeURIComponent(urlPath);
+  const root = path.resolve(publicDir);
+  const file = path.join(root, relative.endsWith('/') ? `${relative}index.html` : relative);
+  return file.endsWith('.html') && file.startsWith(root + path.sep) ? file : null;
+}
+
+/** Inserts the frontend config as the first script of an HTML page, so every page and iframe reads window.__COBEART_CONFIG__. */
+function injectConfig(html, config) {
+  const script = `<script>window.__COBEART_CONFIG__=${JSON.stringify(config)};</script>`;
+  if (!/<head[^>]*>/i.test(html)) throw new Error('Cannot inject the frontend config: page has no <head>');
+  return html.replace(/<head[^>]*>/i, (head) => `${head}${script}`);
+}
+
 /**
  * Starts the hub and resolves once it is listening.
- * `audioMaxAgeMs`: audio older than this is omitted from merged frames. `now`: injectable clock (epoch ms).
- * @param {{ port: number, host?: string, publicDir: string, audioMaxAgeMs?: number, now?: () => number }} options
+ * `audioMaxAgeMs`: audio older than this is omitted from merged frames. `maxBodies`: most rigid bodies a frame may carry.
+ * `frontendConfig`: JSON-serializable config injected into every HTML page and served at /config.json.
+ * `now`: injectable clock (epoch ms).
+ * @param {{ port: number, host: string, publicDir: string, audioMaxAgeMs: number, maxBodies: number,
+ *   frontendConfig: object, now?: () => number }} options
  * @returns {Promise<{ server: import('http').Server, io: import('socket.io').Server, close: () => Promise<void> }>}
  */
-async function createHub({ port, host = '127.0.0.1', publicDir, audioMaxAgeMs = 500, now = Date.now }) {
+async function createHub({ port, host, publicDir, audioMaxAgeMs, maxBodies, frontendConfig, now = Date.now }) {
+  const missing = Object.entries({ port, host, publicDir, audioMaxAgeMs, maxBodies, frontendConfig })
+    .filter(([, value]) => value === undefined).map(([name]) => name);
+  if (missing.length > 0) throw new Error(`createHub is missing required options: ${missing.join(', ')}`);
+
   const app = express();
   const server = http.createServer(app);
   const io = new Server(server, { maxHttpBufferSize: MAX_PAYLOAD_BYTES });
+
+  app.get('/config.json', (req, res) => res.json(frontendConfig));
+
+  // HTML pages get the frontend config injected; everything else is served as is.
+  app.get(/(\.html|\/)$/, async (req, res, next) => {
+    const page = htmlPageFor(publicDir, req.path);
+    if (!page) return next();
+    try {
+      res.type('html').send(injectConfig(await fs.promises.readFile(page, 'utf8'), frontendConfig));
+    } catch (err) {
+      if (err.code === 'ENOENT') return next();
+      next(err);
+    }
+  });
 
   // Serve the front-end so the BrowserWindow (or a browser) can load index.html from the hub.
   app.use(express.static(publicDir));
@@ -75,6 +111,7 @@ async function createHub({ port, host = '127.0.0.1', publicDir, audioMaxAgeMs = 
       return validate.errors.map((e) => `${e.instancePath || '/'} ${e.message}`).join('; ');
     }
     if (kind === 'frame') {
+      if (payload.rigidbodies.length > maxBodies) return `${payload.rigidbodies.length} rigid bodies exceed max_num_objects ${maxBodies}`;
       const ids = payload.rigidbodies.map((body) => body.ID);
       if (new Set(ids).size !== ids.length) return 'duplicate rigid-body ID';
     }

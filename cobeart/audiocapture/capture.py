@@ -561,6 +561,22 @@ class AudioCapturer:
         }
 
 
+def meter_line(capturer: AudioCapturer, audio_data: np.ndarray, show_beat: bool) -> str:
+    """One console metering line; with `show_beat` it calls `has_beat()`, which consumes the beat."""
+    rms = capturer.get_rms(audio_data)
+    peak = capturer.get_peak_amplitude(audio_data)
+    zcr = capturer.get_zero_crossing_rate(audio_data)
+    dom_freq = capturer.get_dominant_frequency(audio_data)
+    if not show_beat:
+        return f"RMS: {rms:.4f} | Peak: {peak:.4f} | ZCR: {zcr:.4f} | Dominant Freq: {dom_freq:.2f} Hz  "
+    beat, tempo_bpm, beat_timestamp = capturer.has_beat()
+    beat_indicator = "BEAT" if beat else "    "
+    tempo_str = f"{tempo_bpm:.1f} BPM" if tempo_bpm is not None else "--- BPM"
+    timestamp_str = f"@ {beat_timestamp:.3f}s" if beat and beat_timestamp else ""
+    return (f"RMS: {rms:.4f} | Peak: {peak:.4f} | ZCR: {zcr:.4f} | "
+            f"Freq: {dom_freq:.0f} Hz | {beat_indicator} {timestamp_str} | {tempo_str}  ")
+
+
 def main() -> None:
     """Capture audio, meter it on the console, and emit metrics to the hub (config from config/cobeart.yaml)."""
     import argparse
@@ -613,29 +629,8 @@ def main() -> None:
                 sys.exit(1)
             audio_data = capturer.read_chunk()
             if audio_data is not None and audio_data.size > 0:
-                rms = capturer.get_rms(audio_data)
-                peak = capturer.get_peak_amplitude(audio_data)
-                zcr = capturer.get_zero_crossing_rate(audio_data)
-                dom_freq = capturer.get_dominant_frequency(audio_data)
-
-                # Check for predicted beat if enabled
-                if beat_detection:
-                    beat, tempo_bpm, beat_timestamp = capturer.has_beat()
-                    beat_indicator = "🥁 BEAT" if beat else "     "
-                    tempo_str = f"{tempo_bpm:.1f} BPM" if tempo_bpm is not None else "--- BPM"
-                    timestamp_str = f"@ {beat_timestamp:.3f}s" if beat and beat_timestamp else ""
-                    print(
-                        f"RMS: {rms:.4f} | Peak: {peak:.4f} | ZCR: {zcr:.4f} | "
-                        f"Freq: {dom_freq:.0f} Hz | {beat_indicator} {timestamp_str} | {tempo_str}  ",
-                        end='\r'
-                    )
-                else:
-                    # Use carriage return to print on the same line for a cleaner output
-                    print(
-                        f"RMS: {rms:.4f} | Peak: {peak:.4f} | ZCR: {zcr:.4f} | "
-                        f"Dominant Freq: {dom_freq:.2f} Hz  ",
-                        end='\r'
-                    )
+                # has_beat() consumes each beat, so only the display may call it when nothing is emitting.
+                print(meter_line(capturer, audio_data, show_beat=beat_detection and args.no_emit), end='\r')
 
             # Sleep for a duration that is close to the chunk's duration
             # This prevents a busy-wait loop from consuming 100% CPU.

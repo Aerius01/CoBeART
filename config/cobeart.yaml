@@ -45,5 +45,5 @@ debug: false
 
 audio:
   chunk_size: 1024                # samples per analysis chunk
-  sample_rate: 48000              # Hz, fallback when no device default exists
+  sample_rate: 48000              # Hz, capture rate used as-is (beat detection needs a multiple of 100)
   beat_detection: true

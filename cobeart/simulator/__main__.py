@@ -7,6 +7,7 @@ from dataclasses import asdict
 
 import socketio
 
+from cobeart.settings.config import ConfigError, Settings, load_settings, validate_hub_url
 from cobeart.simulator.audio import SIGNALS, AudioConfig, TempoChange, build_audio_scenario, parse_tempo_change
 from cobeart.simulator.emitter import RunConfig, Simulator
 from cobeart.simulator.faults import FAULTS
@@ -24,11 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--scenario", choices=[*sorted(MOTION_SCENARIOS), "none"], default="orbit", help="motion scenario"
     )
     parser.add_argument("--audio", choices=[*sorted(SIGNALS), "none"], default="silence", help="audio scenario")
-    parser.add_argument("--rate", type=float, default=240.0, help="motion frame rate in Hz")
+    parser.add_argument("--rate", type=float, default=None, help="motion frame rate in Hz (default: package_framerate)")
     parser.add_argument("--audio-rate", type=float, default=100.0, help="audio message rate in Hz")
     parser.add_argument("--duration", type=float, default=None, help="seconds to run (default: until interrupted)")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed; the same seed gives the same stream")
-    parser.add_argument("--url", default="http://127.0.0.1:3000", help="hub base URL")
+    parser.add_argument("--url", default=None, help="hub base URL (default: from config or $COBEART_SOCKETIO_URL)")
     parser.add_argument("--bodies", type=int, default=4, help="number of bodies for orbit, still, shuffled, edge")
     parser.add_argument("--bpm", type=float, default=120.0, help="tempo of the beat scenario")
     parser.add_argument(
@@ -48,18 +49,25 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:
     args: argparse.Namespace = build_parser().parse_args(argv)
     logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)s %(message)s")
+    try:
+        settings: Settings = load_settings()
+        url: str = settings.hub_url if args.url is None else validate_hub_url(args.url)
+    except ConfigError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
 
     now: float = time.time()
-    motion_cfg: MotionConfig = MotionConfig.from_body_map(
-        load_body_map(), rate_hz=args.rate, num_bodies=args.bodies, start_epoch_ms=now * 1000.0
+    rate_hz: float = settings.tracking.package_framerate if args.rate is None else args.rate
+    motion_cfg: MotionConfig = MotionConfig.from_settings(
+        settings, load_body_map(), rate_hz=rate_hz, num_bodies=args.bodies, start_epoch_ms=now * 1000.0
     )
     tempo_changes: tuple[TempoChange, ...] = tuple(parse_tempo_change(text) for text in args.tempo_change)
     audio_cfg: AudioConfig = AudioConfig(
-        rate_hz=args.audio_rate, tone_hz=args.tone_hz, bpm=args.bpm, beat_jitter_ms=args.beat_jitter,
-        tempo_changes=tempo_changes, seed=args.seed, start_epoch_s=now,
+        sample_rate=settings.audio.sample_rate, chunk_size=settings.audio.chunk_size, rate_hz=args.audio_rate,
+        tone_hz=args.tone_hz, bpm=args.bpm, beat_jitter_ms=args.beat_jitter, tempo_changes=tempo_changes,
+        seed=args.seed, start_epoch_s=now,
     )
     run_cfg: RunConfig = RunConfig(
-        url=args.url, motion_rate_hz=args.rate, audio_rate_hz=args.audio_rate, seed=args.seed,
+        url=url, motion_rate_hz=rate_hz, audio_rate_hz=args.audio_rate, seed=args.seed,
         duration_s=args.duration, fault=args.fault, motion_stop_after_s=args.motion_stop_after,
         audio_stop_after_s=args.audio_stop_after,
     )

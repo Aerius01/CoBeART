@@ -27,6 +27,7 @@ dependencies = [
     "numpy>=2",
     "scipy",
     "python-socketio[client]",
+    "pyyaml",
     "soundcard",
     "madmom @ git+https://github.com/CPJKU/madmom.git@27f032e8947204902c675e5e341a3faf5dc86dae",
 ]
@@ -46,6 +47,7 @@ viz = [
 [project.scripts]
 start-optitrack-client = "cobeart.optitrackclient.start_client:start"
 start-audio-client = "cobeart.audiocapture.capture:main"
+start-simulator = "cobeart.simulator.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/mezdahun/CoBeART"

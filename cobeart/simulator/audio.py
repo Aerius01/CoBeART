@@ -38,12 +38,12 @@ class TempoChange:
     at_s: float
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AudioConfig:
-    """Parameters of the simulated audio stream (defaults match today's audiocapture settings)."""
+    """Parameters of the simulated audio stream; `sample_rate` and `chunk_size` come from the `audio` settings."""
+    sample_rate: int
+    chunk_size: int
     rate_hz: float = 100.0
-    sample_rate: int = 48000
-    chunk_size: int = 1024
     spectrum_bins: int = 128
     spectrum_history: int = 16
     freq_min: float = 20.0

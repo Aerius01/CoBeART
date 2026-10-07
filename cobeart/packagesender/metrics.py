@@ -8,8 +8,6 @@ import numpy.typing as npt
 
 Vector = npt.NDArray[np.float64]
 
-DEFAULT_MAX_VEL: float = 13000.0
-DEFAULT_WINDOW_LENGTH: int = 15
 DEFAULT_MAX_GAP_S: float = 0.25
 DEFAULT_MIN_DT_S: float = 0.0005
 
@@ -45,7 +43,7 @@ def calc_abs_velocity(vx: float, vy: float) -> float:
     return math.hypot(vx, vy)
 
 
-def normalize_abs_velocity(abs_vel: float, max_vel: float = DEFAULT_MAX_VEL) -> float:
+def normalize_abs_velocity(abs_vel: float, max_vel: float) -> float:
     """Normalize absolute velocity to 0-1 against a maximum expected velocity."""
     return min(abs_vel / max_vel, 1.0)
 
@@ -79,8 +77,8 @@ class MetricsTracker:
 
     def __init__(
         self,
-        max_vel: float = DEFAULT_MAX_VEL,
-        window_length: int = DEFAULT_WINDOW_LENGTH,
+        max_vel: float,
+        window_length: int,
         max_gap_s: float = DEFAULT_MAX_GAP_S,
         min_dt_s: float = DEFAULT_MIN_DT_S,
     ) -> None:

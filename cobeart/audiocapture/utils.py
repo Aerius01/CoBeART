@@ -1,29 +1,30 @@
 import soundcard as sc
-import os
 
 
-def get_socketio_url() -> str:
-    """Return Socket.IO base URL from env or default to local Electron.
+class NoAudioDeviceError(RuntimeError):
+    """No usable audio input device, or the requested one does not exist."""
 
-    Examples:
-        http://127.0.0.1:3000
+
+def select_audio_device(index: int | None = None):
     """
-    return os.getenv("COBEART_SOCKETIO_URL", "http://127.0.0.1:3000")
+    Lists all available microphones, including loopback devices, and returns the one at `index`,
+    or prompts the user to select one when `index` is None.
 
-
-def select_audio_device():
-    """
-    Lists all available microphones, including loopback devices,
-    and prompts the user to select one.
-
-    Returns:
-        soundcard.Microphone: The selected microphone object.
+    Raises:
+        NoAudioDeviceError: no microphone exists, or `index` is out of range.
     """
     print("--- Searching for Audio Input Devices ---")
     microphones = sc.all_microphones(include_loopback=True)
     if not microphones:
-        print("No microphones found (including loopbacks). Exiting.")
-        exit()
+        raise NoAudioDeviceError("No microphones found (including loopbacks)")
+    if index is not None:
+        if not 0 <= index < len(microphones):
+            raise NoAudioDeviceError(
+                f"Device index {index} is out of range; {len(microphones)} devices found: "
+                + ", ".join(f"{i}: {mic.name}" for i, mic in enumerate(microphones))
+            )
+        print(f"--> Using device: {microphones[index].name}\n")
+        return microphones[index]
 
     print("--- Please Select an Audio Device ---")
     for i, mic in enumerate(microphones):
@@ -42,8 +43,7 @@ def select_audio_device():
         except ValueError:
             print("Invalid input. Please enter a number.")
         except (KeyboardInterrupt, EOFError):
-            print("\nSelection cancelled. Exiting.")
-            exit()
+            raise NoAudioDeviceError("Device selection cancelled") from None
 
     selected_mic = microphones[mic_index]
     print(f"--> Using device: {selected_mic.name}\n")

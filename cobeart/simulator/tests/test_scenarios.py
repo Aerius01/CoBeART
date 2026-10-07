@@ -15,8 +15,9 @@ from cobeart.simulator.scenarios import (
     clap_times,
     load_body_map,
 )
+from cobeart.simulator.tests.helpers import motion_config
 
-CFG: MotionConfig = MotionConfig.from_body_map(load_body_map(), rate_hz=240.0, num_bodies=4, start_epoch_ms=1.8e12)
+CFG: MotionConfig = motion_config()
 TIMES: list[float] = [0.0, 0.004, 0.5, 1.0, 2.0, 3.99, 4.0, 7.3, 11.0, 29.9]
 
 
@@ -127,4 +128,4 @@ def test_edge_reaches_and_passes_arena_bounds() -> None:
 
 def test_too_many_bodies_rejected() -> None:
     with pytest.raises(ValueError, match="num_bodies"):
-        build_motion_scenario("orbit", MotionConfig(num_bodies=11))(0.0, np.random.default_rng(0))
+        build_motion_scenario("orbit", motion_config(num_bodies=11))(0.0, np.random.default_rng(0))

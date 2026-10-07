@@ -9,9 +9,8 @@ import pytest
 from socketio.exceptions import BadNamespaceError
 
 from cobeart.optitrackclient.transform import ArenaPose
-from cobeart.packagesender.metrics import MetricsTracker
 from cobeart.packagesender.sender import INGEST_NAMESPACE, PayloadSender, StrictJson
-from cobeart.packagesender.tests.contract import RecordingClient, frame_validator
+from cobeart.packagesender.tests.contract import RecordingClient, frame_validator, make_tracker
 
 MOCAP_HZ: float = 240.0
 EPOCH_S: float = 1_800_000_000.0
@@ -20,7 +19,7 @@ EPOCH_S: float = 1_800_000_000.0
 def make_sender(
     client: RecordingClient, framerate: float = MOCAP_HZ, failure: threading.Event | None = None, **kwargs: float
 ) -> PayloadSender:
-    return PayloadSender(client, MetricsTracker(), "http://127.0.0.1:1", framerate,
+    return PayloadSender(client, make_tracker(), "http://127.0.0.1:1", framerate,
                          failure=failure if failure is not None else threading.Event(),
                          wall_clock=lambda: EPOCH_S, **kwargs)
 
@@ -72,7 +71,7 @@ def test_constant_motion_gives_constant_velocity_with_jitter_and_lower_send_rate
     vx, vy = 1200.0, -500.0  # mm/s
     wall: list[float] = [EPOCH_S]
     client = RecordingClient()
-    sender = PayloadSender(client, MetricsTracker(), "http://127.0.0.1:1", send_hz, threading.Event(),
+    sender = PayloadSender(client, make_tracker(), "http://127.0.0.1:1", send_hz, threading.Event(),
                            wall_clock=lambda: wall[0])
     client.connect("http://127.0.0.1:1", ["websocket"], [INGEST_NAMESPACE], True, 1.0)
     n_frames = int(3 * MOCAP_HZ)

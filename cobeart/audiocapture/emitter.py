@@ -1,12 +1,12 @@
 import logging
 import time
 import threading
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 import socketio
 from socketio.exceptions import SocketIOError
 
-from cobeart.audiocapture.utils import get_socketio_url
+from cobeart.packagesender.sender import StrictJson
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -23,13 +23,15 @@ class AudioEmitter:
 
     def __init__(
         self,
-        socketio_url: Optional[str] = None,
+        socketio_url: str,
         namespace: str = "/audio",
     ) -> None:
-        self.socketio_url = socketio_url or get_socketio_url()
+        if not socketio_url:
+            raise ValueError("AudioEmitter needs the hub URL from Settings.hub_url, got an empty value")
+        self.socketio_url = socketio_url
         self.namespace = namespace
 
-        self._sio = socketio.Client(reconnection=True, reconnection_attempts=0)
+        self._sio = socketio.Client(reconnection=True, reconnection_attempts=0, json=StrictJson)
         self._setup_handlers()
 
         self._connected = threading.Event()

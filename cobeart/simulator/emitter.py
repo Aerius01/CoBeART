@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
+from socketio.exceptions import SocketIOError
 
 from cobeart.simulator.audio import AudioScenario
 from cobeart.simulator.faults import apply_fault
@@ -115,7 +116,14 @@ class Simulator:
                 delay: float = start + t - self._clock()
                 if delay > 0:
                     self._sleep(delay)
-                self._client.emit(stream.event, stream.produce(t), namespace=stream.namespace)
+                try:
+                    self._client.emit(stream.event, stream.produce(t), namespace=stream.namespace)
+                except SocketIOError as exc:
+                    if cfg.fault is None:
+                        raise
+                    # The hub drops a connection that sends an undecodable message (e.g. NaN): expected here.
+                    logger.warning("Hub dropped the connection after a %r message (%r); stopping", cfg.fault, exc)
+                    break
                 stream.tick += 1
                 sent[stream.event] += 1
             if not active and cfg.duration_s is not None:

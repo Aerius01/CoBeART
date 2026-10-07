@@ -6,18 +6,19 @@ import numpy as np
 import pytest
 from jsonschema import Draft202012Validator
 
-from cobeart.simulator.audio import AudioConfig, build_audio_scenario
+from cobeart.simulator.audio import build_audio_scenario
 from cobeart.simulator.faults import FAULTS, apply_fault
-from cobeart.simulator.scenarios import MotionConfig, build_motion_scenario
+from cobeart.simulator.scenarios import build_motion_scenario
+from cobeart.simulator.tests.helpers import audio_config, motion_config
 
 
 def _frame_payload() -> dict[str, Any]:
-    scenario = build_motion_scenario("orbit", MotionConfig(start_epoch_ms=1.8e12))
+    scenario = build_motion_scenario("orbit", motion_config())
     return scenario(1.0, np.random.default_rng(0)).to_payload()
 
 
 def _audio_payload() -> dict[str, Any]:
-    return build_audio_scenario("beat", AudioConfig())(1.0, np.random.default_rng(0)).to_payload()
+    return build_audio_scenario("beat", audio_config())(1.0, np.random.default_rng(0)).to_payload()
 
 
 def test_baseline_payloads_are_valid(

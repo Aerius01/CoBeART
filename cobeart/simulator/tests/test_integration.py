@@ -17,9 +17,10 @@ import socketio
 from jsonschema import Draft202012Validator
 
 from cobeart.simulator.__main__ import main
-from cobeart.simulator.audio import AudioConfig, build_audio_scenario
+from cobeart.simulator.audio import build_audio_scenario
 from cobeart.simulator.emitter import RunConfig, Simulator
-from cobeart.simulator.scenarios import MotionConfig, build_motion_scenario, load_body_map
+from cobeart.simulator.scenarios import build_motion_scenario
+from cobeart.simulator.tests.helpers import audio_config, motion_config
 
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 APP_DIR: Path = REPO_ROOT / "cobeart-app"
@@ -83,10 +84,8 @@ def _assert_frames(received: list[dict[str, Any]], frame_validator: Draft202012V
 
 
 def test_simulator_frames_with_merged_audio_reach_viewer(hub_url: str, frame_validator: Draft202012Validator) -> None:
-    motion_cfg = MotionConfig.from_body_map(
-        load_body_map(), rate_hz=120.0, num_bodies=4, start_epoch_ms=time.time() * 1000
-    )
-    audio_cfg = AudioConfig(start_epoch_s=time.time(), lock_in_s=0.5)
+    motion_cfg = motion_config(rate_hz=120.0, start_epoch_ms=time.time() * 1000)
+    audio_cfg = audio_config(start_epoch_s=time.time(), lock_in_s=0.5)
     simulator = Simulator(
         client=socketio.Client(),
         motion=build_motion_scenario("orbit", motion_cfg),

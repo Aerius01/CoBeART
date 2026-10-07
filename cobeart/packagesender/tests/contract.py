@@ -9,6 +9,8 @@ from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 from socketio.exceptions import ConnectionError as SocketIOConnectionError
 
+from cobeart.packagesender.metrics import MetricsTracker
+
 CONTRACT_DIR: Path = Path(__file__).resolve().parents[3] / "contract"
 
 
@@ -58,3 +60,8 @@ class RecordingClient:
         """Simulate the server going away."""
         self.connected = False
         self.handlers["disconnect"]("transport close")
+
+
+def make_tracker(max_vel: float = 13000.0, window_length: int = 15, **kwargs: float) -> MetricsTracker:
+    """A MetricsTracker with the values config/cobeart.yaml ships, overridable per test."""
+    return MetricsTracker(max_vel=max_vel, window_length=window_length, **kwargs)

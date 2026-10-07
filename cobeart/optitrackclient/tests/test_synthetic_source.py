@@ -15,10 +15,11 @@ from cobeart.optitrackclient.start_client import (
     run_simulated,
 )
 from cobeart.optitrackclient.transform import pose_to_arena
-from cobeart.packagesender.metrics import MetricsTracker
 from cobeart.packagesender.sender import INGEST_NAMESPACE, PayloadSender
-from cobeart.packagesender.tests.contract import RecordingClient, frame_validator
+from cobeart.packagesender.tests.contract import RecordingClient, frame_validator, make_tracker
+from cobeart.settings.config import load_settings
 
+SETTINGS = load_settings({})
 PATH = CirclePath(body_id=2, radius_mm=1500.0, period_s=6.0, height_mm=1200.0, phase_rad=0.3)
 
 
@@ -27,7 +28,7 @@ def build_pipeline(
 ) -> tuple[SyntheticNatNetSource, RecordingClient]:
     failure = failure if failure is not None else threading.Event()
     client = RecordingClient()
-    sender = PayloadSender(client, MetricsTracker(), "http://127.0.0.1:1", send_hz, failure)
+    sender = PayloadSender(client, make_tracker(), "http://127.0.0.1:1", send_hz, failure)
     client.connect("http://127.0.0.1:1", ["websocket"], [INGEST_NAMESPACE], True, 1.0)
     source = SyntheticNatNetSource([PATH], rate_hz=240.0)
     FramePipeline(sender, max_num_objects=10, failure=failure).attach(source)
@@ -37,14 +38,14 @@ def build_pipeline(
 @pytest.mark.parametrize("url", ["not a url", "localhost:3000", "http://[::1", "ftp://host", "http://", "http://h:x"])
 def test_bad_hub_url_rejected_at_parse(url: str, capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
-        parse_args(["--simulate", "--url", url])
+        parse_args(["--simulate", "--url", url], SETTINGS)
     assert exc.value.code == 2
     assert repr(url) in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("url", ["http://127.0.0.1:3202", "https://hub.local", "http://[::1]:3000"])
 def test_good_hub_url_accepted(url: str) -> None:
-    assert parse_args(["--simulate", "--url", url]).url == url
+    assert parse_args(["--simulate", "--url", url], SETTINGS).url == url
 
 
 def test_callback_exception_sets_failure_instead_of_killing_the_thread(caplog: pytest.LogCaptureFixture) -> None:
@@ -119,4 +120,4 @@ def test_run_emits_frames_on_a_thread_until_shutdown() -> None:
 
 def test_step_without_listeners_raises() -> None:
     with pytest.raises(RuntimeError):
-        SyntheticNatNetSource([PATH]).step()
+        SyntheticNatNetSource([PATH], rate_hz=240.0).step()

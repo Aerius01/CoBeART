@@ -21,7 +21,6 @@
 import argparse
 import logging
 import math
-import os
 import signal
 import threading
 import time
@@ -29,11 +28,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import FrameType
 from typing import Any, Protocol
-from urllib.parse import urlsplit
 
 import socketio
 
-import cobeart.settings.streaming as otsettings
 from cobeart.packagesender.metrics import MetricsTracker
 from cobeart.packagesender.sender import PayloadSender, StrictJson
 
@@ -42,12 +39,10 @@ import cobeart.optitrackclient.DataDescriptions as DataDescriptions
 import cobeart.optitrackclient.MoCapData as MoCapData
 from cobeart.optitrackclient.tracked_bodies import apply_rigid_body
 from cobeart.optitrackclient.transform import ArenaPose, Quaternion, Vec3
+from cobeart.settings.config import ConfigError, Settings, load_settings, validate_hub_url
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-SOCKETIO_URL_ENV: str = "COBEART_SOCKETIO_URL"
-DEFAULT_SOCKETIO_URL: str = "http://127.0.0.1:3000"
-SYNTHETIC_RATE_HZ: float = 240.0
 FAILURE_POLL_S: float = 0.1
 
 FrameData = Mapping[str, Any]  # NatNet's per-frame dict; only "timestamp" (s since Motive start) is used
@@ -111,7 +106,7 @@ class FramePipeline:
             apply_rigid_body(self._bodies, self._dropped_ids, new_id, position, rotation, tracking_valid)
         elif new_id not in self._warned_ids:
             self._warned_ids.add(new_id)
-            logger.warning("Ignoring rigid body ID %d: IDs must be below max_num_objects (%d), see settings",
+            logger.warning("Ignoring rigid body ID %d: IDs must be below max_num_objects (%d), see config/cobeart.yaml",
                            new_id, self._max_num_objects)
 
     def _send_frame(self, data_dict: FrameData) -> None:
@@ -166,13 +161,13 @@ class SyntheticNatNetSource:
     def __init__(
         self,
         paths: Sequence[CirclePath],
-        rate_hz: float = SYNTHETIC_RATE_HZ,
+        rate_hz: float,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.new_frame_listener: FrameListener | None = None
         self.rigid_body_listener: RigidBodyListener | None = None
         self._paths: tuple[CirclePath, ...] = tuple(paths)
-        self._rate_hz: float = rate_hz
+        self.rate_hz: float = rate_hz
         self._clock: Callable[[], float] = clock
         self._frame_number: int = 0
         self._stop: threading.Event = threading.Event()
@@ -182,7 +177,7 @@ class SyntheticNatNetSource:
         """Emit the next frame synchronously; its timestamp is frame_number / rate_hz seconds."""
         if self.new_frame_listener is None or self.rigid_body_listener is None:
             raise RuntimeError("SyntheticNatNetSource listeners must be set before frames are emitted")
-        t: float = self._frame_number / self._rate_hz
+        t: float = self._frame_number / self.rate_hz
         for path in self._paths:
             position, rotation = arena_to_optitrack(arena_pose_on_circle(path, t))
             self.rigid_body_listener(path.body_id, position, rotation, True)
@@ -208,7 +203,7 @@ class SyntheticNatNetSource:
         first_frame: int = self._frame_number
         while not self._stop.is_set():
             self.step()
-            delay: float = start + (self._frame_number - first_frame) / self._rate_hz - self._clock()
+            delay: float = start + (self._frame_number - first_frame) / self.rate_hz - self._clock()
             if delay > 0:
                 self._stop.wait(delay)
 
@@ -312,36 +307,33 @@ def test_classes():
 def hub_url(value: str) -> str:
     """argparse type: an http(s) URL with a host, e.g. http://127.0.0.1:3000."""
     try:
-        parts = urlsplit(value)
-        host: str | None = parts.hostname
-        parts.port  # raises ValueError on a malformed port
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"invalid hub URL {value!r}: {exc}") from exc
-    if parts.scheme not in {"http", "https"} or not host:
-        raise argparse.ArgumentTypeError(f"invalid hub URL {value!r}: expected http(s)://host[:port]")
-    return value
+        return validate_hub_url(value)
+    except ConfigError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None, settings: Settings) -> argparse.Namespace:
     """Command line: optional NatNet addresses (positional, as in the NatNet sample) plus --simulate and --url."""
     parser = argparse.ArgumentParser(description="Stream OptiTrack rigid bodies to the CoBeART hub.")
-    parser.add_argument("server_address", nargs="?", default=otsettings.server_address,
-                        help="OptiTrack (Motive) machine address")
-    parser.add_argument("client_address", nargs="?", default=otsettings.client_address,
-                        help="address of this machine")
+    parser.add_argument("server_address", nargs="?", default=settings.network.server_address,
+                        help="OptiTrack (Motive) machine address (default from config)")
+    parser.add_argument("client_address", nargs="?", default=settings.network.client_address,
+                        help="address of this machine (default from config)")
     parser.add_argument("transport", nargs="?", default=None,
-                        help="'u...' for unicast, anything else for multicast (default from settings)")
+                        help="'u...' for unicast, anything else for multicast (default from config)")
     parser.add_argument("--simulate", action="store_true",
                         help="use scripted synthetic bodies instead of a NatNet connection")
-    parser.add_argument("--url", type=hub_url, default=os.environ.get(SOCKETIO_URL_ENV, DEFAULT_SOCKETIO_URL),
-                        help=f"hub Socket.IO URL (default ${SOCKETIO_URL_ENV} or {DEFAULT_SOCKETIO_URL})")
+    parser.add_argument("--url", type=hub_url, default=settings.hub_url,
+                        help=f"hub Socket.IO URL (default from config or $COBEART_SOCKETIO_URL: {settings.hub_url})")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args(argv)
 
 
-def build_natnet_client(args: argparse.Namespace) -> NatNetClient:
+def build_natnet_client(args: argparse.Namespace, settings: Settings) -> NatNetClient:
     """A NatNet client configured from the command line and settings."""
-    use_multicast: bool = otsettings.use_multicast if args.transport is None else args.transport[:1].upper() != "U"
+    use_multicast: bool = (
+        settings.network.use_multicast if args.transport is None else args.transport[:1].upper() != "U"
+    )
     streaming_client = NatNetClient()
     streaming_client.set_client_address(args.client_address)
     streaming_client.set_server_address(args.server_address)
@@ -361,7 +353,7 @@ def run_simulated(source: SyntheticNatNetSource, failure: threading.Event) -> No
     previous_term = signal.signal(signal.SIGTERM, _request_stop)
     try:
         source.run()
-        logger.info("Simulating NatNet frames at %.0f Hz; Ctrl+C to stop", SYNTHETIC_RATE_HZ)
+        logger.info("Simulating NatNet frames at %.0f Hz; Ctrl+C to stop", source.rate_hz)
         while not stop.is_set() and not failure.is_set():
             stop.wait(FAILURE_POLL_S)
     finally:
@@ -382,26 +374,32 @@ def _interrupt_main_on_failure(failure: threading.Event) -> None:
 
 def start(argv: Sequence[str] | None = None) -> None:
     """Stream rigid bodies from NatNet (or the synthetic source with --simulate) to the hub."""
-    args = parse_args(argv)
+    try:
+        settings: Settings = load_settings()
+    except ConfigError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
+    args = parse_args(argv, settings)
     logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     failure = threading.Event()
     sender = PayloadSender(
         client=socketio.Client(reconnection=False, json=StrictJson),
-        tracker=MetricsTracker(),
+        tracker=MetricsTracker(max_vel=settings.metrics.max_vel, window_length=settings.metrics.history_window),
         url=args.url,
-        framerate=otsettings.package_framerate,
+        framerate=settings.tracking.package_framerate,
         failure=failure,
     )
-    pipeline = FramePipeline(sender, otsettings.max_num_objects, failure)
+    logger.info("Hub %s, package rate %.0f Hz, max %d bodies",
+                args.url, settings.tracking.package_framerate, settings.tracking.max_num_objects)
+    pipeline = FramePipeline(sender, settings.tracking.max_num_objects, failure)
     sender.connect()
     try:
         if args.simulate:
-            source = SyntheticNatNetSource(DEFAULT_SYNTHETIC_PATHS)
+            source = SyntheticNatNetSource(DEFAULT_SYNTHETIC_PATHS, settings.tracking.tracking_framerate)
             pipeline.attach(source)
             run_simulated(source, failure)
         else:
-            streaming_client = build_natnet_client(args)
+            streaming_client = build_natnet_client(args, settings)
             pipeline.attach(streaming_client)
             run_natnet(streaming_client, failure)
     finally:

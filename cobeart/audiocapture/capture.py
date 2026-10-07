@@ -581,58 +581,50 @@ class AudioCapturer:
         }
 
 
-def main():
-    """Main function to run audio capture with optional Socket.IO emission."""
+def main() -> None:
+    """Capture audio, meter it on the console, and emit metrics to the hub (config from config/cobeart.yaml)."""
     import argparse
-    parser = argparse.ArgumentParser(
-        description="Capture audio and compute metrics with optional Socket.IO emission"
-    )
-    parser.add_argument(
-        "--enable-beat-detection",
-        action="store_true",
-        help="Enable real-time beat detection (requires madmom)"
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug logging for beat detection"
-    )
-    parser.add_argument(
-        "--emit",
-        action="store_true",
-        help="Enable Socket.IO emission of audio metrics (emits at capture rate ~100 Hz)"
-    )
-    parser.add_argument(
-        "--socketio-url",
-        type=str,
-        default=None,
-        help="Socket.IO server URL (default: http://localhost:3000)"
-    )
-    parser.add_argument(
-        "--socketio-namespace",
-        type=str,
-        default="/audio",
-        help="Socket.IO namespace (default: /audio)"
-    )
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+    from cobeart.audiocapture.utils import NoAudioDeviceError
+    from cobeart.settings.config import ConfigError, load_settings
 
-    # Create capturer with optional emission
+    parser = argparse.ArgumentParser(
+        description="Capture audio and emit its metrics to the CoBeART hub (settings come from config/cobeart.yaml)"
+    )
+    parser.add_argument("--no-emit", action="store_true", help="meter locally without sending to the hub")
+    parser.add_argument("--debug", action="store_true", help="enable debug logging")
+    parser.add_argument("--device", type=int, default=None, metavar="INDEX", help="input device index (else prompt)")
+    args = parser.parse_args()
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
+    debug = args.debug or settings.debug
+    logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
+
+    try:
+        mic = select_audio_device(args.device)
+    except NoAudioDeviceError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
+    beat_detection = settings.audio.beat_detection
+    namespace = "/audio"
     capturer = AudioCapturer(
-        chunk_size=1024,
-        enable_beat_detection=args.enable_beat_detection,
-        enable_emit=args.emit,
-        socketio_url=args.socketio_url,
-        socketio_namespace=args.socketio_namespace,
-        debug=args.debug
+        chunk_size=settings.audio.chunk_size,
+        sample_rate=settings.audio.sample_rate,
+        enable_beat_detection=beat_detection,
+        enable_emit=not args.no_emit,
+        socketio_url=settings.hub_url,
+        socketio_namespace=namespace,
+        debug=debug,
+        mic=mic,
     )
     capturer.start_stream()
 
-    if args.enable_beat_detection:
-        print("Beat detection enabled")
-    if args.emit:
-        print(f"Socket.IO emission enabled at capture rate (~100 Hz) to {args.socketio_namespace}")
-    print("Reading audio metrics... Press Ctrl+C to stop.")
+    logger.info("Beat detection %s", "enabled" if beat_detection else "disabled")
+    if args.no_emit:
+        logger.info("Emission disabled (--no-emit)")
+    else:
+        logger.info("Emitting audio metrics to %s%s", settings.hub_url, namespace)
+    logger.info("Reading audio metrics... Press Ctrl+C to stop.")
 
     try:
         while True:
@@ -647,7 +639,7 @@ def main():
                 dom_freq = capturer.get_dominant_frequency(audio_data)
 
                 # Check for predicted beat if enabled
-                if args.enable_beat_detection:
+                if beat_detection:
                     beat, tempo_bpm, beat_timestamp = capturer.has_beat()
                     beat_indicator = "🥁 BEAT" if beat else "     "
                     tempo_str = f"{tempo_bpm:.1f} BPM" if tempo_bpm is not None else "--- BPM"

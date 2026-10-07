@@ -15,6 +15,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.spatial.transform import Rotation
 
+from cobeart.settings.config import Range, Settings
 from cobeart.simulator.models import Frame, RigidBody
 
 Vector = npt.NDArray[np.float64]
@@ -38,34 +39,40 @@ def load_body_map(path: Path = BODY_MAP_PATH) -> dict[str, int]:
     return body_map
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class MotionConfig:
-    """Arena and rate parameters (defaults copied from cobeart/settings/streaming.py)."""
-    rate_hz: float = 240.0
-    num_bodies: int = 4
-    arena_x: tuple[float, float] = (-3000.0, 3000.0)
-    arena_y: tuple[float, float] = (-3000.0, 3000.0)
-    arena_z: tuple[float, float] = (0.0, 2500.0)
-    max_num_objects: int = 10
-    max_vel: float = 13000.0
-    history_window: int = 15
-    start_epoch_ms: float = 1_800_000_000_000.0
-    left_hand_id: int = 0
-    right_hand_id: int = 1
-    head_id: int = 2
+    """Arena, rate and body-ID parameters; build with `from_settings` so they come from config/cobeart.yaml."""
+    rate_hz: float
+    num_bodies: int
+    arena_x: Range
+    arena_y: Range
+    arena_z: Range
+    max_num_objects: int
+    max_vel: float
+    history_window: int
+    start_epoch_ms: float
+    left_hand_id: int
+    right_hand_id: int
+    head_id: int
 
     @property
     def dt(self) -> float:
         return 1.0 / self.rate_hz
 
     @classmethod
-    def from_body_map(
-        cls, body_map: dict[str, int], rate_hz: float, num_bodies: int, start_epoch_ms: float
+    def from_settings(
+        cls, settings: Settings, body_map: dict[str, int], rate_hz: float, num_bodies: int, start_epoch_ms: float
     ) -> "MotionConfig":
-        """Config with the hand and head IDs taken from body_map.json."""
+        """Config with the arena, tracking and metrics values from `settings` and the IDs from body_map.json."""
         return cls(
             rate_hz=rate_hz,
             num_bodies=num_bodies,
+            arena_x=settings.arena.x,
+            arena_y=settings.arena.y,
+            arena_z=settings.arena.z,
+            max_num_objects=settings.tracking.max_num_objects,
+            max_vel=settings.metrics.max_vel,
+            history_window=settings.metrics.history_window,
             start_epoch_ms=start_epoch_ms,
             left_hand_id=body_map["left_hand"],
             right_hand_id=body_map["right_hand"],
@@ -220,6 +227,8 @@ def edge(t: float, rng: np.random.Generator, cfg: MotionConfig) -> Frame:
     x_amp: float = (cfg.arena_x[1] - cfg.arena_x[0]) / 2 + EDGE_MARGIN_XY_MM
     y_amp: float = (cfg.arena_y[1] - cfg.arena_y[0]) / 2 + EDGE_MARGIN_XY_MM
     z_amp: float = (cfg.arena_z[1] - cfg.arena_z[0]) / 2 + EDGE_MARGIN_Z_MM
+    x_mid: float = (cfg.arena_x[1] + cfg.arena_x[0]) / 2
+    y_mid: float = (cfg.arena_y[1] + cfg.arena_y[0]) / 2
     z_mid: float = (cfg.arena_z[1] + cfg.arena_z[0]) / 2
 
     def make(i: int) -> BodyPath:
@@ -228,8 +237,8 @@ def edge(t: float, rng: np.random.Generator, cfg: MotionConfig) -> Frame:
 
         def position(s: Vector) -> Vector:
             return np.stack([
-                x_amp * np.sin(2 * np.pi * fx * s + phase),
-                y_amp * np.sin(2 * np.pi * fy * s + 2 * phase),
+                x_mid + x_amp * np.sin(2 * np.pi * fx * s + phase),
+                y_mid + y_amp * np.sin(2 * np.pi * fy * s + 2 * phase),
                 z_mid + z_amp * np.sin(2 * np.pi * fz * s + 3 * phase),
             ], axis=1)
 

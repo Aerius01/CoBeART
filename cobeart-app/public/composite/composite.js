@@ -301,6 +301,7 @@
         let gateLastFlipTime = 0.0; // seconds
         let seedGateActive = false;
         let seedEndTime = 0.0; // absolute time when current transition seeding ends
+        let lastSeedTime = -Infinity; // birth time of the latest seed in the current transition
         // Idle seed: we keep one seed position updated but marked inactive (z<0)
         let idleSeed = { x: 0.5, y: 0.5 };
 
@@ -604,22 +605,19 @@
             renderer.render(scene, camera);
         }
 
+        // Seeds are spaced evenly over the transition and never evicted, so every seed keeps growing and the
+        // revealed area only increases (evicting the oldest, largest seed made the reveal shrink mid-transition).
         function addSeed(nx, ny) {
             if (!material) return;
             const count = material.uniforms.uSeedCount.value;
             const MAX = 64; // must equal MAX_SEEDS in the shader and seedArray length
             const now = material.uniforms.uTime.value;
-            if (count < MAX) {
-            const arr = material.uniforms.uSeeds.value;
-            arr[count].set(nx, ny, now);
+            const minSpacing = material.uniforms.uAnimSeconds.value / MAX;
+            if (count >= MAX || now - lastSeedTime < minSpacing) return;
+            material.uniforms.uSeeds.value[count].set(nx, ny, now);
             material.uniforms.uSeedCount.value = count + 1;
-            } else {
-            // Overwrite the oldest by shifting birth times forward (simple ring buffer)
-            const arr = material.uniforms.uSeeds.value;
-            for (let i = 1; i < MAX; i++) arr[i - 1].copy(arr[i]);
-            arr[MAX - 1].set(nx, ny, now);
-            }
-            if (DEBUG) console.log(`addSeed ${nx.toFixed(2)},${ny.toFixed(2)} count=${material.uniforms.uSeedCount.value}`);
+            lastSeedTime = now;
+            if (DEBUG) console.log(`addSeed ${nx.toFixed(2)},${ny.toFixed(2)} count=${count + 1}`);
         }
 
         function clearSeeds() {
@@ -637,6 +635,7 @@
 
         function startTransitionSeeds(now) {
             seedGateActive = true;
+            lastSeedTime = -Infinity;
             clearSeeds();
         }
 

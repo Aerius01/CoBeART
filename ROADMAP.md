@@ -2,7 +2,7 @@
 
 Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point into that review.
 
-**Status (2026-10-07):** Phases 0, 1 and 2 are done and merged into `main` (pushed). Phase 3 in progress on `refactor/phase-3`. Earlier phases added **Carry-over from Phase 1** and **Carry-over from Phase 2** notes to later WPs: pass them to the agent with the WP block.
+**Status (2026-10-08):** Phases 0 to 3 are done and merged into `main` (pushed). Next: Phase 4, branched from `main`. Earlier phases added **Carry-over from Phase 1/2/3** notes to later WPs: pass them to the agent with the WP block.
 
 ## How this roadmap is meant to run
 
@@ -38,6 +38,15 @@ Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point
   - Playwright screenshots must be saved under the repo (`.playwright-mcp/`); the scratchpad is outside its allowed roots.
   - Parallel agents share one scratchpad directory: each uses its own subfolder.
   - The Splat view only paints hands, feet and tracked objects (`trackedBodyParts` in `fluid/script.js`, from `body_map.json`); the head and other IDs drive patterns but draw nothing. `--simulate` sends IDs 0-2, so Splat shows two bodies and Ink shows three.
+- **Phase 3 lessons (master and agents):**
+  - A queued `SendMessage` reaches an agent only between tool calls. An agent blocked in one long command (a test loop, or a poll waiting for a background job) never sees it. Agents must cap every test run with `timeout`, and never poll a background job with an unbounded `until` loop. If an agent stalls, inspect its processes (`ps`, `/proc/<pid>/task/*/wchan`) and stop the blocking command by PID; `SIGINT` to a hung pytest prints where it was stuck.
+  - A worktree re-based onto a newer phase head (`git checkout --detach refactor/phase-N`) needs `npm ci` again when that head changed `package.json`, or the hub integration tests fail.
+  - Use `npm install` (not `npm ci`) in the main checkout when only a dependency was added: it keeps `chrome-sandbox` root-owned, so the human need not redo the `sudo` steps.
+  - `/viewer` frames are emitted only when a motion frame arrives. Any audio or beat check that watches `/viewer` needs a motion source too (`start-simulator --scenario orbit --audio none`; `--audio none` so simulated audio does not overwrite the real mic).
+  - `start-simulator` fails at once if no hub is up; start Electron (or `node server.js`) first. Console scripts (`start-*`) need `conda activate splat-env`.
+  - No simulator scenario raises a hand above `z_threshold`, so composite transitions need a driver (Phase 3 used a throwaway scratchpad script). A simulator `transitions` scenario would make this a regular gate step.
+  - Report distributions (median, percentiles), not a sorted head, when checking tempo: the first gate readout showed only the lowest values and looked like a 3-5 BPM error.
+  - WP 3.4 runs the beat models in a spawned child process (`beat/process.py`), because madmom's Python steps held the GIL and stalled capture by up to 0.94 s under load. Any program that starts `AudioCapturer` must do so under `if __name__ == "__main__":`.
 
 ### Shared conventions (every agent follows these)
 
@@ -273,6 +282,7 @@ Depends on everything above.
 ### WP 4.1: Fitness functions and CI (P2 #17)
 - **Model:** Sonnet. CI config and a grep-based checker.
 - **Owns:** `.github/workflows/ci.yml` (new), `scripts/fitness.mjs` (new)
+- **Carry-over from Phase 3:** the arena/port literal check must allow `fluid/script.js` `headDepth` (default 3000 mm, not an arena literal) and the `http://127.0.0.1:3000` examples in docstrings (`settings/config.py`, `start_client.py`). Arena literals in `fluid/script.js` patterns (~2008-2517) are now derived from config as half-extents. CI needs madmom (pinned git commit, builds from source) and `npm ci` before pytest, or the hub integration tests skip or fail. The beat tests spawn a child process and use shared memory; the audiocapture `conftest.py` has a 120 s per-test hang guard.
 - **Scope:** CI runs `pytest` (including `tests/e2e/` from WP 4.3, using the agreed path even before 4.3 merges), `flake8`, `npm test`. Fitness script fails if: `server.js` or `main.js` construct `new Server(` directly instead of using `createHub`; any file outside `contract/` and the hub re-declares the payload field list (heuristic grep for the field set); arena or port literals appear outside `config/`; `print(` appears in `cobeart/packagesender` or `cobeart/optitrackclient/transform.py`.
 - **Accept:** CI green on the phase branch; deliberately reintroducing one violation locally makes the fitness script fail.
 
@@ -280,6 +290,10 @@ Depends on everything above.
 - **Model:** Sonnet, spawned as the `code-documentation-auditor` agent type (sets `model: sonnet`). Its default instructions encourage editing docstrings and comments anywhere; the prompt must state that it may edit `CLAUDE.md` only and should report any stale docstrings it finds instead of fixing them.
 - **Owns:** `CLAUDE.md`
 - **Carry-over from Phase 1:** CLAUDE.md says `max_num_objects` defaults to 6; code and `config/cobeart.yaml` say 10. The composite's hand-up transitions need z > 2700 mm (see the on-site checklist in Deferred).
+- **Carry-over from Phase 3:**
+  - Commands: `start-simulator` exists; `start-audio-client` emits by default (`--no-emit`, `--device INDEX`; `--emit`, `--enable-beat-detection`, `--socketio-url` are gone). `COBEART_DEBUG` is gone: DevTools follow `debug` in the YAML. `COBEART_CONFIG` selects the config file for Python and Electron alike; `PORT` overrides the hub port; `COBEART_SOCKETIO_URL` overrides the Python hub URL. Console scripts need `conda activate splat-env`.
+  - Architecture: `cobeart/settings/config.py` (frozen `Settings`) replaced `streaming.py`; `electron/config.js` loads and validates the YAML and the hub injects `window.__COBEART_CONFIG__` into every served HTML page (and `/config.json`). The bridge posts `{type: 'audio'}` to sims on change (`contract/CONTRACT.md`). Beat detection runs madmom online in a spawned child process (`beat/process.py`, `tracker.py`, `tempo.py`, `predictor.py`, `clock.py`); tempo range 55-215 BPM; `has_beat()` consumes each beat, so only one caller may use it.
+  - Testing: `/viewer` checks need a motion source (see Phase 3 lessons); the simulator needs the hub up first.
 - **Scope:** Update commands (`start-audio-client`, `npm test`), architecture (hub module, contract, config file), background system (registry only, `setUniforms` contract; remove the Kaleidoscope and Particle Orbits sections), test status, Linux as the primary platform, and the conda invocation guidance.
 - **Accept:** every command in CLAUDE.md runs as written. Replace the hardware-only "Testing" section with the offline workflow (simulator, `--simulate`, e2e), and keep the hardware checklist as a separate "on-site validation" list.
 
@@ -292,6 +306,7 @@ Depends on everything above.
   - fault-injected payloads never reach `/viewer`
   - IDs from `shuffled` and `missing-body` arrive intact
   - the `still` scenario drives `norm_abs_vel` to 0 through the real metrics path
+- **Carry-over from Phase 3:** `server.js` loads and validates `config/cobeart.yaml` (or `COBEART_CONFIG`) at startup and exits 1 on an invalid file; `PORT` overrides the configured port. The simulator raises `ConnectionError` if the hub is not up yet, while `start-optitrack-client --simulate` retries; wait for `/health` before starting the simulator. The hub rejects frames with more than `tracking.max_num_objects` bodies. Validated Phase 3 gate driver scripts (`/viewer` watcher with schema validation and tempo percentiles; composite transition driver) can serve as starting points; they lived in the master scratchpad and are not in the repo.
 - **Accept:** `pytest tests/e2e` passes locally and in CI; no hardware, browser, or Electron window needed.
 
 ---
@@ -306,7 +321,7 @@ Depends on everything above.
   - Composite `frontend.composite.z_threshold` (2700 mm): above the 2500 mm arena ceiling and likely above a raised hand, so hand-up transitions may never fire.
   - Head-tilt palette lean clamp (-40..30 deg in `fluid/script.js`).
   - Dropout gap `max_gap_s` (0.25 s) in `MetricsTracker`.
-- **Audio-reactive visuals.** Nothing consumes audio yet (the bridge only shows it in the overlay). Candidate: optional `audio` subset (`rms_envelope`, `beat`, `onset_strength`) on `splat`, splat radius/brightness scaled by envelope with a decaying boost on `beat`, one tunable strength constant.
+- **Audio-reactive visuals.** Nothing consumes audio yet. Since Phase 3 the bridge forwards audio to the sims on change, and background shaders receive it as `ctx.audio` in `setUniforms`, so the plumbing is in place. Candidate: optional `audio` subset (`rms_envelope`, `beat`, `onset_strength`) on `splat`, splat radius/brightness scaled by envelope with a decaying boost on `beat`, one tunable strength constant.
 - **Split `AudioCapturer`** into capture, analysis, emission (P2 #15). Only if the audio module keeps growing.
 - **Shared `SocketIOEmitter` base** for `sender.py` and `emitter.py`. Worth doing only if a third producer appears; until then the two mirror the same pattern.
 - **Composite canvas-capture robustness** (§3.3.C first bullet). No concrete fix proposed in the review.
@@ -317,6 +332,17 @@ Depends on everything above.
   - The hub replays its stored `lastFrame` to new viewers regardless of age.
   - A body that disappears from the NatNet stream entirely (rather than arriving with `tracking_valid=False`) is never pruned from `FramePipeline`.
   - `frame.schema.json`'s `audio` description still says staleness is "once implemented"; it is implemented (WP 2.1).
+- **Found in Phase 3 (no owner yet):**
+  - Beat tempo range is madmom's 55-215 BPM; one song briefly locked to double time (~210 BPM) in its intro. Narrowing it is a product decision (depends on the show's music).
+  - With a real mic, `beat_timestamp` is late by roughly the device input latency (`StreamClock` assumes zero).
+  - `AudioCapturer.stop_stream()` then `start_stream()` is not restart-safe (beat process, clock and history are not reset). `main()` starts once, so it is unused today.
+  - `compute_metrics_payload` runs on the capture thread (avg 3 ms, max ~11 ms per 10 ms block). Measured fine; moving it to an emitter-side worker would make "never blocks capture" structural.
+  - `fluid/script.js` Splat patterns (~2008-2517) treat the arena as centred (`arena_x/y` are half-extents); an asymmetric arena would be wrong there.
+  - `PayloadSender(reconnect_interval_s)`, `MetricsTracker(min_dt_s)`, `tracking.use_optitrack_client`, `x_rescale`/`y_rescale` have no YAML key or no consumer.
+  - `start-simulator` with no hub prints a raw traceback; it should log one line ("no hub at <url>, start Electron first") and exit 1.
+  - `composite.js` `tryBindSources` and `attachKeysToIframe` still have empty `catch (e) {}` blocks.
+  - The background registry's `ctx.rigidbodies` keeps the last splat per ID forever (never pruned when a body leaves).
+  - Composite transitions were broken since WP 1.4 (seed ring buffer evicted the largest seeds, so the reveal shrank mid-transition); fixed at the Phase 3 gate by spacing seeds over `uAnimSeconds` and never evicting.
 
 ---
 
@@ -334,6 +360,7 @@ Shows which WP owns each contested file per phase (a dash means untouched). Use 
 | `public/fluid/script.js` | 1.7 (head-tilt block, angular-velocity reads) | 2.4 (handlers) | 3.2 (arena in `handleSplatMessage`), 3.3 (registry, `drawBackground`) | n/a |
 | `public/composite/composite.js` | 1.4 | n/a | 3.2 | n/a |
 | `public/molten/molten.js`, `public/ink/ink.js` | n/a | 2.5 | 3.2 (arena) | n/a |
+| `contract/CONTRACT.md` | 1.2 | n/a | 3.2 (bridge `audio` message) | n/a |
 | `packagesender/sender.py` | 1.3 (call site), then 1.7 (orientation fields) | 2.2 | 3.1 | n/a |
 | `packagesender/metrics.py` | 1.3, then 1.7 (angular velocity, dropouts) | 2.2 (frame-time clock, dt floor) | 3.1 | n/a |
 | `optitrackclient/start_client.py` | 1.7 | 2.2 | 3.1 | n/a |

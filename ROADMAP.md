@@ -2,7 +2,7 @@
 
 Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point into that review.
 
-**Status (2026-10-17):** Phases 0 to 3 are done and merged into `main` (pushed). Phase 4 is in progress on `refactor/phase-4` (decisions recorded in its section). Earlier phases added **Carry-over from Phase 1/2/3** notes to later WPs: pass them to the agent with the WP block.
+**Status (2026-10-17):** Phases 0 to 3 are done and merged into `main` (pushed). Phase 4 is merged on `refactor/phase-4` and has passed the local gate; CI on GitHub and the fast-forward to `main` are pending. After that the refactor is complete and this file is the backlog (Deferred) and decision log. Earlier phases added **Carry-over from Phase 1/2/3** notes to later WPs: pass them to the agent with the WP block.
 
 ## How this roadmap is meant to run
 
@@ -334,6 +334,9 @@ Depends on everything above.
 - **Test:** `main()` against an unused port raises `SystemExit` with code 1 within a few seconds and logs the one line.
 - **Accept:** pytest passes; flake8 clean.
 
+**Phase 4 outcome (2026-10-17):** WP commits 4.1 `75705f1`, 4.2 `b065fcc`, 4.3 `21c171d`, 4.4 `ea1366b`, each reviewed and re-run by the master; no follow-ups needed. Local gate: `pytest` 165 passed (none skipped), `flake8 cobeart tests` clean, `npm test` 13/13, fitness 0 violations and its tests 10/10, `tests/e2e` 11 passed 5/5 normally (21-24 s) and 5/5 under `taskset -c 0` (20 s), no hub left running; the CLAUDE.md Phase 4 commands run as written (`start-simulator` with no hub exits 1 with one ERROR line after its INFO startup lines).
+- **Lessons:** WP 4.3 first saw 229/240 frames arrive: `python-engineio` `Client.disconnect()` closes the websocket without draining its send queue, so a producer's last few messages are lost. Cross-process tests end a stream on a marker frame sent over a new connection rather than counting sent frames. Schema-validating a ~48 KB audio frame with `jsonschema` costs about 15 ms, which is where most e2e time goes. Agents that stay inside their owned files and get explicit done-when commands needed no follow-up round this phase.
+
 **Phase 4 gate review:** the master (diff review of every WP, security read of `ci.yml`).
 
 **Phase 4 gate:** Phase 3 gate plus `pytest` (now including `tests/e2e`), `flake8 cobeart`, `npm test`, `node scripts/fitness.mjs` and `node --test scripts/fitness.test.mjs`; `pytest tests/e2e` 5 times in a row, normally and under `taskset -c 0`; CI green on the pushed `refactor/phase-4`; every command in CLAUDE.md runs as written.
@@ -370,6 +373,10 @@ Depends on everything above.
   - `composite.js` `tryBindSources` and `attachKeysToIframe` still have empty `catch (e) {}` blocks.
   - The background registry's `ctx.rigidbodies` keeps the last splat per ID forever (never pruned when a body leaves).
   - Composite transitions were broken since WP 1.4 (seed ring buffer evicted the largest seeds, so the reveal shrank mid-transition); fixed at the Phase 3 gate by spacing seeds over `uAnimSeconds` and never evicting.
+- **Found in Phase 4 (no owner yet):**
+  - `Simulator.run()` (and `PayloadSender.stop()`) disconnect right after the last emit, losing the final queued messages (engineio does not drain on close); the simulator's `Done:` counts overstate what the hub received. Drain before disconnecting, or document it.
+  - Stale comments: `contract/CONTRACT.md` names `electron/main.js` as the hub consumer (it is `electron/hub.js`); `config/cobeart.yaml:1` says "not yet wired up"; `fluid-bridge.js` header says the server is hosted in `main.js`; `capture.py` `main()` comment treats chunk duration 1024/48000 as fixed (both come from the YAML). `README.md` is stale (Python 3.8, Windows install, `main.js` as server).
+  - The CI PulseAudio step and the clean-runner madmom build were verified only by the first GitHub run, not locally.
 
 ---
 

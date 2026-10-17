@@ -1,247 +1,151 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Project Overview
 
-CoBeART is an audio-visual art project using Spatial Augmented Reality. It combines real-time body tracking via OptiTrack with WebGL-based fluid/particle simulations rendered through Electron. The system captures motion data from OptiTrack cameras and audio from microphones, processes them in Python, and streams to a Node.js/Electron frontend for visualization.
+CoBeART is an audio-visual art project using Spatial Augmented Reality. OptiTrack body tracking and microphone audio are processed in Python and streamed to a Node.js/Electron hub, which feeds WebGL visualizations. Linux is the primary platform.
 
-## Refactor in progress
+## Status
 
-A phased refactor is under way. `ROADMAP.md` is the plan and the source of truth for its status, the master-agent protocol for parallel worktree agents, and per-WP carry-over notes; read it before any refactor work. Parts of this file predate it (WP 4.2 rewrites it). Where they disagree, trust the code, `contract/` (message schemas) and `config/cobeart.yaml` over the sections below.
+The architecture refactor is complete. `ROADMAP.md` is the backlog (the "Deferred" section) and the decision log (D1-D9 and the per-phase decisions); `ARCHITECTURE_REVIEW.md` is the historical review it came from. Read the relevant decision before reversing a design choice.
+
+Source of truth when prose disagrees: the code, `contract/` (message schemas) and `config/cobeart.yaml` (settings).
 
 ## Architecture
 
-### Three-Layer System
-
-1. **Python Backend (`cobeart/`)**: Captures and processes motion/audio data
-   - `optitrackclient/`: OptiTrack NatNet client for motion capture
-   - `audiocapture/`: Audio capture and metrics extraction (RMS, peak, ZCR, dominant frequency)
-   - `packagesender/`: Socket.IO client that sends data to Electron server
-   - `settings/`: Configuration for OptiTrack IP addresses, tracking parameters
-
-2. **Electron Main Process (`cobeart-app/electron/main.js`)**: Socket.IO hub
-   - Runs Express server on port 3000
-   - Three Socket.IO namespaces:
-     - `/ingest`: Receives motion data from Python (OptiTrack frames drive emission rate)
-     - `/audio`: Receives audio metrics from Python (additive background state)
-     - `/viewer`: Broadcasts combined frames to frontend
-   - Merges OptiTrack data with latest audio metrics into combined frames
-
-3. **Frontend (`cobeart-app/public/`)**: Electron renderer with WebGL visualizations
-   - `index.html` / `fluid-bridge.js`: Connects to `/viewer` namespace, receives frames
-   - `fluid/`: WebGL fluid simulation (splat shader)
-   - `molten/`: Alternative particle-based visualization
-   - Bridge uses postMessage() to send data to iframe-contained simulations
-
-### Data Flow
-
 ```
-OptiTrack System → Python NatNetClient → PayloadSender (Socket.IO /ingest)
-Audio Device → AudioCapturer → AudioMetricsEmitter (Socket.IO /audio)
-                                        ↓
-                            Electron main.js merges data
-                                        ↓
-                    Socket.IO /viewer → fluid-bridge.js → postMessage()
-                                        ↓
-                            WebGL Simulation (iframe)
+OptiTrack/Motive -> NatNetClient -> FramePipeline -> PayloadSender --(/ingest, frame)--> hub
+Microphone -> AudioCapturer -> AudioEmitter ----------(/audio, audio_metrics)---------> hub
+hub merges, validates, broadcasts --(/viewer, frame)--> fluid-bridge.js --postMessage--> simulation iframes
 ```
+
+### Python (`cobeart/`)
+
+- `settings/config.py`: loads `config/cobeart.yaml` into a frozen `Settings` tree (`load_settings()`). Raises `ConfigError` naming the bad key.
+- `optitrackclient/`: `start_client.py` (entry point, `FramePipeline`, `SyntheticNatNetSource` for `--simulate`), `NatNetClient.py` plus `DataDescriptions.py`/`MoCapData.py` (vendored NatNet SDK, excluded from flake8), `transform.py` (OptiTrack to arena axes), `tracked_bodies.py`.
+- `packagesender/`: `sender.py` (`PayloadSender`, Socket.IO `/ingest` client), `metrics.py` (`MetricsTracker`: velocities and angular velocity from successive poses, windowed smoothing of normalized speed, dropout handling).
+- `audiocapture/`: `capture.py` (`AudioCapturer`: threaded `soundcard` capture, RMS, peak, ZCR, dominant frequency, spectrum, onsets), `emitter.py` (`AudioEmitter`, `/audio` client), `utils.py` (device selection), `beat/` (beat and tempo detection), `viz/` and `tools/` (developer utilities).
+- `simulator/`: offline stand-in for both producers (motion scenarios, audio scenarios, fault injection), talks to the hub over Socket.IO.
+
+Beat detection runs madmom online in a spawned child process (`beat/process.py`, with `tracker.py`, `tempo.py`, `predictor.py`, `clock.py`) so it cannot stall capture; tempo range 55-215 BPM. `AudioCapturer.has_beat()` consumes each beat, so only one caller may use it. Any program that starts `AudioCapturer` must do so under `if __name__ == "__main__":`.
+
+### Hub (`cobeart-app/`)
+
+- `electron/hub.js`: `createHub(options)` runs Express and Socket.IO. Used by both `electron/main.js` (Electron window) and `server.js` (`npm run web`, same hub without a window). Nothing else may construct a Socket.IO `Server`.
+- Namespaces: `/ingest` (motion frames from Python; each valid frame triggers one emission), `/audio` (audio metrics; stored as background state), `/viewer` (merged frames; a new viewer first gets the stored last frame).
+- Every incoming payload is validated against `contract/*.schema.json` (ajv). Invalid payloads are dropped with a rate-limited log line. Frames with more than `tracking.max_num_objects` bodies or duplicate `ID`s are rejected.
+- Stale-audio policy: audio is merged into a frame as `frame.audio` only if it is at most `hub.audio_max_age_ms` old; otherwise the frame carries no `audio`.
+- HTTP: `/health` (client counts, last frame and audio age in ms), `/config.json`, and static files from `public/`. Every served HTML page gets `window.__COBEART_CONFIG__` injected as its first script (the frontend subset of the YAML: `debug`, `arena`, `bridge_framerate`, `splat_color`, `composite`).
+- `electron/config.js`: loads and validates the YAML with `config/cobeart.schema.json`; `server.js` and `main.js` exit on an invalid file. The hub binds `network.socketio.host`.
+- `electron/main.js`: asks which visualization to show (Splat, Molten, Ink, Mixed; Performance Mode is Molten only), then loads that page from the hub. DevTools open when `debug: true` in the YAML (never for Ink).
+
+### Contract and config
+
+- `contract/*.schema.json` define `frame`, `audio_metrics` and `splat`; `contract/CONTRACT.md` says who sends what and how to change it. All objects are closed and share `schemaVersion: 1`, so any field change is breaking and bumps both schemas. Read the schemas for field names and units; do not restate them elsewhere.
+- Orientation is a unit quaternion `qx, qy, qz, qw` in arena axes plus angular velocity `wx, wy, wz` (deg/s), never Euler angles (D5). Bodies are identified by `ID` (0-based), never by array position. Body names map to IDs in `public/body_map.json`.
+- `config/cobeart.yaml` is the single settings file (network and OptiTrack addresses, tracking, arena in mm, metrics, hub, window, frontend, debug, audio). Python reads it through `cobeart/settings/config.py`, Node through `electron/config.js`. Arena bounds and the port live only there.
+- Environment variables: `COBEART_CONFIG` (path of an alternative YAML, Python and Node), `PORT` (overrides the hub port, Node), `COBEART_SOCKETIO_URL` (overrides the hub URL Python clients and the simulator use).
+
+### Frontend (`cobeart-app/public/`)
+
+- `fluid-bridge.js`: connects to `/viewer`, keeps the latest frame, and every `1000 / bridge_framerate` ms posts one `{type: 'splat', ...}` message per rigid body to the iframes and the window. It posts `{type: 'audio', audio}` only when the audio timestamp changes. Only the fluid simulation consumes `audio` messages so far.
+- Simulations (each a page of its own, embedded as an iframe): `fluid/` (Splat, WebGL2 Navier-Stokes), `molten/` (reflective shader, `?performance=true` option), `ink/` (dark fluid with contours), `composite/` (Mixed: runs all three offscreen and blends between them with a spatial transition triggered by raised hands or a clap; thresholds in `frontend.composite`).
+- Debug logging in the frontend is gated by `?debug` in the URL or `debug: true` in the YAML.
+
+### Background shaders
+
+`public/backgrounds/registry.js` is the only background model: the fluid simulation draws one registry entry behind the dye (off by default; the GUI's "show background" toggle and "background" list pick it). An entry is `{ name, fragmentShader, setUniforms(gl, program, ctx) }`. The fragment shader is compiled against the sim's base vertex shader (varying `vUv`); `setUniforms` sets every uniform the shader uses with the program already bound; `ctx` is `{ time, resolution, audio, rigidbodies }` (types documented in the registry). Current entries: Electric Clouds, Circles, Zephyr (each in `backgrounds/<name>/shader.js`, some with `fragment_shader.txt`/`vertex_shader.txt`). To add one, create `backgrounds/<name>/shader.js` exporting that object and list it in the registry.
 
 ## Commands
 
-### Python Backend
+### Python environment
 
-**Python Environment:**
-
-This project uses a conda environment named `splat-env` (Python 3.12). Call its interpreter directly; do not use `conda run`, which masks output:
+Conda environment `splat-env` (Python 3.12). Console scripts (`start-*`) need `conda activate splat-env`. Otherwise call the interpreter directly; never use `conda run`, which masks output:
 
 ```bash
 ~/miniconda3/envs/splat-env/bin/python -m pytest
-~/miniconda3/envs/splat-env/bin/python -m py_compile file.py
 ```
 
-Known traps (see `ROADMAP.md`, "Worktree caveats"):
-- In a git worktree, run code with `python -m ...` from the worktree root. The installed `start-*` console scripts always import the main checkout.
-- `soundcard` crashes under `python -c`, and under `python -m cobeart.audiocapture.<module>` with no arguments. Use script files, and pass at least one flag.
-
-**Install Python dependencies** (builds madmom from a pinned commit):
+Install (builds madmom from a pinned commit):
 ```bash
 ~/miniconda3/envs/splat-env/bin/python -m pip install -e ".[test,viz]"
 ```
 
-**Start OptiTrack motion capture client:**
-```bash
-start-optitrack-client
-```
-Connects to OptiTrack Motive software and streams rigid body tracking data. Requires OptiTrack SDK and Motive to be running.
+Known traps:
+- In a git worktree, run code with `python -m ...` from the worktree root. The installed `start-*` scripts always import the main checkout. A worktree also needs `npm ci` in `cobeart-app/` or the hub tests skip.
+- `soundcard` crashes under `python -c`. Put ad-hoc Python in a script file. `python -m cobeart.audiocapture.capture` works with or without flags.
+- `soundcard` talks to PulseAudio (or PipeWire's Pulse server) on Linux.
 
-**Start audio capture client:**
-```bash
-start-audio-client
-```
-Captures audio from selected input device and sends metrics to the Electron server.
+### Running the system
 
-### Electron Application
-
-**Install Node.js dependencies:**
 ```bash
-cd cobeart-app
-npm install
+cd cobeart-app && npm ci          # once
+cd cobeart-app && npm start       # Electron window + hub (port from the YAML, 3000)
+cd cobeart-app && npm run web     # hub only, for a browser at http://127.0.0.1:3000
+start-optitrack-client            # NatNet to hub; needs Motive streaming (addresses from the YAML or positional args)
+start-optitrack-client --simulate # scripted synthetic bodies through the real pipeline, no hardware
+start-audio-client                # capture, meter and emit to the hub by default
 ```
 
-**Start Electron app (production):**
+- `start-audio-client` flags: `--no-emit` (meter only, no hub), `--device INDEX` (skip the device prompt), `--debug`. Beat detection follows `audio.beat_detection` in the YAML.
+- `start-optitrack-client [server_address [client_address [transport]]] [--simulate] [--url URL] [--log-level L]`.
+- Viewers only receive frames when a motion source is running (frames drive emission), so audio checks need `start-optitrack-client --simulate` or `start-simulator` running too.
+- Use `PORT=<port> npm run web` for a second hub; pass the matching `COBEART_SOCKETIO_URL` or `--url` to Python tools.
+
+### Simulator (no hardware)
+
+The hub must be running first (`npm run web` or `npm start`). With no hub, `start-simulator` logs one line and exits 1.
+
 ```bash
-npm start
+start-simulator --scenario hands --audio beat --duration 30
 ```
-Starts the full application with Electron window. Shows dialog to choose between "Splat" (fluid) or "Molten" (particle) visualization.
 
-**Development mode (web server + Electron):**
+- `--scenario`: `orbit` (default), `hands`, `still`, `missing-body`, `shuffled`, `edge`, `none`. `--audio`: `silence` (default), `tone`, `beat`, `sweep`, `none`.
+- `--fault {malformed,wrong-version,nan}` corrupts every message (the hub must reject it); `--audio-stop-after S` and `--motion-stop-after S` test the stale-audio and no-frame paths; `--bpm`, `--tempo-change BPM@S`, `--beat-jitter MS`, `--tone-hz`, `--bodies`, `--rate`, `--audio-rate`, `--seed`, `--url`, `--log-level`. See `--help`.
+- Use `--audio none` when a real microphone is also feeding the hub.
+- No scenario raises a hand above `z_threshold`, so composite hand-up transitions need a custom driver.
+
+### Tests and checks
+
 ```bash
-npm run dev
+~/miniconda3/envs/splat-env/bin/python -m pytest        # repo root: cobeart/ unit tests and tests/e2e/ cross-process tests
+~/miniconda3/envs/splat-env/bin/python -m flake8 cobeart
+cd cobeart-app && npm test                              # node --test test/**/*.test.js (config and hub smoke tests)
+node scripts/fitness.mjs                                # architecture fitness checks, from the repo root
+node --test scripts/fitness.test.mjs
 ```
-Runs web server and Electron concurrently using `concurrently`.
 
-**Web server only (for debugging):**
-```bash
-npm run web
-```
-Runs Express server without Electron window.
+CI (`.github/workflows/ci.yml`) runs pytest, flake8, `npm test` and the fitness checks on every push. Cap long local test runs with `timeout`. Python tests live next to each package under `tests/`; hub tests start a real `node server.js`.
 
-## Configuration
+## Conventions
 
-### OptiTrack Settings (`cobeart/settings/streaming.py`)
+- Python: `logging.getLogger(__name__)`, no `print` in `packagesender/` or `transform.py`, per-frame output only at `DEBUG`. flake8 max line 120 (`.flake8`).
+- JS: per-frame `console.log` only behind the `DEBUG` flag described above.
+- Orientation, units and field names come from `contract/`; do not hardcode the arena or port, read them from the config.
 
-Key parameters:
-- `client_address` / `server_address`: IP addresses for OptiTrack connection
-- `use_multicast`: Boolean for multicast vs unicast streaming
-- `tracking_framerate`: OptiTrack capture rate (typically 240 Hz)
-- `package_framerate`: Rate for sending data to Electron (typically 240 Hz)
-- `max_num_objects`: Maximum number of tracked rigid bodies (default: 6)
-- `max_abs_coord_x/y/z`: Arena boundaries in millimeters
+## Testing and validation
 
-### Window Configuration (`cobeart-app/electron/main.js`)
+### Offline workflow (default)
 
-- Default window size: 1050x1050
-- Server port: 3000 (localhost only)
-- Background throttling disabled for smooth visualization
+1. `cd cobeart-app && PORT=3400 npm run web` (or `npm start`, port 3000).
+2. `COBEART_SOCKETIO_URL=http://127.0.0.1:3400 start-simulator --scenario orbit --audio beat`, or `start-optitrack-client --simulate` for the full Python pipeline.
+3. Open `http://127.0.0.1:3400/` (Splat), `/molten/`, `/ink/` or `/composite/` in a browser; add `?debug` for the overlay and logs. In Splat, only hands, feet and tracked objects paint (`trackedBodyParts` from `body_map.json`); `--simulate` sends IDs 0-2.
+4. `curl http://127.0.0.1:3400/health` shows connected clients and the age of the last frame and audio.
 
-## Key Implementation Details
+A real microphone can be checked live with `start-audio-client` against the same hub.
 
-### Motion Tracking Pipeline
+### On-site validation (needs OptiTrack and Motive)
 
-- OptiTrack streams data via NatNet protocol (UDP multicast/unicast)
-- Python `NatNetClient` receives frames and rigid body updates
-- Coordinate transformation: OptiTrack (meters) → millimeters with axis remapping
-- Quaternion rotations converted to Euler angles (roll, yaw, pitch in degrees)
-- Velocity calculation: Position/rotation derivatives via Kalman filtering (`packagesender/metrics.py`)
-
-### Audio Processing
-
-- Uses `soundcard` library for cross-platform audio capture
-- Threaded capture with ring buffer to prevent blocking
-- Metrics calculated per chunk (default 1024 samples @ 48kHz):
-  - RMS (root mean square)
-  - Peak amplitude
-  - Zero-crossing rate
-  - Dominant frequency (FFT with Hanning window)
-- Audio data merged with OptiTrack frames in main.js before emission to `/viewer`
-
-### Socket.IO Communication
-
-- Python clients connect to `/ingest` and `/audio` namespaces
-- Electron main.js stores `lastFrame` and `lastAudioData` state
-- OptiTrack frame events trigger emission to `/viewer` with merged audio data
-- Frontend `fluid-bridge.js` maintains 240 Hz interval loop, forwarding latest frame to simulation
-
-### WebGL Simulations
-
-Both simulations run in iframes and receive `splat` messages via postMessage():
-- **Fluid simulation**: Multi-pass WebGL2 shader pipeline for incompressible Navier-Stokes
-- **Molten simulation**: Particle-based system with optional performance mode
-- Tracked objects trigger splat/particle effects at their (x, y, z) positions
-- Audio metrics can modulate visual parameters (color, intensity, radius)
-
-### Background Shaders System
-
-The `cobeart-app/public/backgrounds/` directory contains a repository of background shaders that can be used standalone or composited with primary shaders. Each background shader:
-- Connects directly to Socket.IO `/viewer` namespace
-- Receives OptiTrack rigid body data and audio metrics
-- Renders using THREE.js (r128)
-- Is designed to be modular and independently runnable
-
-**Current Background Shaders:**
-
-1. **Kaleidoscope (`backgrounds/kaleidoscope/`)**
-   - Converted from ISF (Interactive Shader Format) to THREE.js
-   - Multi-pass fragment shader with 6 persistent buffers + final composite
-   - Features:
-     - 8 generative color palettes (Stargate, Circuit Board, Nebula, Psychedelic Tunnels, Turing Spots, Labyrinth, Coral Growth, Cellular)
-     - Kaleidoscope mirror effect with configurable segments
-     - Animated distortion and rotation
-     - Audio-reactive parameters: segments modulated by RMS, distortion by peak, line frequency by dominant frequency
-     - Smooth parameter transitions using exponential smoothing
-   - Architecture:
-     - Pass 0: Time & speed buffer (tracks animation time and smoothed speed)
-     - Pass 1: Geometry parameters (segments, distortion, line frequency, warp factor)
-     - Pass 2: Pulsation time (for rhythmic line animation)
-     - Pass 3: Rotation angle (for kaleidoscope rotation)
-     - Pass 4: Color palette selection
-     - Pass 5: Color controls (brightness, pattern scale, complexity)
-     - Pass 6: Final composite render with all effects applied
-   - Original source: `IM-KaleidoKnot.fs` by @dot2dot (bareimage)
-
-2. **Particle Orbits (`backgrounds/particle-orbits/`)**
-   - Vertex shader-based particle system
-   - Features:
-     - 60+ orbital rings of particles (2520 total particles)
-     - Circular orbital motion with per-ring phase offsets
-     - Audio-reactive particle size (peak), orbital radius (RMS), and color
-     - OptiTrack body positions used for particle attraction/offset
-     - HSV to RGB color cycling based on orbital parameters
-     - Additive blending for glow effects
-   - Architecture:
-     - Vertex shader handles particle positioning and orbital calculations
-     - Fragment shader renders circular point sprites with soft edges
-     - Each particle's position calculated from vertexId using mathematical patterns
-   - Inspired by vertex shader art techniques
-
-**Adding New Background Shaders:**
-
-To add a new background shader:
-1. Create directory: `cobeart-app/public/backgrounds/{shader-name}/`
-2. Add `index.html` with Socket.IO and THREE.js CDN links
-3. Add `{shader-name}.js` with:
-   - Socket.IO connection to `/viewer` namespace
-   - OptiTrack data handling (`trackedEntities` object)
-   - Audio metrics handling (`audioMetrics` object)
-   - THREE.js scene, camera, renderer setup
-   - Shader material with vertex/fragment shaders
-   - Animation loop updating uniforms and rendering
-4. Ensure shader receives and processes:
-   - `payload.rigidbodies[]` - Array of tracked objects with x, y, z, velocities
-   - `payload.audio` - Object with rms, peak, zcr, dominant_frequency
-
-**Future Compositing Modes (Not Yet Implemented):**
-- Background layer rendering with primary shader alpha compositing
-- Post-process mix with custom blend modes (multiply, screen, overlay)
-- Data sharing where background shader outputs become texture inputs to primary shaders
+1. Start Motive with streaming enabled; set `network.client_address`, `server_address` and `use_multicast` in the YAML.
+2. `start-optitrack-client` should print the connection info; `start-audio-client` should show audio metrics.
+3. `npm start` from `cobeart-app/`, choose a visualization.
+4. Rigid bodies appear as splats or particles; the debug overlay (`debug: true` or `?debug`) shows position and velocity.
+5. Tuning checklist (details in `ROADMAP.md`, Deferred): each rigid body created in Motive aligned to the global axes with the performer facing OptiTrack +Z (D5 orientation and lean sign); Motive Streaming IDs versus the 0-based IDs in `body_map.json`; `frontend.composite.z_threshold` is 2700 mm, above the 2500 mm arena ceiling, so check that a raised hand can trigger a hand-up transition; head-tilt lean clamp in `fluid/script.js`; dropout gap `max_gap_s` in `MetricsTracker`; NatNet multicast on the Linux machine; end-to-end latency with real bodies.
 
 ## Development Notes
 
-- OptiTrack client requires OptiTrack SDK to be installed
-- On Linux, audio capture uses `soundcard` with MediaFoundation backend compatibility patches
-- NumPy 2.x compatibility: `frombuffer` replaces deprecated `fromstring`
-- Electron uses `contextIsolation: true` for security
-- All visualization rendering happens in renderer process (sandboxed browser environment)
-- Git branches: `main` is primary, recent work in `molten-branch` and `music-branch`
-
-## Testing
-
-Automated: `~/miniconda3/envs/splat-env/bin/python -m pytest` (repo root), `npm test` (in `cobeart-app/`), `flake8 cobeart`. Offline motion and audio: `python -m cobeart.simulator --help`. Hardware workflow:
-1. Start OptiTrack Motive and ensure streaming is enabled
-2. Run `start-optitrack-client` in terminal (should show connection info)
-3. Run `start-audio-client` in another terminal (should show audio metrics)
-4. Run `npm start` from `cobeart-app/` directory
-5. Choose visualization type in dialog
-6. Verify rigid bodies appear as splats/particles when tracked
-7. Check debug overlay for position/velocity data
+- Electron runs with `contextIsolation: true`, `nodeIntegration: false` and background throttling disabled; all rendering happens in the sandboxed renderer.
+- After `npm ci` in the main checkout, Electron's `chrome-sandbox` needs `sudo chown root:root` and `sudo chmod 4755` on `cobeart-app/node_modules/electron/dist/chrome-sandbox` (Ubuntu 24.04). `npm install` for an added dependency keeps it.
+- OptiTrack needs Motive running; the NatNet client is vendored, no SDK install is required to run the Python code.
+- Git: `main` is primary; work on a feature branch and fast-forward merge.

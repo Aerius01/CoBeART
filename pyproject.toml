@@ -64,4 +64,4 @@ cobeart = ["*.txt"]
 zip-safe = false
 
 [tool.pytest.ini_options]
-testpaths = ["cobeart"]
+testpaths = ["cobeart", "tests"]

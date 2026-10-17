@@ -2,7 +2,7 @@
 
 Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point into that review.
 
-**Status (2026-10-17):** Phases 0 to 3 are done and merged into `main` (pushed). Phase 4 is merged on `refactor/phase-4` and has passed the local gate; CI on GitHub and the fast-forward to `main` are pending. After that the refactor is complete and this file is the backlog (Deferred) and decision log. Earlier phases added **Carry-over from Phase 1/2/3** notes to later WPs: pass them to the agent with the WP block.
+**Status (2026-10-17):** Phases 0 to 4 are done. Phase 4 is merged into `main` (pushed) and CI is green, so the refactor is complete. This file is now the backlog (Deferred) and decision log. Earlier phases added **Carry-over from Phase 1/2/3** notes to later WPs: pass them to the agent with the WP block.
 
 ## How this roadmap is meant to run
 
@@ -287,7 +287,7 @@ Depends on everything above.
 - **`print(` rule** keeps the original scope (`packagesender/`, `transform.py`). Prints elsewhere are intentional console output (NatNet menu, meter, device prompt, `viz/`, `tools/`).
 - **`still` through the real metrics path:** `--simulate` only walks circles, and `SyntheticNatNetSource.step()` is hard-wired to `CirclePath`. The e2e test defines its own `MotionSource` (move, then stop) and wires it to the real `FramePipeline`, `MetricsTracker`, `PayloadSender` and hub. No production edit.
 - **One home for cross-process tests:** WP 4.3 moves `cobeart/simulator/tests/test_integration.py` into `tests/e2e/` and owns `pyproject.toml` `testpaths`, so plain `pytest` runs everything, as CI does.
-- **CI on the public fork:** the master pushes `refactor/phase-4` to `origin` for the CI run and deletes the remote branch after the fast-forward to `main`.
+- **CI on the public fork:** decided at merge time to fast-forward `main` locally and push it, letting the push trigger CI (a CI failure would be fixed by a follow-up commit on `main`); no remote phase branch.
 - **Pulled from Deferred:** the `start-simulator` no-hub traceback (fails fast with one line, not retry: a dev and test tool, and a mistyped `--url` must not hang) and the stale `frame.schema.json` `audio` description (WP 4.4). The rest of Deferred stays deferred.
 - **After Phase 4:** `ROADMAP.md` stays as the backlog and decision log; `ARCHITECTURE_REVIEW.md` stays as a historical record; CLAUDE.md's "Refactor in progress" section shrinks to a pointer to the Deferred list.
 
@@ -334,7 +334,7 @@ Depends on everything above.
 - **Test:** `main()` against an unused port raises `SystemExit` with code 1 within a few seconds and logs the one line.
 - **Accept:** pytest passes; flake8 clean.
 
-**Phase 4 outcome (2026-10-17):** WP commits 4.1 `75705f1`, 4.2 `b065fcc`, 4.3 `21c171d`, 4.4 `ea1366b`, each reviewed and re-run by the master; no follow-ups needed. Local gate: `pytest` 165 passed (none skipped), `flake8 cobeart tests` clean, `npm test` 13/13, fitness 0 violations and its tests 10/10, `tests/e2e` 11 passed 5/5 normally (21-24 s) and 5/5 under `taskset -c 0` (20 s), no hub left running; the CLAUDE.md Phase 4 commands run as written (`start-simulator` with no hub exits 1 with one ERROR line after its INFO startup lines).
+**Phase 4 outcome (2026-10-17):** WP commits 4.1 `75705f1`, 4.2 `b065fcc`, 4.3 `21c171d`, 4.4 `ea1366b`, each reviewed and re-run by the master; no follow-ups needed. Local gate: `pytest` 165 passed (none skipped), `flake8 cobeart tests` clean, `npm test` 13/13, fitness 0 violations and its tests 10/10, `tests/e2e` 11 passed 5/5 normally (21-24 s) and 5/5 under `taskset -c 0` (20 s), no hub left running; first CI run (39057368181, 2 m 46 s) green with 165 passed, none skipped, including the PulseAudio step and the clean-runner madmom build; the CLAUDE.md Phase 4 commands run as written (`start-simulator` with no hub exits 1 with one ERROR line after its INFO startup lines).
 - **Lessons:** WP 4.3 first saw 229/240 frames arrive: `python-engineio` `Client.disconnect()` closes the websocket without draining its send queue, so a producer's last few messages are lost. Cross-process tests end a stream on a marker frame sent over a new connection rather than counting sent frames. Schema-validating a ~48 KB audio frame with `jsonschema` costs about 15 ms, which is where most e2e time goes. Agents that stay inside their owned files and get explicit done-when commands needed no follow-up round this phase.
 
 **Phase 4 gate review:** the master (diff review of every WP, security read of `ci.yml`).
@@ -376,7 +376,6 @@ Depends on everything above.
 - **Found in Phase 4 (no owner yet):**
   - `Simulator.run()` (and `PayloadSender.stop()`) disconnect right after the last emit, losing the final queued messages (engineio does not drain on close); the simulator's `Done:` counts overstate what the hub received. Drain before disconnecting, or document it.
   - Stale comments: `contract/CONTRACT.md` names `electron/main.js` as the hub consumer (it is `electron/hub.js`); `config/cobeart.yaml:1` says "not yet wired up"; `fluid-bridge.js` header says the server is hosted in `main.js`; `capture.py` `main()` comment treats chunk duration 1024/48000 as fixed (both come from the YAML). `README.md` is stale (Python 3.8, Windows install, `main.js` as server).
-  - The CI PulseAudio step and the clean-runner madmom build were verified only by the first GitHub run, not locally.
 
 ---
 

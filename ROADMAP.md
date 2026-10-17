@@ -2,7 +2,7 @@
 
 Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point into that review.
 
-**Status (2026-10-08):** Phases 0 to 3 are done and merged into `main` (pushed). Next: Phase 4, branched from `main`. Earlier phases added **Carry-over from Phase 1/2/3** notes to later WPs: pass them to the agent with the WP block.
+**Status (2026-10-17):** Phases 0 to 3 are done and merged into `main` (pushed). Phase 4 is in progress on `refactor/phase-4` (decisions recorded in its section). Earlier phases added **Carry-over from Phase 1/2/3** notes to later WPs: pass them to the agent with the WP block.
 
 ## How this roadmap is meant to run
 
@@ -275,16 +275,31 @@ Depends on: `config/cobeart.yaml` (1.8), the rewritten sender/emitter (2.2, 2.3)
 
 ---
 
-## Phase 4: Guardrails and documentation (3 parallel WPs)
+## Phase 4: Guardrails and documentation (4 parallel WPs)
 
 Depends on everything above.
 
+**Phase 4 decisions (2026-10-17, agreed with the human before branching):**
+- **Baseline at `c8ffe3a`:** pytest 155 passed (none skipped), `flake8 cobeart` clean, `npm test` 13/13. Phase base for agents is the `refactor/phase-4` commit that records these decisions.
+- **Roles:** the master writes all roadmap documentation and is the gatekeeper (diff review, gate, `ci.yml` security read; no separate reviewer agents). Every WP, including the CLAUDE.md WP, is implemented by an agent on the model its WP names. Ports: 4.1 → 3401, 4.2 → 3402, 4.3 → 3403, 4.4 → 3404.
+- **Field-list fitness rule dropped.** The payload field set legitimately appears in 14 producer, consumer and test files, so a grep heuristic is all noise. Shape drift is already caught by the tests that validate real payloads against `contract/*.schema.json` (sender, simulator, capture, hub smoke).
+- **CI and `soundcard`:** importing `soundcard` connects to PulseAudio (`soundcard/pulseaudio.py`, module-level `_PulseAudio()`), and `capture.py` imports it via `audiocapture/utils.py`. CI installs `pulseaudio` and starts it with a null sink before pytest; no code change.
+- **`print(` rule** keeps the original scope (`packagesender/`, `transform.py`). Prints elsewhere are intentional console output (NatNet menu, meter, device prompt, `viz/`, `tools/`).
+- **`still` through the real metrics path:** `--simulate` only walks circles, and `SyntheticNatNetSource.step()` is hard-wired to `CirclePath`. The e2e test defines its own `MotionSource` (move, then stop) and wires it to the real `FramePipeline`, `MetricsTracker`, `PayloadSender` and hub. No production edit.
+- **One home for cross-process tests:** WP 4.3 moves `cobeart/simulator/tests/test_integration.py` into `tests/e2e/` and owns `pyproject.toml` `testpaths`, so plain `pytest` runs everything, as CI does.
+- **CI on the public fork:** the master pushes `refactor/phase-4` to `origin` for the CI run and deletes the remote branch after the fast-forward to `main`.
+- **Pulled from Deferred:** the `start-simulator` no-hub traceback (fails fast with one line, not retry: a dev and test tool, and a mistyped `--url` must not hang) and the stale `frame.schema.json` `audio` description (WP 4.4). The rest of Deferred stays deferred.
+- **After Phase 4:** `ROADMAP.md` stays as the backlog and decision log; `ARCHITECTURE_REVIEW.md` stays as a historical record; CLAUDE.md's "Refactor in progress" section shrinks to a pointer to the Deferred list.
+
 ### WP 4.1: Fitness functions and CI (P2 #17)
 - **Model:** Sonnet. CI config and a grep-based checker.
-- **Owns:** `.github/workflows/ci.yml` (new), `scripts/fitness.mjs` (new)
+- **Owns:** `.github/workflows/ci.yml` (new), `scripts/fitness.mjs` (new), `scripts/fitness.test.mjs` (new)
 - **Carry-over from Phase 3:** the arena/port literal check must allow `fluid/script.js` `headDepth` (default 3000 mm, not an arena literal) and the `http://127.0.0.1:3000` examples in docstrings (`settings/config.py`, `start_client.py`). Arena literals in `fluid/script.js` patterns (~2008-2517) are now derived from config as half-extents. CI needs madmom (pinned git commit, builds from source) and `npm ci` before pytest, or the hub integration tests skip or fail. The beat tests spawn a child process and use shared memory; the audiocapture `conftest.py` has a 120 s per-test hang guard.
-- **Scope:** CI runs `pytest` (including `tests/e2e/` from WP 4.3, using the agreed path even before 4.3 merges), `flake8`, `npm test`. Fitness script fails if: `server.js` or `main.js` construct `new Server(` directly instead of using `createHub`; any file outside `contract/` and the hub re-declares the payload field list (heuristic grep for the field set); arena or port literals appear outside `config/`; `print(` appears in `cobeart/packagesender` or `cobeart/optitrackclient/transform.py`.
-- **Accept:** CI green on the phase branch; deliberately reintroducing one violation locally makes the fitness script fail.
+- **Scope:**
+  - CI: triggers `push` (all branches), `pull_request`, `workflow_dispatch`. One job, `ubuntu-latest`, Python 3.12, Node 22. Top-level `permissions: contents: read`; actions pinned to a version; no secrets. Cache pip (including the madmom build). Install `pulseaudio` and start it with a null sink before pytest. `ELECTRON_SKIP_BINARY_DOWNLOAD=1` for `npm ci` (tests boot `node server.js`, never Electron). Steps: `pip install -e ".[test]"`, `npm ci` in `cobeart-app/`, `pytest` (after WP 4.3 this includes `tests/e2e/` via `testpaths`), `flake8 cobeart`, `npm test`, `node scripts/fitness.mjs`, `node --test scripts/fitness.test.mjs`. Set a job `timeout-minutes`.
+  - Fitness script fails (exit 1, one line per violation with file:line and rule) if: anything other than `cobeart-app/electron/hub.js` constructs `new Server(`; arena or port literals appear outside `config/` (the Phase 3 gate grep, with the allowlist above); `print(` appears in `cobeart/packagesender` or `cobeart/optitrackclient/transform.py`. Each rule is a pure function over file text, exported for the test file; the CLI walks the repo.
+- **Test:** `scripts/fitness.test.mjs` feeds each rule a violating and a clean snippet, including the allowlisted `headDepth` line and the docstring URLs.
+- **Accept:** fitness script passes on the phase base; the test file passes; deliberately reintroducing one violation locally makes the script fail; CI green on the pushed phase branch (master).
 
 ### WP 4.2: Bring CLAUDE.md in line with reality (P2 #16)
 - **Model:** Sonnet, spawned as the `code-documentation-auditor` agent type (sets `model: sonnet`). Its default instructions encourage editing docstrings and comments anywhere; the prompt must state that it may edit `CLAUDE.md` only and should report any stale docstrings it finds instead of fixing them.
@@ -294,20 +309,34 @@ Depends on everything above.
   - Commands: `start-simulator` exists; `start-audio-client` emits by default (`--no-emit`, `--device INDEX`; `--emit`, `--enable-beat-detection`, `--socketio-url` are gone). `COBEART_DEBUG` is gone: DevTools follow `debug` in the YAML. `COBEART_CONFIG` selects the config file for Python and Electron alike; `PORT` overrides the hub port; `COBEART_SOCKETIO_URL` overrides the Python hub URL. Console scripts need `conda activate splat-env`.
   - Architecture: `cobeart/settings/config.py` (frozen `Settings`) replaced `streaming.py`; `electron/config.js` loads and validates the YAML and the hub injects `window.__COBEART_CONFIG__` into every served HTML page (and `/config.json`). The bridge posts `{type: 'audio'}` to sims on change (`contract/CONTRACT.md`). Beat detection runs madmom online in a spawned child process (`beat/process.py`, `tracker.py`, `tempo.py`, `predictor.py`, `clock.py`); tempo range 55-215 BPM; `has_beat()` consumes each beat, so only one caller may use it.
   - Testing: `/viewer` checks need a motion source (see Phase 3 lessons); the simulator needs the hub up first.
-- **Scope:** Update commands (`start-audio-client`, `npm test`), architecture (hub module, contract, config file), background system (registry only, `setUniforms` contract; remove the Kaleidoscope and Particle Orbits sections), test status, Linux as the primary platform, and the conda invocation guidance.
-- **Accept:** every command in CLAUDE.md runs as written. Replace the hardware-only "Testing" section with the offline workflow (simulator, `--simulate`, e2e), and keep the hardware checklist as a separate "on-site validation" list.
+- **Carry-over from Phase 4 decisions** (these land in parallel, so document them by these names): CI in `.github/workflows/ci.yml`; `node scripts/fitness.mjs` (architecture fitness checks); cross-process tests in `tests/e2e/` collected by plain `pytest`; `start-simulator` with no hub logs one line and exits 1. Stale content seen at the phase base: `npm run dev`, `streaming.py`, `max_num_objects` 6, the Kaleidoscope and Particle Orbits sections, MediaFoundation patches, `molten-branch`/`music-branch`, the hardware-only Testing section.
+- **Scope:** Update commands (`start-audio-client`, `start-simulator`, `npm test`, fitness script), architecture (hub module, contract, config file), background system (registry only, `setUniforms` contract; remove the Kaleidoscope and Particle Orbits sections), test status and CI, Linux as the primary platform, and the conda invocation guidance. Shrink "Refactor in progress" to a short pointer to `ROADMAP.md` (backlog: Deferred; decision log: D1-D9 and phase decisions).
+- **Accept:** every command in CLAUDE.md runs as written (master re-checks the Phase 4 ones after merge). Replace the hardware-only "Testing" section with the offline workflow (simulator, `--simulate`, e2e), and keep the hardware checklist as a separate "on-site validation" list.
 
 ### WP 4.3: End-to-end offline integration test (§4.4)
 - **Model:** Opus. Orchestrating Node and Python subprocesses with timing assertions; flakiness is the main risk.
-- **Owns:** `tests/e2e/` (new, repo root)
-- **Scope:** A pytest suite that boots the real hub (`node server.js` as a subprocess on an ephemeral port, with the config path overridden), runs scenarios through both simulation paths (socket-level `cobeart.simulator`, and the full Python pipeline via `start-optitrack-client --simulate`), subscribes to `/viewer` with a `python-socketio` client, and asserts:
+- **Owns:** `tests/e2e/` (new, repo root), `cobeart/simulator/tests/test_integration.py` (moved into `tests/e2e/`), `pyproject.toml` (`testpaths` only: `["cobeart", "tests"]`)
+- **Scope:** A pytest suite with one shared fixture that boots the real hub (`node server.js` as a subprocess on an ephemeral port, with the config path overridden where needed), drives both simulation paths (socket-level `cobeart.simulator`, and the full Python pipeline via `start-optitrack-client --simulate`), subscribes to `/viewer` with a `python-socketio` client, and asserts:
   - every received frame validates against `contract/frame.schema.json`
   - merged audio is present and then disappears after `--audio-stop-after`
   - fault-injected payloads never reach `/viewer`
   - IDs from `shuffled` and `missing-body` arrive intact
-  - the `still` scenario drives `norm_abs_vel` to 0 through the real metrics path
-- **Carry-over from Phase 3:** `server.js` loads and validates `config/cobeart.yaml` (or `COBEART_CONFIG`) at startup and exits 1 on an invalid file; `PORT` overrides the configured port. The simulator raises `ConnectionError` if the hub is not up yet, while `start-optitrack-client --simulate` retries; wait for `/health` before starting the simulator. The hub rejects frames with more than `tracking.max_num_objects` bodies. Validated Phase 3 gate driver scripts (`/viewer` watcher with schema validation and tempo percentiles; composite transition driver) can serve as starting points; they lived in the master scratchpad and are not in the repo.
-- **Accept:** `pytest tests/e2e` passes locally and in CI; no hardware, browser, or Electron window needed.
+  - a body that moves and then stops drives `norm_abs_vel` to 0 through the real metrics path: a test-defined `MotionSource` (OptiTrack-native poses) wired to the real `FramePipeline`, `MetricsTracker`, `PayloadSender` and hub (see Phase 4 decisions)
+  - the existing `test_integration.py` checks keep passing from their new home
+- **Carry-over from Phase 3:** `server.js` loads and validates `config/cobeart.yaml` (or `COBEART_CONFIG`) at startup and exits 1 on an invalid file; `PORT` overrides the configured port. The simulator raises `ConnectionError` if the hub is not up yet (WP 4.4 turns this into a clean exit 1), while `start-optitrack-client --simulate` retries; wait for `/health` before starting the simulator. The hub rejects frames with more than `tracking.max_num_objects` bodies. Validated Phase 3 gate driver scripts (`/viewer` watcher with schema validation and tempo percentiles; composite transition driver) can serve as starting points; they lived in the master scratchpad and are not in the repo.
+- **Robustness:** every wait is bounded; time checks use hub `timestamp` fields, not receipt time (see Phase 2 lessons); every subprocess is cleaned up on failure.
+- **Accept:** `pytest tests/e2e` passes 5 times in a row locally, and under `taskset -c 0`; plain `pytest` collects it; no hardware, browser, or Electron window needed; green in CI.
+
+### WP 4.4: Simulator no-hub exit and schema wording (Deferred, Phase 2/3 findings)
+- **Model:** Sonnet. Two small fixes.
+- **Owns:** `cobeart/simulator/__main__.py`, `contract/frame.schema.json` (the `audio` description only; no `schemaVersion` bump), `cobeart/simulator/tests/test_cli.py` (new)
+- **Scope:** `start-simulator` with no hub at the URL logs one line (`no hub at <url>, start Electron or npm run web first`) and exits 1, with no traceback. It fails fast; it does not retry. Remove "once implemented" from the `audio` description (staleness is implemented, WP 2.1).
+- **Test:** `main()` against an unused port raises `SystemExit` with code 1 within a few seconds and logs the one line.
+- **Accept:** pytest passes; flake8 clean.
+
+**Phase 4 gate review:** the master (diff review of every WP, security read of `ci.yml`).
+
+**Phase 4 gate:** Phase 3 gate plus `pytest` (now including `tests/e2e`), `flake8 cobeart`, `npm test`, `node scripts/fitness.mjs` and `node --test scripts/fitness.test.mjs`; `pytest tests/e2e` 5 times in a row, normally and under `taskset -c 0`; CI green on the pushed `refactor/phase-4`; every command in CLAUDE.md runs as written.
 
 ---
 
@@ -331,7 +360,6 @@ Depends on everything above.
   - `/viewer` bandwidth: each merged frame carries the full audio spectrum (~48 KB) at 240 Hz, about 11 MB/s per viewer. Consider sending the spectrum at the audio rate only, or a slimmer audio subset on frames.
   - The hub replays its stored `lastFrame` to new viewers regardless of age.
   - A body that disappears from the NatNet stream entirely (rather than arriving with `tracking_valid=False`) is never pruned from `FramePipeline`.
-  - `frame.schema.json`'s `audio` description still says staleness is "once implemented"; it is implemented (WP 2.1).
 - **Found in Phase 3 (no owner yet):**
   - Beat tempo range is madmom's 55-215 BPM; one song briefly locked to double time (~210 BPM) in its intro. Narrowing it is a product decision (depends on the show's music).
   - With a real mic, `beat_timestamp` is late by roughly the device input latency (`StreamClock` assumes zero).
@@ -339,7 +367,6 @@ Depends on everything above.
   - `compute_metrics_payload` runs on the capture thread (avg 3 ms, max ~11 ms per 10 ms block). Measured fine; moving it to an emitter-side worker would make "never blocks capture" structural.
   - `fluid/script.js` Splat patterns (~2008-2517) treat the arena as centred (`arena_x/y` are half-extents); an asymmetric arena would be wrong there.
   - `PayloadSender(reconnect_interval_s)`, `MetricsTracker(min_dt_s)`, `tracking.use_optitrack_client`, `x_rescale`/`y_rescale` have no YAML key or no consumer.
-  - `start-simulator` with no hub prints a raw traceback; it should log one line ("no hub at <url>, start Electron first") and exit 1.
   - `composite.js` `tryBindSources` and `attachKeysToIframe` still have empty `catch (e) {}` blocks.
   - The background registry's `ctx.rigidbodies` keeps the last splat per ID forever (never pruned when a body leaves).
   - Composite transitions were broken since WP 1.4 (seed ring buffer evicted the largest seeds, so the reveal shrank mid-transition); fixed at the Phase 3 gate by spacing seeds over `uAnimSeconds` and never evicting.
@@ -361,14 +388,15 @@ Shows which WP owns each contested file per phase (a dash means untouched). Use 
 | `public/composite/composite.js` | 1.4 | n/a | 3.2 | n/a |
 | `public/molten/molten.js`, `public/ink/ink.js` | n/a | 2.5 | 3.2 (arena) | n/a |
 | `contract/CONTRACT.md` | 1.2 | n/a | 3.2 (bridge `audio` message) | n/a |
+| `contract/frame.schema.json` | 1.2 | n/a | n/a | 4.4 (`audio` description) |
 | `packagesender/sender.py` | 1.3 (call site), then 1.7 (orientation fields) | 2.2 | 3.1 | n/a |
 | `packagesender/metrics.py` | 1.3, then 1.7 (angular velocity, dropouts) | 2.2 (frame-time clock, dt floor) | 3.1 | n/a |
 | `optitrackclient/start_client.py` | 1.7 | 2.2 | 3.1 | n/a |
-| `cobeart/simulator/` | 1.9 | n/a | 3.1 | n/a |
+| `cobeart/simulator/` | 1.9 | n/a | 3.1 | 4.3 (moves `tests/test_integration.py`), 4.4 (`__main__.py`, `tests/test_cli.py`) |
 | `audiocapture/capture.py` | 1.6 | 2.3 | 3.1 (`main()`), 3.4 (`AudioCapturer`) | n/a |
 | `audiocapture/beat/` | n/a | n/a | 3.4 | n/a |
 | `audiocapture/emitter.py` | n/a | 2.3 | 3.1 | n/a |
-| `pyproject.toml` | 0.1 | n/a | 3.1 | n/a |
+| `pyproject.toml` | 0.1 | n/a | 3.1 | 4.3 (`testpaths`) |
 | `CLAUDE.md` | 0.1 | n/a | n/a | 4.2 |
 
-Critical path: D5/D6 → Phase 1 → 2.2 → 3.1 → 4.3. Total: 21 agent commits across 4 phases, plus the Phase 0 master commit.
+Critical path: D5/D6 → Phase 1 → 2.2 → 3.1 → 4.3. Total: 22 agent commits across 4 phases, plus the Phase 0 master commit.

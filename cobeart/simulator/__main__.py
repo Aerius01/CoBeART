@@ -86,6 +86,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         simulator.run()
     except KeyboardInterrupt:
         logger.info("Interrupted")
+    except socketio.exceptions.ConnectionError as exc:
+        # socketio raises ConnectionError only from connect(); a mid-run drop surfaces as BadNamespaceError.
+        logger.error("no hub at %s, start Electron or npm run web first", url)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

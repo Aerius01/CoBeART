@@ -25,7 +25,7 @@
       "items": { "$ref": "#/$defs/rigidBody" }
     },
     "audio": {
-      "description": "Latest audio_metrics message, attached by the hub only. Producers on /ingest never send it; the hub omits it when no audio has arrived (or, once implemented, when it is stale). It keeps its own schemaVersion and always carries the hub 'timestamp'.",
+      "description": "Latest audio_metrics message, attached by the hub only. Producers on /ingest never send it; the hub omits it when no audio has arrived or when the latest audio is older than hub.audio_max_age_ms. It keeps its own schemaVersion and always carries the hub 'timestamp'.",
       "type": "object",
       "$ref": "audio_metrics.schema.json",
       "required": ["timestamp"]

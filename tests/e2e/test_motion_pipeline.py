@@ -1,5 +1,5 @@
-"""The real Python motion pipeline against the real hub: NatNet-style source -> FramePipeline -> MetricsTracker ->
-PayloadSender -> hub -> /viewer, in process and through the `start_client --simulate` CLI."""
+"""The real Python motion pipeline against the real hub: NatNet-style source -> FramePipeline -> PayloadSender ->
+hub (which derives the velocities) -> /viewer, in process and through the `start_client --simulate` CLI."""
 import math
 import signal
 import subprocess
@@ -7,19 +7,16 @@ import threading
 from dataclasses import dataclass
 
 import pytest
-import socketio
 from jsonschema import Draft202012Validator
 
-from cobeart.common.strict_json import StrictJson
 from cobeart.input.optitrack.start_client import (
-    FrameListener, FramePipeline, RigidBodyListener, arena_to_optitrack,
+    DEFAULT_SYNTHETIC_PATHS, FrameListener, RigidBodyListener, arena_to_optitrack,
 )
 from cobeart.input.optitrack.transform import ArenaPose
-from cobeart.input.optitrack.metrics import MetricsTracker
-from cobeart.input.optitrack.sender import PayloadSender
 from cobeart.settings.config import Settings
 from tests.e2e.harness import (
-    LOG_TAIL_CHARS, FrameMessage, Hub, RigidBodyMessage, Viewer, assert_all_valid, body_ids, start_python, wait_until,
+    LOG_TAIL_CHARS, BodyMessage, FrameMessage, Hub, Viewer, assert_all_valid, build_motion_pipeline, roles_of,
+    start_python, wait_until,
 )
 
 DELIVERY_TIMEOUT_S: float = 30.0
@@ -31,6 +28,7 @@ YAW_RATE_DEG_S: float = 90.0  # about arena +z
 START_MM: tuple[float, float, float] = (-500.0, 250.0, 1200.0)
 MOCAP_EPOCH_S: float = 100.0  # NatNet timestamps count seconds since Motive started, not wall time
 REL_TOLERANCE: float = 1e-6
+SPEED_TOLERANCE: float = 0.03  # positions are whole mm on the wire, so per-frame velocity carries rounding noise
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,28 +77,22 @@ class ScriptedNatNetSource:
 
 
 def test_body_that_stops_reaches_zero_norm_velocity(
-    shared_hub: Hub, shared_viewer: Viewer, settings: Settings, frame_validator: Draft202012Validator
+    fresh_hub: Hub, fresh_viewer: Viewer, settings: Settings, frame_validator: Draft202012Validator
 ) -> None:
     window: int = settings.metrics.history_window
+    role: str = settings.tracking.roles[BODY_ID]
     # Mocap frames at the package rate, so the sender's rate gate passes every frame and frame k is viewer frame k.
     script = MoveThenStop(rate_hz=settings.tracking.package_framerate, moving_frames=4 * window,
                           still_frames=2 * window)
     failure = threading.Event()
-    sender = PayloadSender(  # wired as start_client.start() wires it
-        client=socketio.Client(reconnection=False, json=StrictJson),
-        tracker=MetricsTracker(max_vel=settings.metrics.max_vel, window_length=window),
-        url=shared_hub.url,
-        framerate=settings.tracking.package_framerate,
-        failure=failure,
-    )
-    pipeline = FramePipeline(sender, settings.tracking.max_num_objects, failure)
+    sender, pipeline = build_motion_pipeline(settings, fresh_hub.url, failure)
     source = ScriptedNatNetSource(script)
     pipeline.attach(source)
     sender.connect()
     try:
-        wait_until(sender.is_connected, CONNECT_TIMEOUT_S, f"PayloadSender to connect to {shared_hub.url}")
+        wait_until(sender.is_connected, CONNECT_TIMEOUT_S, f"PayloadSender to connect to {fresh_hub.url}")
         source.run()
-        frames: list[FrameMessage] = shared_viewer.wait_for_count(script.total_frames, DELIVERY_TIMEOUT_S)
+        frames: list[FrameMessage] = fresh_viewer.wait_for_count(script.total_frames, DELIVERY_TIMEOUT_S)
     finally:
         source.shutdown()
         sender.stop()
@@ -108,10 +100,10 @@ def test_body_that_stops_reaches_zero_norm_velocity(
     assert len(frames) == script.total_frames
     assert_all_valid(frames, frame_validator)
 
-    bodies: list[RigidBodyMessage] = []
+    bodies: list[BodyMessage] = []
     for index, frame in enumerate(frames):
-        assert body_ids(frame) == [BODY_ID], f"frame {index}: {body_ids(frame)}"
-        bodies.append(frame["rigidbodies"][0])
+        assert roles_of(frame) == {role}, f"frame {index}: {sorted(roles_of(frame))}"
+        bodies.append(frame["bodies"][role])
     for index, body in enumerate(bodies):
         expected: ArenaPose = script.arena_pose(index)
         assert abs(body["x"] - expected.position[0]) <= 1 and abs(body["y"] - expected.position[1]) <= 1, (
@@ -121,28 +113,29 @@ def test_body_that_stops_reaches_zero_norm_velocity(
     norm: float = SPEED_MM_S / settings.metrics.max_vel
     stop: int = script.moving_frames  # last frame that moved; frame stop + j has stood still for j frames
     assert bodies[0]["norm_abs_vel"] == 0.0, "a body's first frame has no velocity yet"
-    for index in range(1, stop + 1):
-        body = bodies[index]
-        assert body["abs_vel"] == pytest.approx(SPEED_MM_S, rel=REL_TOLERANCE), f"frame {index}"
-        assert body["wz"] == pytest.approx(YAW_RATE_DEG_S, rel=REL_TOLERANCE), f"frame {index}"
-        assert body["norm_abs_vel"] == pytest.approx(norm, rel=REL_TOLERANCE), f"frame {index} while moving"
+    moving: list[BodyMessage] = bodies[1:stop + 1]
+    assert sum(body["abs_vel"] for body in moving) / len(moving) == pytest.approx(SPEED_MM_S, rel=SPEED_TOLERANCE)
+    for index, body in enumerate(moving, start=1):
+        assert body["wz"] == pytest.approx(YAW_RATE_DEG_S, rel=SPEED_TOLERANCE), f"frame {index}"
+        assert body["norm_abs_vel"] > 0.0, f"frame {index} while moving"
     for still in range(1, script.still_frames + 1):
         body = bodies[stop + still]
         assert (body["abs_vel"], body["wx"], body["wy"], body["wz"]) == (0.0, 0.0, 0.0, 0.0), f"still frame {still}"
         if still < window:  # held at the window maximum until a full window of stillness
-            assert body["norm_abs_vel"] == pytest.approx(norm, rel=REL_TOLERANCE), f"still frame {still}"
+            assert norm * 0.5 < body["norm_abs_vel"] < norm * 1.5, f"still frame {still}: {body['norm_abs_vel']}"
         else:
             assert body["norm_abs_vel"] == 0.0, f"still frame {still}: expected 0 from still frame {window} on"
 
 
 SIMULATE_FRAMES: int = 100
-SIMULATE_IDS: set[int] = {0, 1, 2}  # start_client.DEFAULT_SYNTHETIC_PATHS
 
 
 @pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
 def test_simulate_cli_streams_and_stops_cleanly(
-    stop_signal: signal.Signals, shared_hub: Hub, shared_viewer: Viewer, frame_validator: Draft202012Validator
+    stop_signal: signal.Signals, shared_hub: Hub, shared_viewer: Viewer, settings: Settings,
+    frame_validator: Draft202012Validator,
 ) -> None:
+    expected_roles: set[str] = {settings.tracking.roles[path.body_id] for path in DEFAULT_SYNTHETIC_PATHS}
     process: subprocess.Popen[str] = start_python(
         ["-m", "cobeart.input.optitrack.start_client", "--simulate", "--url", shared_hub.url]
     )
@@ -157,4 +150,4 @@ def test_simulate_cli_streams_and_stops_cleanly(
     assert process.returncode == 0, f"exit code {process.returncode}:\n{stderr[-LOG_TAIL_CHARS:]}"
     assert "Traceback" not in stderr, stderr[-LOG_TAIL_CHARS:]
     assert_all_valid(frames, frame_validator)
-    assert all(set(body_ids(frame)) == SIMULATE_IDS and len(frame["rigidbodies"]) == 3 for frame in frames)
+    assert all(roles_of(frame) == expected_roles for frame in frames), "role keys differ from tracking.roles"

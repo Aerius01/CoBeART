@@ -61,6 +61,15 @@ export function moduleBoundaries(relPath, text) {
     `${relPath.split('/')[1]} must not import cobeart.${forbidden.join(' or cobeart.')}`);
 }
 
+// Worlds only receive postMessages from the host bridge (D19); they must not open sockets of their own.
+const WORLD_SOCKET_PATTERN = /(?<![\w.$])io\(|socket\.io|\/viewer|\/ingest/;
+
+export function worldsReceiveOnly(relPath, text) {
+  if (!relPath.startsWith('cobeart-app/public/worlds/')) return [];
+  return scanLines(relPath, text, 'worlds-receive-only', WORLD_SOCKET_PATTERN,
+    'worlds receive postMessages only; no io(, socket.io, /viewer or /ingest');
+}
+
 const isTestPath = (rel) => rel.split('/').some((p) => p === 'tests' || p === 'test');
 
 /** Each rule: which files it applies to, and its check. */
@@ -78,6 +87,7 @@ export const RULES = [
     applies: (rel) => !isTestPath(rel) && rel.endsWith('.py'),
   },
   { check: moduleBoundaries, applies: (rel) => rel.endsWith('.py') },
+  { check: worldsReceiveOnly, applies: (rel) => rel.startsWith('cobeart-app/public/worlds/') },
 ];
 
 /** @returns {string[]} repo-relative posix paths of files under `dir`, skipping node_modules */

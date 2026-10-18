@@ -16,9 +16,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
+import numpy as np
 import socketio
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import best_match
+
+from cobeart.common.strict_json import StrictJson
+from cobeart.input.optitrack.sender import PayloadSender
+from cobeart.input.optitrack.start_client import FramePipeline
+from cobeart.settings.config import Settings
+from cobeart.simulator.scenarios import Scenario, build_motion_scenario
+from cobeart.simulator.tests.helpers import motion_config
 
 REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 APP_DIR: Path = REPO_ROOT / "cobeart-app"
@@ -31,9 +39,8 @@ LOG_TAIL_CHARS: int = 2000
 _PR_SET_PDEATHSIG: int = 1
 
 
-class RigidBodyMessage(TypedDict):
-    """The rigid-body fields the e2e assertions read (see contract/frame.schema.json)."""
-    ID: int
+class BodyMessage(TypedDict):
+    """The body fields the e2e assertions read (see contract/frame.schema.json); the hub derives the velocities."""
     x: int
     y: int
     z: int
@@ -44,21 +51,17 @@ class RigidBodyMessage(TypedDict):
     norm_abs_vel: float
 
 
-class AudioMessage(TypedDict):
-    """The merged audio fields the e2e assertions read; `timestamp` is hub receipt time (epoch ms)."""
-    timestamp: float
-
-
-class _FrameRequired(TypedDict):
+class FrameMessage(TypedDict):
+    """A /viewer `frame`; `timestamp` is hub receipt time (epoch ms), `bodies` is keyed by role."""
     schemaVersion: int
-    type: str
     timestamp: float
-    rigidbodies: list[RigidBodyMessage]
+    bodies: dict[str, BodyMessage]
 
 
-class FrameMessage(_FrameRequired, total=False):
-    """A /viewer frame; `timestamp` is hub receipt time (epoch ms), `audio` only while audio is fresh."""
-    audio: AudioMessage
+class AudioMessage(TypedDict):
+    """A /viewer `audio`; `timestamp` is hub receipt time (epoch ms)."""
+    schemaVersion: int
+    timestamp: float
 
 
 def hub_unavailable_reason() -> str | None:
@@ -186,24 +189,33 @@ def run_python(args: Sequence[str], timeout_s: float) -> subprocess.CompletedPro
 
 
 class Viewer:
-    """A /viewer subscriber recording frames in hub order. Frames stamped before `since_ms` are dropped.
+    """A /viewer subscriber recording `frame` and `audio` events separately, in hub order.
 
-    A new viewer first receives the hub's stored last frame, however old; setting `since_ms` to the time the test
-    starts its producer filters that replay out by its hub timestamp.
+    Messages stamped before `since_ms` are dropped, so a viewer can discard anything the hub sent before its
+    producer started (the hub no longer replays old messages, but in-flight ones from an earlier test can still
+    arrive on a shared hub). A viewer that never calls `start_recording` keeps everything it receives.
     """
 
     def __init__(self, url: str) -> None:
         self._url: str = url
         self._client: socketio.Client = socketio.Client(reconnection=False)
         self._frames: list[FrameMessage] = []
+        self._audios: list[AudioMessage] = []
         self._changed: threading.Condition = threading.Condition()
         self._since_ms: float = 0.0
         self._client.on("frame", self._on_frame, namespace="/viewer")
+        self._client.on("audio", self._on_audio, namespace="/viewer")
 
     def _on_frame(self, data: FrameMessage) -> None:
         with self._changed:
             if data["timestamp"] >= self._since_ms:
                 self._frames.append(data)
+                self._changed.notify_all()
+
+    def _on_audio(self, data: AudioMessage) -> None:
+        with self._changed:
+            if data["timestamp"] >= self._since_ms:
+                self._audios.append(data)
                 self._changed.notify_all()
 
     def connect(self) -> None:
@@ -214,14 +226,19 @@ class Viewer:
         self._client.disconnect()
 
     def start_recording(self) -> None:
-        """Forget everything so far and keep only frames the hub stamps from now on."""
+        """Forget everything so far and keep only messages the hub stamps from now on."""
         with self._changed:
             self._since_ms = float(int(time.time() * 1000.0))  # hub stamps whole ms (Date.now())
             self._frames = []
+            self._audios = []
 
     def frames(self) -> list[FrameMessage]:
         with self._changed:
             return list(self._frames)
+
+    def audios(self) -> list[AudioMessage]:
+        with self._changed:
+            return list(self._audios)
 
     def wait_for(self, condition: Callable[[list[FrameMessage]], bool], timeout_s: float,
                  what: str) -> list[FrameMessage]:
@@ -234,6 +251,14 @@ class Viewer:
 
     def wait_for_count(self, count: int, timeout_s: float) -> list[FrameMessage]:
         return self.wait_for(lambda frames: len(frames) >= count, timeout_s, f"{count} frames")
+
+    def wait_for_audio_count(self, count: int, timeout_s: float) -> list[AudioMessage]:
+        """Block until at least `count` audio messages arrived; raise TimeoutError otherwise."""
+        with self._changed:
+            if not self._changed.wait_for(lambda: len(self._audios) >= count, timeout=timeout_s):
+                raise TimeoutError(f"timed out after {timeout_s:.1f} s waiting for {count} audio messages on "
+                                   f"/viewer ({len(self._audios)} received)")
+            return list(self._audios)
 
 
 @contextmanager
@@ -249,12 +274,23 @@ def recording_viewer(url: str) -> Iterator[Viewer]:
 
 
 def _is_marker(frame: FrameMessage) -> bool:
-    return not frame["rigidbodies"]
+    return not frame["bodies"]
 
 
-def marker_frame() -> dict[str, Any]:
-    """A valid frame with no bodies. No scenario or pipeline in these tests sends one, so it marks a stream end."""
-    return {"schemaVersion": 1, "type": "optitrack", "timestamp": time.time() * 1000.0, "rigidbodies": []}
+def marker_pose_frame() -> dict[str, Any]:
+    """A valid pose_frame with no bodies. No scenario or pipeline here sends one, so its frame marks a stream end."""
+    return {"schemaVersion": 2, "source_time_s": 0.0, "bodies": {}}
+
+
+def emit_once(url: str, event: str, payload: object, namespace: str = "/ingest") -> None:
+    """Connect, emit one message and disconnect. For hand-built payloads (a v1 frame) and stream markers."""
+    client: socketio.Client = socketio.Client(reconnection=False)
+    client.connect(url, namespaces=[namespace], transports=["websocket"], wait_timeout=VIEWER_CONNECT_TIMEOUT_S)
+    try:
+        client.emit(event, payload, namespace=namespace)
+        time.sleep(POLL_INTERVAL_S)  # let the write flush before the disconnect (engineio does not drain)
+    finally:
+        client.disconnect()
 
 
 def frames_until_marker(url: str, viewer: Viewer, timeout_s: float) -> list[FrameMessage]:
@@ -268,7 +304,7 @@ def frames_until_marker(url: str, viewer: Viewer, timeout_s: float) -> list[Fram
     client: socketio.Client = socketio.Client(reconnection=False)
     client.connect(url, namespaces=["/ingest"], transports=["websocket"], wait_timeout=VIEWER_CONNECT_TIMEOUT_S)
     try:
-        client.emit("frame", marker_frame(), namespace="/ingest")
+        client.emit("pose_frame", marker_pose_frame(), namespace="/ingest")
         frames: list[FrameMessage] = viewer.wait_for(
             lambda received: any(_is_marker(frame) for frame in received), timeout_s, "the end-of-stream marker"
         )
@@ -278,14 +314,44 @@ def frames_until_marker(url: str, viewer: Viewer, timeout_s: float) -> list[Fram
     return frames[:end]
 
 
-def assert_all_valid(frames: Sequence[FrameMessage], validator: Draft202012Validator) -> None:
-    """Every frame validates against contract/frame.schema.json; the message names the first offender."""
-    for index, frame in enumerate(frames):
-        error = best_match(validator.iter_errors(frame))
+def assert_all_valid(messages: Sequence[Any], validator: Draft202012Validator, kind: str = "frame") -> None:
+    """Every message validates against its contract schema; the failure names the first offender."""
+    for index, message in enumerate(messages):
+        error = best_match(validator.iter_errors(message))
         if error is not None:
-            raise AssertionError(f"frame {index} of {len(frames)} violates the contract at "
+            raise AssertionError(f"{kind} {index} of {len(messages)} violates the contract at "
                                  f"{error.json_path}: {error.message}")
 
 
-def body_ids(frame: FrameMessage) -> list[int]:
-    return [body["ID"] for body in frame["rigidbodies"]]
+def roles_of(frame: FrameMessage) -> set[str]:
+    return set(frame["bodies"])
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Adapters to interfaces owned by the Python producers (WP 6.2). Everything the suite assumes about their
+# construction lives below, so a signature change there is a change in this section only.
+# ---------------------------------------------------------------------------------------------------------------
+
+def make_scenario(name: str, rate_hz: float) -> Scenario:
+    """A named simulator motion scenario at `rate_hz`, stamped from now, with the config's roles and arena."""
+    return build_motion_scenario(name, motion_config(rate_hz=rate_hz, start_epoch_ms=time.time() * 1000.0))
+
+
+def scenario_payload(scenario: Scenario, t: float) -> dict[str, Any]:
+    """The pose_frame payload the scenario produces at time `t` (the simulator sends exactly this)."""
+    payload: dict[str, Any] = scenario(t, np.random.default_rng(0)).to_payload()
+    return payload
+
+
+def build_motion_pipeline(
+    settings: Settings, url: str, failure: threading.Event
+) -> tuple[PayloadSender, FramePipeline]:
+    """The real PayloadSender and FramePipeline, wired as start_client.start() wires them."""
+    sender: PayloadSender = PayloadSender(
+        client=socketio.Client(reconnection=False, json=StrictJson),
+        url=url,
+        framerate=settings.tracking.package_framerate,
+        failure=failure,
+    )
+    pipeline: FramePipeline = FramePipeline(sender, settings.tracking.roles, failure)
+    return sender, pipeline

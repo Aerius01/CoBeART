@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { hubOnlyServer, moduleBoundaries, noArenaPortLiterals, noPrintHotPath, RULES } from './fitness.mjs';
+import { hubOnlyServer, moduleBoundaries, noArenaPortLiterals, noPrintHotPath, RULES, worldsReceiveOnly } from './fitness.mjs';
 
 const ids = (violations) => violations.map((v) => v.rule);
 
@@ -92,4 +92,23 @@ test('module-boundaries allows common, settings, own-module imports and comments
   assert.deepEqual(moduleBoundaries('cobeart/simulator/x.py', 'from cobeart.settings.config import y'), []);
   assert.deepEqual(moduleBoundaries('cobeart/audio/x.py', '# from cobeart.input import y\nx = "import cobeart.input"'), []);
   assert.deepEqual(moduleBoundaries('cobeart/settings/config.py', 'from cobeart.input import y'), []);
+});
+
+test('worlds-receive-only flags sockets, io( and the hub namespaces in a world', () => {
+  const file = 'cobeart-app/public/worlds/splat/script.js';
+  const a = worldsReceiveOnly(file, 'x\nconst s = io("/viewer");\n');
+  assert.deepEqual(ids(a), ['worlds-receive-only']);
+  assert.equal(a[0].line, 2);
+  assert.equal(worldsReceiveOnly(file, 'import "socket.io-client";').length, 1);
+  assert.equal(worldsReceiveOnly(file, 'fetch("/ingest")').length, 1);
+  assert.equal(worldsReceiveOnly('cobeart-app/public/worlds/other/index.html', '<script src="/socket.io/socket.io.js">').length, 1);
+});
+
+test('worlds-receive-only allows postMessage listeners and files outside worlds', () => {
+  const file = 'cobeart-app/public/worlds/splat/script.js';
+  assert.deepEqual(worldsReceiveOnly(file, "window.addEventListener('message', (e) => handle(e.data));\nconst r = radio(1) + gl.drawio(2);"), []);
+  assert.deepEqual(worldsReceiveOnly('cobeart-app/public/host/bridge.js', 'const s = io("/viewer");'), []);
+  const rule = RULES.find((r) => r.check === worldsReceiveOnly);
+  assert.equal(rule.applies('cobeart-app/public/worlds/splat/script.js'), true);
+  assert.equal(rule.applies('cobeart-app/public/host/bridge.js'), false);
 });

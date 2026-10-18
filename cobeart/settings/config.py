@@ -1,10 +1,14 @@
 """Loads the shared `config/cobeart.yaml` into a frozen, validated `Settings` tree."""
 import ipaddress
+import json
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -12,14 +16,30 @@ import yaml
 
 CONFIG_PATH_ENV: str = "COBEART_CONFIG"
 SOCKETIO_URL_ENV: str = "COBEART_SOCKETIO_URL"
-DEFAULT_CONFIG_PATH: Path = Path(__file__).resolve().parents[2] / "config" / "cobeart.yaml"
+REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH: Path = REPO_ROOT / "config" / "cobeart.yaml"
+# The role enum is defined once, in the contract; config role values are checked against it.
+FRAME_SCHEMA_PATH: Path = REPO_ROOT / "contract" / "frame.schema.json"
+# A tracking.roles key: a non-negative integer, or its decimal string (what config/cobeart.schema.json accepts).
+_MOTIVE_ID_PATTERN: re.Pattern[str] = re.compile(r"0|[1-9][0-9]*")
 
 Range = tuple[float, float]
-Rgb = tuple[float, float, float]
+# A contract role name (frame.schema.json $defs/role), validated against `contract_roles()` on load.
+type Role = str
 
 
 class ConfigError(ValueError):
     """The configuration file is missing, unreadable or invalid; the message names the offending key."""
+
+
+@cache
+def contract_roles() -> frozenset[Role]:
+    """The closed role enum from contract/frame.schema.json ($defs/role)."""
+    try:
+        roles: list[str] = json.loads(FRAME_SCHEMA_PATH.read_text(encoding="utf-8"))["$defs"]["role"]["enum"]
+    except (OSError, ValueError, KeyError) as exc:
+        raise ConfigError(f"cannot read the role enum ($defs/role) from {FRAME_SCHEMA_PATH}: {exc!r}") from exc
+    return frozenset(roles)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,12 +58,13 @@ class NetworkSettings:
 
 @dataclass(frozen=True, slots=True)
 class TrackingSettings:
+    """`roles`: read-only map from Motive streaming ID (int) to contract role, each role at most once."""
     use_optitrack_client: bool
     tracking_framerate: float
     package_framerate: float
-    max_num_objects: int
     x_rescale: float
     y_rescale: float
+    roles: Mapping[int, Role]
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,13 +77,10 @@ class ArenaSettings:
 
 @dataclass(frozen=True, slots=True)
 class MetricsSettings:
+    """The hub's velocity stage: norm_abs_vel scale and hold window, and the source-time gap that restarts a role."""
     max_vel: float
     history_window: int
-
-
-@dataclass(frozen=True, slots=True)
-class HubSettings:
-    audio_max_age_ms: int
+    max_gap_s: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +92,21 @@ class WindowSettings:
 @dataclass(frozen=True, slots=True)
 class FrontendSettings:
     bridge_framerate: float
-    splat_color: Rgb
+    audio_max_age_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class MouseSourceSettings:
+    """Browser mouse source (D17); z values in millimeters, z_initial_mm inside arena.z."""
+    role: Role
+    z_initial_mm: int
+    z_step_mm: int
+    rate_hz: float
+
+
+@dataclass(frozen=True, slots=True)
+class SourcesSettings:
+    mouse: MouseSourceSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,9 +123,9 @@ class Settings:
     tracking: TrackingSettings
     arena: ArenaSettings
     metrics: MetricsSettings
-    hub: HubSettings
     window: WindowSettings
     frontend: FrontendSettings
+    sources: SourcesSettings
     debug: bool
     audio: AudioSettings
     hub_url: str
@@ -183,15 +215,45 @@ class _Section:
             raise ConfigError(f"config key '{name}' must have min < max, got {value!r}")
         return (low, high)
 
-    def rgb(self, key: str) -> Rgb:
+    def role(self, key: str, roles: frozenset[Role]) -> Role:
+        return self._as_role(self._get(key), self._key(key), roles)
+
+    @staticmethod
+    def _as_role(value: Any, name: str, roles: frozenset[Role]) -> Role:
+        if not isinstance(value, str) or value not in roles:
+            allowed: str = ", ".join(sorted(roles))
+            raise ConfigError(f"config key '{name}' must be a contract role ({allowed}), got {value!r}")
+        return value
+
+    def role_map(self, key: str, roles: frozenset[Role]) -> Mapping[int, Role]:
+        """A non-empty {Motive ID: role} mapping; keys may be ints or their decimal strings, each role at most once."""
         name: str = self._key(key)
         value: Any = self._get(key)
-        if not isinstance(value, list) or len(value) != 3:
-            raise ConfigError(f"config key '{name}' must be an [r, g, b] list, got {value!r}")
-        r, g, b = (self._as_number(v, name) for v in value)
-        if not all(0.0 <= c <= 1.0 for c in (r, g, b)):
-            raise ConfigError(f"config key '{name}' channels must be in [0, 1], got {value!r}")
-        return (r, g, b)
+        if not isinstance(value, Mapping) or not value:
+            raise ConfigError(f"config key '{name}' must be a non-empty mapping of Motive ID to role, got {value!r}")
+        by_id: dict[int, Role] = {}
+        id_of_role: dict[Role, int] = {}
+        for raw_id, raw_role in value.items():
+            entry: str = f"{name}.{raw_id}"
+            motive_id: int = self._as_motive_id(raw_id, entry)
+            role: Role = self._as_role(raw_role, entry, roles)
+            if motive_id in by_id:
+                raise ConfigError(f"config key '{entry}' repeats Motive ID {motive_id}")
+            if role in id_of_role:
+                raise ConfigError(
+                    f"config key '{entry}' maps role '{role}', already mapped from ID {id_of_role[role]}"
+                )
+            by_id[motive_id] = role
+            id_of_role[role] = motive_id
+        return MappingProxyType(by_id)
+
+    @staticmethod
+    def _as_motive_id(value: Any, name: str) -> int:
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        if isinstance(value, str) and _MOTIVE_ID_PATTERN.fullmatch(value):
+            return int(value)
+        raise ConfigError(f"config key '{name}' must have a non-negative integer Motive ID as key, got {value!r}")
 
     def done(self) -> None:
         unknown: list[str] = sorted(set(self._raw) - self._read)
@@ -199,8 +261,11 @@ class _Section:
             raise ConfigError(f"unknown config key '{self._key(unknown[0])}'")
 
 
-def parse_settings(raw: object, hub_url_override: str | None = None) -> Settings:
-    """Validate a parsed YAML document and build the `Settings` tree."""
+def parse_settings(
+    raw: object, hub_url_override: str | None = None, roles: frozenset[Role] | None = None
+) -> Settings:
+    """Validate a parsed YAML document and build the `Settings` tree; `roles` defaults to `contract_roles()`."""
+    valid_roles: frozenset[Role] = contract_roles() if roles is None else roles
     root: _Section = _Section(raw, "")
 
     net: _Section = root.section("network")
@@ -218,9 +283,9 @@ def parse_settings(raw: object, hub_url_override: str | None = None) -> Settings
         use_optitrack_client=trk.boolean("use_optitrack_client"),
         tracking_framerate=trk.number("tracking_framerate", positive=True),
         package_framerate=trk.number("package_framerate", positive=True),
-        max_num_objects=trk.integer("max_num_objects", 1),
         x_rescale=trk.number("x_rescale", positive=True),
         y_rescale=trk.number("y_rescale", positive=True),
+        roles=trk.role_map("roles", valid_roles),
     )
     trk.done()
 
@@ -229,12 +294,10 @@ def parse_settings(raw: object, hub_url_override: str | None = None) -> Settings
     are.done()
 
     met: _Section = root.section("metrics")
-    metrics: MetricsSettings = MetricsSettings(met.number("max_vel", positive=True), met.integer("history_window", 1))
+    metrics: MetricsSettings = MetricsSettings(
+        met.number("max_vel", positive=True), met.integer("history_window", 1), met.number("max_gap_s", positive=True)
+    )
     met.done()
-
-    hub_section: _Section = root.section("hub")
-    hub: HubSettings = HubSettings(hub_section.integer("audio_max_age_ms", 0))
-    hub_section.done()
 
     win: _Section = root.section("window")
     window: WindowSettings = WindowSettings(win.integer("width", 1), win.integer("height", 1))
@@ -242,9 +305,22 @@ def parse_settings(raw: object, hub_url_override: str | None = None) -> Settings
 
     fro: _Section = root.section("frontend")
     frontend: FrontendSettings = FrontendSettings(
-        fro.number("bridge_framerate", positive=True), fro.rgb("splat_color")
+        fro.number("bridge_framerate", positive=True), fro.integer("audio_max_age_ms", 0)
     )
     fro.done()
+
+    src: _Section = root.section("sources")
+    mou: _Section = src.section("mouse")
+    z_min, z_max = arena.z
+    mouse: MouseSourceSettings = MouseSourceSettings(
+        role=mou.role("role", valid_roles),
+        z_initial_mm=mou.integer("z_initial_mm", math.ceil(z_min), math.floor(z_max)),
+        z_step_mm=mou.integer("z_step_mm", 1),
+        rate_hz=mou.number("rate_hz", positive=True),
+    )
+    mou.done()
+    src.done()
+    sources: SourcesSettings = SourcesSettings(mouse)
 
     debug: bool = root.boolean("debug")
 
@@ -258,7 +334,7 @@ def parse_settings(raw: object, hub_url_override: str | None = None) -> Settings
     url: str = validate_hub_url(
         hub_url_override if hub_url_override else f"http://{socketio_settings.host}:{socketio_settings.port}"
     )
-    return Settings(network, tracking, arena, metrics, hub, window, frontend, debug, audio, url)
+    return Settings(network, tracking, arena, metrics, window, frontend, sources, debug, audio, url)
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:

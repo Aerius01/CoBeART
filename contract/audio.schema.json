@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cobeart.invalid/contract/audio.schema.json",
+  "title": "audio",
+  "description": "One audio_metrics message as worlds see it: emitted by the hub on Socket.IO namespace /viewer, event 'audio', once per valid audio_metrics received on /audio, and posted by the bridge to the world as { type: 'audio', audio } (or audio: null when stale, see CONTRACT.md). It is exactly the audio_metrics fields plus the hub 'timestamp'.",
+  "type": "object",
+  "$ref": "audio_metrics.schema.json#/$defs/fields",
+  "properties": {
+    "timestamp": {
+      "description": "Hub receipt time of the audio_metrics message, Unix epoch milliseconds (JS Date.now()). Consumers use it to judge staleness (frontend.audio_max_age_ms). The minimum rejects a value accidentally sent in seconds.",
+      "type": "number",
+      "minimum": 1000000000000,
+      "maximum": 100000000000000
+    }
+  },
+  "required": ["timestamp"],
+  "unevaluatedProperties": false
+}

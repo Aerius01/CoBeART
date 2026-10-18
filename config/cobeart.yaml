@@ -1,5 +1,5 @@
-# Shared CoBeART configuration. Read by Python and Node (not yet wired up).
-# Validated by config/cobeart.schema.json.
+# Shared CoBeART configuration. Read by Python (cobeart/settings/config.py) and Node (cobeart-app/electron/config.js).
+# Validated by config/cobeart.schema.json; role names come from contract/frame.schema.json ($defs/role).
 
 network:
   client_address: 192.168.0.104   # CoBe computer (this machine), IPv4
@@ -12,30 +12,43 @@ network:
 tracking:
   use_optitrack_client: true
   tracking_framerate: 240         # Hz, rate data is received from OptiTrack
-  package_framerate: 240          # Hz, rate frames are sent to the hub
-  max_num_objects: 10             # rigid bodies; ids >= this are dropped
+  package_framerate: 240          # Hz, rate pose_frames are sent to the hub
   x_rescale: 3.5                  # arena length along x, meters
   y_rescale: 3.5                  # arena length along y, meters
+  roles:                          # Motive streaming ID -> contract role; unmapped IDs are dropped
+    0: left_hand
+    1: right_hand
+    2: head
+    3: chest_front
+    4: chest_back
+    5: left_foot
+    6: right_foot
+    7: stick
 
 arena:                            # millimeters, [min, max]
   x: [-3000, 3000]
   y: [-3000, 3000]
   z: [0, 2500]
 
-metrics:
-  max_vel: 13000.0                # mm/s, velocity mapped to normVel = 1
-  history_window: 15              # samples in the normVel smoothing window
-
-hub:
-  audio_max_age_ms: 500           # audio older than this is treated as stale
+metrics:                          # hub velocity stage, per role
+  max_vel: 13000.0                # mm/s, abs_vel mapped to norm_abs_vel = 1
+  history_window: 15              # samples in the norm_abs_vel hold window
+  max_gap_s: 0.25                 # s of source time; a longer gap restarts a role's velocities at 0
 
 window:
   width: 1050                     # px
   height: 1050                    # px
 
 frontend:
-  bridge_framerate: 120           # Hz, bridge-to-simulation forwarding loop
-  splat_color: [1.0, 0.6, 0.2]    # RGB, 0..1
+  bridge_framerate: 120           # Hz, bridge-to-world forwarding loop
+  audio_max_age_ms: 500           # bridge posts audio: null once the latest audio is older than this
+
+sources:
+  mouse:                          # browser mouse source (host page, source=mouse)
+    role: right_hand              # role the held mouse button acts as
+    z_initial_mm: 1200            # height before the first wheel notch, inside arena.z
+    z_step_mm: 50                 # height change per wheel notch, clamped to arena.z
+    rate_hz: 60                   # pose_frame rate while a button is held
 
 debug: false
 

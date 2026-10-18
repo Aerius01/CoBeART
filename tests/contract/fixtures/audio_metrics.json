@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 2,
+  "rms": 0.12,
+  "peak": 0.5,
+  "zcr": 0.05,
+  "dominant_frequency": 440.0,
+  "rms_db": 0.69,
+  "rms_envelope": 0.66,
+  "is_peak": false,
+  "peak_intensity": 0.0,
+  "is_onset": true,
+  "onset_strength": 1.4,
+  "spectrum_2d": [[0.1, 0.2, 0.3], [0.2, 0.3, 0.4]],
+  "spectrum_config": { "width": 3, "height": 2, "freq_min": 20, "freq_max": 20000 },
+  "beat": true,
+  "tempo_bpm": 120.0,
+  "beat_timestamp": 1792310400.1
+}

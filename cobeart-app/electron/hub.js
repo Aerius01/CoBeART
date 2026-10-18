@@ -94,7 +94,7 @@ async function createHub({ port, host, publicDir, metrics, frontendConfig, now =
     .filter(([, value]) => value === undefined).map(([name]) => name);
   if (missing.length > 0) throw new Error(`createHub is missing required options: ${missing.join(', ')}`);
 
-  const motion = createMotionTracker(metrics);
+  let motion = createMotionTracker(metrics);
   const app = express();
   const server = http.createServer(app);
   const io = new Server(server, { maxHttpBufferSize: MAX_PAYLOAD_BYTES });
@@ -149,6 +149,18 @@ async function createHub({ port, host, publicDir, metrics, frontendConfig, now =
   let lastFrameTime = null;
   let lastAudioTime = null;
 
+  // D20: one /ingest connection drives the hub at a time (its pose_frame was accepted last). Others are dropped
+  // while it is connected and has sent within max_gap_s of hub receipt time.
+  const activeWindowMs = metrics.max_gap_s * 1000;
+  let activeSourceId = null;
+  let activeSourceTime = -Infinity;
+
+  /** The active source's socket id, or null when none is connected and recent. */
+  const currentActiveSource = () =>
+    activeSourceId !== null && io.of('/ingest').sockets.has(activeSourceId) && now() - activeSourceTime <= activeWindowMs
+      ? activeSourceId
+      : null;
+
   app.get('/health', (req, res) => {
     res.json({
       server: 'ok',
@@ -157,6 +169,7 @@ async function createHub({ port, host, publicDir, metrics, frontendConfig, now =
         audio: io.of('/audio').sockets.size,
         viewer: io.of('/viewer').sockets.size
       },
+      activeSource: currentActiveSource(),
       lastAudioAge: lastAudioTime === null ? null : now() - lastAudioTime,
       lastFrameAge: lastFrameTime === null ? null : now() - lastFrameTime
     });
@@ -199,6 +212,19 @@ async function createHub({ port, host, publicDir, metrics, frontendConfig, now =
         return;
       }
 
+      const active = currentActiveSource();
+      if (active !== null && active !== socket.id) {
+        logReject('inactive-source pose_frame',
+          `pose_frame from ${socket.id} ignored: ${active} is the active source; stop it or wait ${metrics.max_gap_s} s`);
+        return;
+      }
+      if (activeSourceId !== socket.id) {
+        // Two source clocks must never mix, so a new source starts from a fresh motion state.
+        activeSourceId = socket.id;
+        motion = createMotionTracker(metrics);
+      }
+      activeSourceTime = now();
+
       const frame = {
         schemaVersion: SCHEMA_VERSION,
         timestamp: now(),
@@ -219,6 +245,7 @@ async function createHub({ port, host, publicDir, metrics, frontendConfig, now =
     socket.on('error', (err) => reportPacketError('pose_frame', err));
 
     socket.on('disconnect', () => {
+      if (activeSourceId === socket.id) activeSourceId = null;
       console.log('[electron] Client disconnected from /ingest');
     });
   });

@@ -293,6 +293,13 @@ def emit_once(url: str, event: str, payload: object, namespace: str = "/ingest")
         client.disconnect()
 
 
+def _active_source(url: str) -> str | None:
+    """The socket id /health reports as the active /ingest source, or None."""
+    with urllib.request.urlopen(f"{url}/health", timeout=2.0) as response:
+        active: str | None = json.loads(response.read())["activeSource"]
+    return active
+
+
 def frames_until_marker(url: str, viewer: Viewer, timeout_s: float) -> list[FrameMessage]:
     """The frames the viewer got before an end-of-stream marker sent on a new /ingest connection.
 
@@ -300,7 +307,11 @@ def frames_until_marker(url: str, viewer: Viewer, timeout_s: float) -> list[Fram
     (python-engineio closes the websocket without draining its send queue), so a count of sent frames is no end
     condition. The hub handles messages in arrival order, and the marker's connection opens after the producer's
     closed, so everything the hub accepted from the producer reaches the viewer before the marker.
+
+    The hub accepts one active /ingest source at a time (D20) and drops the marker while the producer's connection is
+    still active, so this first waits for /health to report no active source, then sends the marker.
     """
+    wait_until(lambda: _active_source(url) is None, HUB_STOP_TIMEOUT_S, "the producer to stop being the active source")
     client: socketio.Client = socketio.Client(reconnection=False)
     client.connect(url, namespaces=["/ingest"], transports=["websocket"], wait_timeout=VIEWER_CONNECT_TIMEOUT_S)
     try:

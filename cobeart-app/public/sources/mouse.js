@@ -34,7 +34,11 @@ let z = zInitialMm;
 let pointer = null; // Last client position while a button is held, else null
 let sendTimer = null;
 
-const showReadout = () => { readout.textContent = `mouse: ${role} | z ${z} mm`; };
+let enabled = true;
+
+const showReadout = () => {
+  readout.textContent = enabled ? `mouse: ${role} | z ${z} mm | M: mouse off` : 'mouse OFF | M: mouse on';
+};
 showReadout();
 
 const sourceTimeS = () => performance.now() / 1000;
@@ -61,6 +65,37 @@ function release() {
   sendTimer = null;
   pointer = null;
   socket.emit('pose_frame', buildReleaseFrame(sourceTimeS()));
+}
+
+/** D22: with the layer off the world (and Splat's GUI) gets the pointer; any held body is released first. */
+function toggleLayer() {
+  enabled = !enabled;
+  if (!enabled) release();
+  layer.style.pointerEvents = enabled ? 'auto' : 'none';
+  showReadout();
+}
+
+/** True while the user is typing into a text field (a GUI number box), where M is a letter, not a toggle. */
+const isTyping = ({ target }) => target.tagName === 'TEXTAREA'
+  || (target.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'range'].includes(target.type));
+
+const onKeydown = (e) => {
+  if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat
+    && !isTyping(e)) {
+    toggleLayer();
+  }
+};
+
+// M works whichever document has focus: the host window, and the world (same origin) once the user clicked into it.
+// Only trusted events count in the world: host/keys.js forwards host keys into it as untrusted copies.
+window.addEventListener('keydown', onKeydown);
+const listenInWorld = () => worldFrame.contentWindow.addEventListener('keydown', (e) => {
+  if (e.isTrusted) onKeydown(e);
+});
+worldFrame.addEventListener('load', listenInWorld);
+// The world may already have loaded before this module ran
+if (worldFrame.contentDocument?.readyState === 'complete' && worldFrame.contentWindow.location.href !== 'about:blank') {
+  listenInWorld();
 }
 
 layer.addEventListener('pointerdown', (e) => {

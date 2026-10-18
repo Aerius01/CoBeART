@@ -530,6 +530,7 @@ Depends on Phase 6. Implements D17-D19.
 
 Items that Phases 5-7 resolve or make moot (prune when the phase merges): duplicate molten/ink handlers and the triple bridge in composite (5.1); composite `z_threshold` and `tryBindSources` empty catches (5.1); `/viewer` audio bandwidth and the stale `lastFrame` replay (6.1); `ctx.rigidbodies` never pruned (6.3); stale CONTRACT.md hub consumer and `fluid-bridge.js` header (5.1/6.0); `max_num_objects`-related checks (6.0/6.2).
 
+- **Splat pause semantics** (seen at the Phase 6 gate): `P` skips only `step()` (fluid physics); `applyInputs()` still paints, so bodies keep drawing into a frozen fluid. Inherited from the upstream sim. The human sees no use for pause yet; rework it if it becomes relevant (e.g. also skip `applyInputs()` for a full freeze).
 - **Record and replay real sessions.** At the next session with the real system, record raw NatNet rigid-body callbacks (ID, position, quaternion, timestamp) to a file, and add a `ReplaySource` that plays them back through the `MotionSource` seam from WP 2.2. That replaces synthetic motion with real movement for regression tests, and is the only offline way to check that the D5 orientation convention matches real performers.
 - **On-site validation spikes** (cannot be done offline, per §5): NatNet multicast from the Debian box, and an end-to-end latency check with real bodies.
 - **On-site tuning checklist** (found during Phase 1):

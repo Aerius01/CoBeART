@@ -66,6 +66,20 @@ function injectConfig(html, config) {
 }
 
 /**
+ * Lists the worlds under `<publicDir>/worlds/`: the subfolders that contain an index.html, sorted by name.
+ * @param {string} publicDir
+ * @returns {Promise<{ name: string }[]>}
+ */
+async function listWorlds(publicDir) {
+  const worldsDir = path.join(publicDir, 'worlds');
+  const entries = await fs.promises.readdir(worldsDir, { withFileTypes: true });
+  const hasIndex = async (name) => fs.promises.access(path.join(worldsDir, name, 'index.html')).then(() => true, () => false);
+  const names = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  const withIndex = await Promise.all(names.map(async (name) => ((await hasIndex(name)) ? name : null)));
+  return withIndex.filter((name) => name !== null).map((name) => ({ name }));
+}
+
+/**
  * Starts the hub and resolves once it is listening.
  * `metrics`: the velocity stage settings (`hubConfig(config).metrics`).
  * `frontendConfig`: JSON-serializable config injected into every HTML page and served at /config.json.
@@ -86,6 +100,15 @@ async function createHub({ port, host, publicDir, metrics, frontendConfig, now =
   const io = new Server(server, { maxHttpBufferSize: MAX_PAYLOAD_BYTES });
 
   app.get('/config.json', (req, res) => res.json(frontendConfig));
+
+  // Computed per request, so a new world folder needs no restart. Registered before the static and HTML routes.
+  app.get('/worlds.json', async (req, res, next) => {
+    try {
+      res.json({ worlds: await listWorlds(publicDir) });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // HTML pages get the frontend config injected; everything else is served as is.
   app.get(/(\.html|\/)$/, async (req, res, next) => {
@@ -217,4 +240,4 @@ async function createHub({ port, host, publicDir, metrics, frontendConfig, now =
   return { server, io, close };
 }
 
-module.exports = { createHub };
+module.exports = { createHub, listWorlds };

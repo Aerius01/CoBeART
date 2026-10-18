@@ -3,12 +3,14 @@
 // 1. Running a local web and WebSocket server to handle data from the OptiTrack system.
 // 2. Creating a native desktop window (renderer process) that displays the front-end visualization.
 
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
 
 // The hub (Express + Socket.IO) runs directly within the main process (self-contained).
-const { createHub } = require('./hub');
+const { createHub, listWorlds } = require('./hub');
 const { loadConfig, resolvePort, hubConfig, frontendConfig } = require('./config');
+
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
 let hub;
 
@@ -17,14 +19,46 @@ async function startHttpServer(config, port) {
   hub = await createHub({
     port,
     host: config.network.socketio.host,
-    publicDir: path.join(__dirname, '..', 'public'),
+    publicDir: PUBLIC_DIR,
     metrics: hubConfig(config).metrics,
     frontendConfig: frontendConfig(config)
   });
 }
 
+/**
+ * Builds the host page URL for a chosen world and source.
+ * @param {string} origin
+ * @param {string} world
+ * @param {boolean} mouse
+ * @returns {string}
+ */
+function hostUrl(origin, world, mouse) {
+  const query = new URLSearchParams({ world, source: mouse ? 'mouse' : 'live' });
+  return `${origin}/host/?${query}`;
+}
+
+/**
+ * Asks which world to show and whether to use mouse input: one button per world, a "Mouse input" checkbox.
+ * @param {string} origin
+ * @returns {Promise<string|null>} the host page URL, or null when the dialog was cancelled
+ */
+async function chooseHostUrl(origin) {
+  const worlds = (await listWorlds(PUBLIC_DIR)).map((world) => world.name);
+  if (worlds.length === 0) throw new Error(`No worlds found in ${path.join(PUBLIC_DIR, 'worlds')}`);
+  const { response, checkboxChecked } = await dialog.showMessageBox({
+    type: 'question',
+    title: 'CoBeART',
+    message: 'Choose a world',
+    buttons: [...worlds, 'Cancel'],
+    cancelId: worlds.length,
+    checkboxLabel: 'Mouse input',
+    checkboxChecked: false
+  });
+  return response === worlds.length ? null : hostUrl(origin, worlds[response], checkboxChecked);
+}
+
 // Creates and configures the main application window.
-function createWindow(config, origin) {
+function createWindow(config, url) {
   const win = new BrowserWindow({
     width: config.window.width,
     height: config.window.height,
@@ -44,7 +78,6 @@ function createWindow(config, origin) {
   });
 
   // The window loads its content from the local server, just like a web browser.
-  const url = `${origin}/host/`;
   // Wait for the window to be ready before opening DevTools
   win.webContents.on('did-finish-load', () => {
     // Show window once content is loaded to prevent GPU errors
@@ -73,11 +106,17 @@ app.whenReady().then(async () => {
   const origin = `http://${config.network.socketio.host}:${port}`;
   await startHttpServer(config, port);
 
-  createWindow(config, origin);
+  const url = await chooseHostUrl(origin);
+  if (url === null) {
+    await hub.close();
+    app.quit();
+    return;
+  }
+  createWindow(config, url);
 
-  // Handle macOS-specific behavior for re-creating a window.
+  // Handle macOS-specific behavior for re-creating a window (same world and source as chosen at startup).
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(config, origin);
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(config, url);
   });
 }).catch((err) => {
   console.error('Startup failed:', err);

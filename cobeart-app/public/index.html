@@ -1,11 +1,85 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CoBeART</title>
-    <meta http-equiv="refresh" content="0; url=/host/" />
+    <style>
+        :root { color-scheme: dark; }
+        body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #101114; color: #e8e8ea;
+               font: 16px/1.5 system-ui, sans-serif; }
+        main { width: min(28rem, 100% - 2rem); }
+        h1 { font-size: 1.5rem; margin: 0 0 1.5rem; }
+        h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: #9a9aa3; margin: 1.5rem 0 0.5rem; }
+        .choices { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+        label.choice { cursor: pointer; }
+        label.choice input { position: absolute; opacity: 0; }
+        label.choice span { display: block; padding: 0.5rem 1rem; border: 1px solid #3a3b44; border-radius: 6px; background: #1a1b20; }
+        label.choice input:checked + span { border-color: #6aa9ff; background: #1f2a3d; }
+        label.choice input:focus-visible + span { outline: 2px solid #6aa9ff; outline-offset: 2px; }
+        button { margin-top: 2rem; padding: 0.6rem 1.5rem; font: inherit; color: #101114; background: #6aa9ff; border: 0;
+                 border-radius: 6px; cursor: pointer; }
+        #error { color: #ff7b7b; border: 1px solid #ff7b7b; border-radius: 6px; padding: 0.75rem 1rem; }
+    </style>
 </head>
 <body>
-    <script>location.replace('/host/' + location.search);</script>
+    <main>
+        <h1>CoBeART</h1>
+        <div id="error" role="alert" hidden></div>
+        <form id="launcher" hidden>
+            <h2>World</h2>
+            <div class="choices" id="worlds"></div>
+            <h2>Input</h2>
+            <div class="choices" id="sources"></div>
+            <button type="submit">Start</button>
+        </form>
+    </main>
+    <script>
+        const SOURCES = [{ value: 'live', label: 'Live' }, { value: 'mouse', label: 'Mouse' }];
+
+        const showError = (message) => {
+            const box = document.getElementById('error');
+            box.textContent = message;
+            box.hidden = false;
+        };
+
+        /** Appends one radio choice per option to `container`; the first is checked. */
+        const addRadios = (container, group, options) => {
+            options.forEach(({ value, label }, i) => {
+                const wrapper = document.createElement('label');
+                wrapper.className = 'choice';
+                const input = Object.assign(document.createElement('input'), { type: 'radio', name: group, value, checked: i === 0 });
+                const text = Object.assign(document.createElement('span'), { textContent: label });
+                wrapper.append(input, text);
+                container.append(wrapper);
+            });
+        };
+
+        /** Builds the host page URL, keeping `?debug` (and any other query param) of this page. */
+        const hostUrl = (world, source) => {
+            const query = new URLSearchParams(location.search);
+            query.set('world', world);
+            query.set('source', source);
+            return `/host/?${query}`;
+        };
+
+        async function init() {
+            const response = await fetch('/worlds.json');
+            if (!response.ok) throw new Error(`/worlds.json returned HTTP ${response.status}`);
+            const { worlds } = await response.json();
+            if (!Array.isArray(worlds) || worlds.length === 0) throw new Error('No worlds found: /worlds.json is empty');
+            const form = document.getElementById('launcher');
+            addRadios(document.getElementById('worlds'), 'world', worlds.map(({ name }) => ({ value: name, label: name })));
+            addRadios(document.getElementById('sources'), 'source', SOURCES);
+            form.addEventListener('submit', (event) => {
+                event.preventDefault();
+                const data = new FormData(form);
+                location.assign(hostUrl(data.get('world'), data.get('source')));
+            });
+            form.hidden = false;
+        }
+
+        init().catch((err) => showError(`Cannot list worlds: ${err.message}`));
+    </script>
 </body>
 </html>

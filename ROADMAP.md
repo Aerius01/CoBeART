@@ -526,6 +526,25 @@ Depends on Phase 6. Implements D17-D19.
 - **Settled by the WPs:** `listWorlds(publicDir)` is exported from `hub.js` and shared by the route and the Electron dialog; a missing `world` or `source` is a visible error (no default); the launcher keeps every query param (so `?debug` arrives as `debug=`, which `has('debug')` accepts); the mouse maths is an `.mjs` module so the browser and the CommonJS node tests share it; release fires on `pointerup` with no buttons left, `pointercancel`, document `mouseleave` or window `blur`.
 - **Observed:** Splat paints only while a body moves (`pointer.moved`), so a held but still mouse paints nothing, exactly like a still tracked hand. The mouse layer covers the world, so Splat's own GUI ("Open Controls") is not clickable in mouse mode.
 
+**Human gate findings (2026-10-18), handled by WP 7.3:**
+- Running `start-simulator --scenario orbit` while painting with the mouse made splats jet along a line through the cursor: both sources sent `right_hand`, so Splat's pointer jumped between them each frame, and the two source clocks (simulator from 0, mouse from `performance.now()`) reset the hub's motion state on every other frame. The contract makes roles unique per frame but nothing stopped two sources at once. **Decision D20:** one source drives the hub at a time.
+- After the native Electron dialog (`dialog.showMessageBox` with no parent window) closed, the window did not appear or load until another desktop window event happened (GTK `GLib-GObject ... has no handler` error at that moment; root cause not reproduced, agents cannot drive Electron). Phases 5 and 6, which opened the window directly, did not show this. **Decision D21:** no native dialog; the Electron window opens on the launcher page `/` (one launcher for browser and Electron).
+- In mouse mode the layer blocks Splat's own GUI. **Decision D22:** `M` toggles the mouse layer.
+
+### WP 7.3: One active source, launcher in the window, mouse layer toggle
+- **Model:** Sonnet.
+- **Owns:** `cobeart-app/electron/hub.js` (the `/ingest` handling), `cobeart-app/electron/main.js`, `cobeart-app/public/sources/**`, `cobeart-app/test/**` except `config.test.js`, `tests/e2e/**`.
+- **Scope:**
+  - **D20, hub:** the active source is the `/ingest` connection whose `pose_frame` was accepted last. A valid `pose_frame` from another connection is dropped (rate-limited log naming both socket ids) while the active one has sent within the last `metrics.max_gap_s` (hub receipt time) and is still connected; otherwise the sender becomes the active source. On every change of active source the motion state is reset (new tracker), so two clocks never mix. `/health` additionally reports which socket id is active (or `null`).
+  - **D21, Electron:** remove the dialog and `listWorlds` use from `main.js`; the window loads `${origin}/` (the launcher page) and keeps its options, DevTools-on-debug and the macOS `activate` handler. Closing the window quits as before.
+  - **D22, mouse:** `M` toggles the layer. Off: `pointer-events: none` on the layer, any held body is released (one empty `pose_frame`), the readout shows the mouse is off and how to turn it on. On: back to painting. `M` must work whichever document has focus: the host window, and the world iframe after the user clicked Splat's GUI (listen in the iframe window too, same origin, trusted events only so `keys.js` forwarding does not toggle twice; `border-control.js` does the same for `B`).
+- **Must pass:**
+  1. Node tests: with two `/ingest` clients, B's frames never reach `/viewer` while A is active; B takes over once A has been silent longer than `max_gap_s` (use a small value) and immediately when A disconnects; B's first forwarded frame has all-zero derived values; `/health` names the active socket.
+  2. `tests/e2e` green 3 runs in a row (adapt the harness if its end-of-stream marker on a second connection now waits on the rule; keep the fix in one place and explain it).
+  3. `main.js` no longer imports `dialog` or `listWorlds`; `node --check` passes.
+  4. Playwright: `/` -> Splat + Mouse; drag paints; `M` turns the layer off (readout says so), "Open Controls" opens Splat's GUI and a GUI click works; with focus inside the iframe, `M` turns the layer back on once (not twice) and a drag paints again. Screenshots.
+  5. `npm test`, fitness, `pytest` (whole repo) green.
+
 **Phase 7 gate:** Phase 6 gate plus: human runs `npm start`, picks Splat + Mouse, paints, scrolls z (hand-drop radius pattern visibly changes below 1800 mm), and picks Splat + Live with `start-simulator`. CLAUDE.md updated by the master (layout, commands, contract, testing workflow) and every command in it re-run.
 
 ---

@@ -27,14 +27,31 @@
             border: none;
             display: block;
         }
+
+        #hostError {
+            position: absolute;
+            top: 24px;
+            left: 24px;
+            right: 24px;
+            padding: 16px;
+            color: white;
+            background: #8b1a1a;
+            font: 16px monospace;
+            z-index: 20;
+        }
+
+        #hostError[hidden] {
+            display: none;
+        }
     </style>
 </head>
 
 <body>
     <script src="/socket.io/socket.io.js"></script>
-    <!-- The world (Splat) is structured as an embedded standalone browser (black box). -->
-    <iframe id="worldFrame" src="/worlds/splat/index.html">
-    </iframe>
+    <!-- The world is an embedded standalone page (black box); host.js sets its src from ?world= -->
+    <iframe id="worldFrame"></iframe>
+    <div id="hostError" hidden></div>
+    <script src="/host/host.js"></script>
     <script src="/host/bridge.js"></script>
     <script src="/host/border-control.js"></script>
     <script src="/host/keys.js"></script>

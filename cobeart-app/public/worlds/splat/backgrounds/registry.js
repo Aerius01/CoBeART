@@ -10,10 +10,11 @@ import zephyr from './zephyr/shader.js';
  * @typedef {Object} BackgroundContext
  * @property {number} time Seconds since the simulation started.
  * @property {{width: number, height: number}} resolution Canvas size in pixels.
- * @property {?Object} audio Latest audio metrics (the `audio` object of contract/frame.schema.json,
- *   e.g. `rms`, `peak`, `zcr`, `dominant_frequency`), or null until the first one arrives.
- * @property {ReadonlyArray<Object>} rigidbodies Latest rigid-body entry per ID (contract/splat.schema.json
- *   fields: `ID`, `x`, `y`, `z`, velocities, quaternion...), empty until one arrives.
+ * @property {?Object} audio Latest audio (contract/audio.schema.json, e.g. `rms`, `peak`, `zcr`,
+ *   `dominant_frequency`), or null until the first one arrives and while the bridge reports it stale.
+ * @property {Object<string, Object>} bodies `bodies` of the latest frame (contract/frame.schema.json), keyed by role
+ *   (`right_hand`, `head`, ...; each with `x`, `y`, `z`, velocities, quaternion...); a role is absent when untracked,
+ *   and the object is empty until the first frame arrives.
  */
 
 /**

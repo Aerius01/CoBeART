@@ -26,7 +26,7 @@ import backgroundRegistry from './backgrounds/registry.js';
 
 'use strict';
 
-// When embedded, host/bridge.js adds ?debug to this iframe's URL if the embedding page has it.
+// Debug: ?debug in this page's URL, or debug: true in the config the hub injects into every page.
 const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__?.debug === true;
 
 // Mobile promo section
@@ -1014,8 +1014,8 @@ const backgroundPrograms = backgroundRegistry.map(bg =>
 );
 
 // Latest state handed to backgrounds as ctx (see backgrounds/registry.js)
-let latestAudio = null; // audio object of the latest 'audio' message
-const latestRigidBodies = new Map(); // ID -> latest splat message of that rigid body
+let latestAudio = null; // latest 'audio' message's audio, null until one arrives or after the bridge reports it stale
+let latestBodies = {}; // bodies of the latest 'frame' message, keyed by role
 
 const displayMaterial = new Material(baseVertexShader, displayShaderSource);
 
@@ -1212,13 +1212,13 @@ let lastUpdateTime = Date.now();
 let colorUpdateTimer = 0.0;
 // Latest observed velocity magnitudes from incoming messages
 let latestNormVel = 0;
-let latestZ = {};
+let latestZ = {}; // role -> latest z
 // Latest observed angular velocities from incoming messages
 let latestAngVel = { wx: 0, wy: 0, wz: 0 };
 
 function computeVelocityDissipation(zdict) {
-    // TODO: modify other global variables to have IDs for multiple tracked opbjects
-    const posz = zdict[1]
+    // TODO: modify other global variables to be keyed by role for multiple tracked objects
+    const posz = zdict['right_hand']
     // zpos between 0 and 1000
     //console.log("z coord: ", posz);
     var z = typeof posz === 'number' ? posz : 0;
@@ -1424,7 +1424,7 @@ function drawBackground(target, elapsedTime) {
         time: elapsedTime,
         resolution: { width: canvas.width, height: canvas.height },
         audio: latestAudio,
-        rigidbodies: [...latestRigidBodies.values()]
+        bodies: latestBodies
     });
 
     blit(target);
@@ -1580,65 +1580,10 @@ function correctRadius(radius) {
     return radius;
 }
 
-canvas.addEventListener('mousedown', e => {
-    let posX = scaleByPixelRatio(e.offsetX);
-    let posY = scaleByPixelRatio(e.offsetY);
-    let pointer = pointers.find(p => p.id == -1);
-    if (pointer == null)
-        pointer = new pointerPrototype();
-    updatePointerDownData(pointer, -1, posX, posY);
-});
-
-canvas.addEventListener('mousemove', e => {
-    let pointer = pointers[0];
-    if (!pointer.down) return;
-    let posX = scaleByPixelRatio(e.offsetX);
-    let posY = scaleByPixelRatio(e.offsetY);
-    updatePointerMoveData(pointer, posX, posY);
-});
-
-window.addEventListener('mouseup', () => {
-    updatePointerUpData(pointers[0]);
-});
-
-canvas.addEventListener('touchstart', e => {
-    e.preventDefault();
-    const touches = e.targetTouches;
-    while (touches.length >= pointers.length)
-        pointers.push(new pointerPrototype());
-    for (let i = 0; i < touches.length; i++) {
-        let posX = scaleByPixelRatio(touches[i].pageX);
-        let posY = scaleByPixelRatio(touches[i].pageY);
-        updatePointerDownData(pointers[i + 1], touches[i].identifier, posX, posY);
-    }
-});
-
-canvas.addEventListener('touchmove', e => {
-    e.preventDefault();
-    const touches = e.targetTouches;
-    for (let i = 0; i < touches.length; i++) {
-        let pointer = pointers[i + 1];
-        if (!pointer.down) continue;
-        let posX = scaleByPixelRatio(touches[i].pageX);
-        let posY = scaleByPixelRatio(touches[i].pageY);
-        updatePointerMoveData(pointer, posX, posY);
-    }
-}, false);
-
-window.addEventListener('touchend', e => {
-    const touches = e.changedTouches;
-    for (let i = 0; i < touches.length; i++) {
-        let pointer = pointers.find(p => p.id == touches[i].identifier);
-        if (pointer == null) continue;
-        updatePointerUpData(pointer);
-    }
-});
-
+// Operator keys: P pauses, G and Shift+G cycle backgrounds. Splat takes no pointer input of its own.
 window.addEventListener('keydown', e => {
     if (e.code === 'KeyP')
         config.PAUSED = !config.PAUSED;
-    if (e.key === ' ')
-        splatStack.push(parseInt(Math.random() * 20) + 5);
     if (e.key === 'g' || e.key === 'G') {
         if (e.shiftKey) {
             // Shift+G: cycle backwards
@@ -1651,58 +1596,36 @@ window.addEventListener('keydown', e => {
     }
 });
 
-// Make splat messages (postMessage) act like mouse drags.
-// Each message follows contract/splat.schema.json: a rigid body (ID, x/y/z in arena mm, ...) plus type and color.
-const handleSplatMessage = (function () {
-    // Map rigid body IDs → pointer indices, so multiple bodies can paint at once (optional)
-    const idToIndex = new Map();
+// Splat's own dye colour for a newly pressed body pointer, {r, g, b} in 0..1 (pattern 3 recolours it by speed)
+const SPLAT_COLOR = Object.freeze({ r: 1.0, g: 0.6, b: 0.2 });
 
-    let bodyPartsIndex = {};
-    let trackedBodyParts = [];
-    let objectIDs = [];
-    let trackedObjects = {};
-    fetch('/body_map.json')
-        .then(response => response.json())
-        .then(data => {
-            if (data) {
-                bodyPartsIndex = data;
-                console.log("Loaded body_map.json: ", data);
-                // defining which body parts to follow with steady splats
-                trackedBodyParts = [
-                    bodyPartsIndex['right_hand'],
-                    bodyPartsIndex['left_hand'],
-                    bodyPartsIndex['left_foot'],
-                    bodyPartsIndex['right_foot']
-                ];
-                console.log("Tracking body parts IDs: ", trackedBodyParts);
-                //PATTERN 10 params
-                console.log("OBJECT bodyPartsIndex[stick]: ", bodyPartsIndex['stick']);
-                objectIDs.push(bodyPartsIndex['stick']);
-                objectIDs.push(bodyPartsIndex['ball']);
-                objectIDs.push(bodyPartsIndex['object']);
-                console.log("OBJECT Tracking object IDs: ", objectIDs);
-                for (const objID of objectIDs) {
-                    trackedObjects[objID] = false;
-                }
-                console.log("OBJECT Initialized trackedObjects: ", trackedObjects);
-            }
-        })
-        .catch(error => {
-            console.error('Failed to load body_map.json:', error);
-        });
+// Contract roles (contract/frame.schema.json#/$defs/role) in the order bodies are handled within a frame.
+// Patterns read the previous body's state, so the order is fixed: the enum order, which is the former ID order 0-7.
+const ROLES = Object.freeze(['left_hand', 'right_hand', 'head', 'chest_front', 'chest_back', 'left_foot', 'right_foot', 'stick']);
+
+// Make each body of a 'frame' message (contract/frame.schema.json) act like a mouse drag.
+// A body is handled by role (x/y/z in arena mm, velocities, quaternion...); a role absent from the frame gets no update.
+const handleBody = (function () {
+    // Map pointer keys (roles, or numeric keys of the effect pointers below) to pointer indices,
+    // so multiple bodies can paint at once
+    const pointerIndexByKey = new Map();
+
+    // Body parts followed with steady splats (pattern 12 swaps hands and feet; pattern 10 adds held objects)
+    const trackedBodyParts = ['right_hand', 'left_hand', 'left_foot', 'right_foot'];
+    //PATTERN 10 params
+    const objectRoles = ['stick'];
+    const trackedObjects = { stick: false };
 
     function ensurePointer(index) {
         while (pointers.length <= index) pointers.push(new pointerPrototype());
         return pointers[index];
     }
 
-    function pointerForId(id) {
-        // Reserve pointer[0] for the first body by default; others get 1..N
-        if (id == null) return ensurePointer(0);
-        if (!idToIndex.has(id)) {
-            idToIndex.set(id, idToIndex.size); // 0,1,2...
+    function pointerForKey(key) {
+        if (!pointerIndexByKey.has(key)) {
+            pointerIndexByKey.set(key, pointerIndexByKey.size); // 0,1,2...
         }
-        return ensurePointer(idToIndex.get(id));
+        return ensurePointer(pointerIndexByKey.get(key));
     }
 
     let leftFootZBefore = 0;
@@ -1774,20 +1697,20 @@ const handleSplatMessage = (function () {
     //PATTERN 11 params
     let microsplatActive = false; // can be turned on by putting hands together above head
 
-    return function handleSplatMessage(m) {
+    return function handleBody(role, m) {
         // Track latest angular velocities from the incoming message
         latestAngVel.wx = m.wx;
         latestAngVel.wy = m.wy;
         latestAngVel.wz = m.wz;
 
         latestNormVel = m.norm_abs_vel
-        latestZ[m.ID] = m.z
+        latestZ[role] = m.z
 
         // Incoming x and y are arena mm. Normalize to [0..1], convert to CSS px, then to device px using scaleByPixelRatio
         const { x: [x_min, x_max], y: [y_min, y_max] } = window.__COBEART_CONFIG__.arena;
-        // Half-extents for the pattern code below, which assumes an arena centred on the origin
-        const arena_x = (x_max - x_min) / 2;
-        const arena_y = (y_max - y_min) / 2;
+        // Arena centre, for the pattern code below (which uses the same top-down mapping as here)
+        const x_mid = (x_min + x_max) / 2;
+        const y_mid = (y_min + y_max) / 2;
         const norm_x = (x_max - m.x) / (x_max - x_min);
         const norm_y = (m.y - y_min) / (y_max - y_min);
         const cssX = ((norm_x ?? 0) * canvas.clientWidth);
@@ -1799,17 +1722,14 @@ const handleSplatMessage = (function () {
         //    showing final position on console
         if (DEBUG) console.log(`Pointer position: (${posX}, ${posY})`);
 
-        // Pick a pointer (by body ID if provided)
-        const pointer = pointerForId(m.ID);
+        // Pick the pointer of this role
+        const pointer = pointerForKey(role);
 
-        // Press if not already down, mirroring the mousedown logic in the file
+        // Press if not already down, as a mouse press would
         if (!pointer.down) {
-            // Keep id = -1 to match the mouse path; we track body ID via idToIndex map
+            // pointer.id is unused for bodies; the role is tracked via pointerIndexByKey
             updatePointerDownData(pointer, -1, posX, posY);
-            if (Array.isArray(m.color) && m.color.length >= 3) {
-                // script.js expects {r,g,b} in 0..1 space
-                pointer.color = { r: m.color[0], g: m.color[1], b: m.color[2] };
-            }
+            pointer.color = { ...SPLAT_COLOR };
         }
 
         // PATTERN 1: Hand drop, Changing splat radius with hand depth
@@ -1823,7 +1743,7 @@ const handleSplatMessage = (function () {
 
 
         // If the tracked object is a hand we dynamically adjust splat radius
-        if (m.ID === bodyPartsIndex['right_hand'] || m.ID === bodyPartsIndex['left_hand']) {
+        if (role === 'right_hand' || role === 'left_hand') {
             const posZ = m.z;
             if (typeof posZ === 'number') {
                 // below dynRadiusBelowZ z we increase splat radius according to depth
@@ -1841,8 +1761,8 @@ const handleSplatMessage = (function () {
         const maxBloomZ = 1500; // z at which bloom is maximum
         const maxBloomValue = 0.15; // maximum bloom intensity
         const lowerZThreshold = 200; // z below which no bloom is applied and from which smooth change of bloom is applied
-        if ((m.ID === bodyPartsIndex['right_foot'] && posZ > leftFootZBefore) ||
-            (m.ID === bodyPartsIndex['left_foot'] && posZ > rightFootZBefore)
+        if ((role === 'right_foot' && posZ > leftFootZBefore) ||
+            (role === 'left_foot' && posZ > rightFootZBefore)
         ) {
             if (typeof posZ === 'number') {
                 if (posZ > lowerZThreshold) {
@@ -1855,12 +1775,12 @@ const handleSplatMessage = (function () {
             //console.log("Setting BLOOM_INTENSITY to ", config.BLOOM_INTENSITY);
         }
 
-        // PATTERN 10: Using objects, e.g. if m.ID in stick, rope or object
+        // PATTERN 10: Using objects, e.g. if the role is an object such as the stick
         // First we check if any of the objects are closer to the right hand than 200, if so, we turn on tracking for them
         let turnOnDistance = 300;
-        for (const objID of objectIDs) {
-            if (m.ID === objID) {
-                if (DEBUG) console.log("OBJECT Checking distances for object ID ", objID);
+        for (const objRole of objectRoles) {
+            if (role === objRole) {
+                if (DEBUG) console.log("OBJECT Checking distances for object ", objRole);
                 const objPos = [m.x, m.y, m.z];
                 const rightHandPos = rightHandBefore.length === 3 ? rightHandBefore : null;
                 const leftHandPos = leftHandBefore.length === 3 ? leftHandBefore : null;
@@ -1870,10 +1790,10 @@ const handleSplatMessage = (function () {
                         (objPos[1] - rightHandPos[1]) ** 2 +
                         (objPos[2] - rightHandPos[2]) ** 2
                     );
-                    if (DEBUG) console.log("OBJECT Distance between object ID ", objID, " and right hand: ", distance);
+                    if (DEBUG) console.log("OBJECT Distance between object ", objRole, " and right hand: ", distance);
                     if (distance < turnOnDistance) {
-                        if (DEBUG) console.log("OBJECT Turning ON tracking for object ID ", objID);
-                        trackedObjects[objID] = true;
+                        if (DEBUG) console.log("OBJECT Turning ON tracking for object ", objRole);
+                        trackedObjects[objRole] = true;
                     };
                 }
                 if (leftHandPos) {
@@ -1883,25 +1803,25 @@ const handleSplatMessage = (function () {
                         (objPos[2] - leftHandPos[2]) ** 2
                     );
                     if (distance < turnOnDistance) {
-                        if (DEBUG) console.log("OBJECT Turning OFF tracking for object ID ", objID);
-                        trackedObjects[objID] = false;
+                        if (DEBUG) console.log("OBJECT Turning OFF tracking for object ", objRole);
+                        trackedObjects[objRole] = false;
                     };
                 }
             }
         }
 
         // If the current tracked object is set to true, we set a bright color for it and make a splat
-        if (objectIDs.includes(m.ID)) {
-            if (trackedObjects[m.ID]) {
-                if (DEBUG) console.log("OBJECT ", m.ID);
+        if (objectRoles.includes(role)) {
+            if (trackedObjects[role]) {
+                if (DEBUG) console.log("OBJECT ", role);
                 pointer.color = { r: 3.0, g: 3.0, b: 0.0 }; // bright yellow
-                //appendning id to trackedBodyParts if not already there
-                if (!trackedBodyParts.includes(m.ID)) {
-                    trackedBodyParts.push(m.ID);
+                //appending the role to trackedBodyParts if not already there
+                if (!trackedBodyParts.includes(role)) {
+                    trackedBodyParts.push(role);
                 }
             } else {
-                // remove id from trackedBodyParts if exists
-                const index = trackedBodyParts.indexOf(m.ID);
+                // remove the role from trackedBodyParts if present
+                const index = trackedBodyParts.indexOf(role);
                 if (index > -1) {
                     trackedBodyParts.splice(index, 1);
                 }
@@ -1918,13 +1838,13 @@ const handleSplatMessage = (function () {
         //PATTERN 4: Density Control: change density diffusion according to hand-hand closeness
         const minDensityDissipation = 0.01;
         const maxDensityDissipation = 4.5;
-        if ((m.ID === bodyPartsIndex['left_hand'] && rightHandBefore.length === 3) ||
-            (m.ID === bodyPartsIndex['right_hand'] && leftHandBefore.length === 3)) {
+        if ((role === 'left_hand' && rightHandBefore.length === 3) ||
+            (role === 'right_hand' && leftHandBefore.length === 3)) {
             var handLeftPos = leftHandBefore;
             var handRightPos = rightHandBefore;
-            if (m.ID === bodyPartsIndex['left_hand']) {
+            if (role === 'left_hand') {
                 handLeftPos = [m.x, m.y, m.z];
-            } else if (m.ID === bodyPartsIndex['right_hand']) {
+            } else if (role === 'right_hand') {
                 handRightPos = [m.x, m.y, m.z];
             }
 
@@ -1952,7 +1872,7 @@ const handleSplatMessage = (function () {
 
         //PATTERN 5: Unique Feet: Feet are tracked with black (at 0) to gray (at 2000) splat colors according to height
         if (handsOn) {
-            if (m.ID === bodyPartsIndex['left_foot'] || m.ID === bodyPartsIndex['right_foot']) {
+            if (role === 'left_foot' || role === 'right_foot') {
                 const posZ = m.z;
                 if (typeof posZ === 'number') {
                     const z = Math.max(0, Math.min(posZ, 2000)) / 8000;
@@ -1969,7 +1889,7 @@ const handleSplatMessage = (function () {
             }
         }
 
-        //PATTERN 6: Fall Explosion: When fall is detected, we generate a series of splats with dedicated ID,
+        //PATTERN 6: Fall Explosion: When fall is detected, we generate a series of splats with dedicated pointers,
         //such that the splash goes from one of the corners of the arena to the position of the center of mass of the body
         const fallZThreshold = 500; // z above which a fall is detected when all hands and feet are below this z
         if (leftFootZBefore < fallZThreshold &&
@@ -1982,20 +1902,20 @@ const handleSplatMessage = (function () {
                 fallExplosionStartTime = Date.now();
                 fallExplosionColorIndex = 0;
                 const explosionRoots = [
-                    { x: -arena_x, y: -arena_y }, // bottom-left
-                    { x: 0, y: -arena_y }, // bottom-center
-                    { x: arena_x, y: -arena_y }, // bottom-right
-                    { x: arena_x, y: 0 }, // right-center
-                    { x: arena_x, y: arena_y }, // top-right
-                    { x: 0, y: arena_y }, // top-center
-                    { x: -arena_x, y: arena_y }, // top-left
-                    { x: -arena_x, y: 0 }, // left-center
+                    { x: x_min, y: y_min }, // bottom-left
+                    { x: x_mid, y: y_min }, // bottom-center
+                    { x: x_max, y: y_min }, // bottom-right
+                    { x: x_max, y: y_mid }, // right-center
+                    { x: x_max, y: y_max }, // top-right
+                    { x: x_mid, y: y_max }, // top-center
+                    { x: x_min, y: y_max }, // top-left
+                    { x: x_min, y: y_mid }, // left-center
                 ];
 
                 // Define splash coordinates based on arena scaling
                 fallExplosionSplashCoordinates = explosionRoots.map(corner => {
-                    const norm_x = (-corner.x + arena_x) / (2 * arena_x);
-                    const norm_y = (corner.y + arena_y) / (2 * arena_y);
+                    const norm_x = (x_max - corner.x) / (x_max - x_min);
+                    const norm_y = (corner.y - y_min) / (y_max - y_min);
                     return [
                         norm_x * canvas.clientWidth,
                         norm_y * canvas.clientHeight
@@ -2006,8 +1926,8 @@ const handleSplatMessage = (function () {
                 const centerX = (leftHandBefore[0] + rightHandBefore[0]) / 2;
                 const centerY = (leftHandBefore[1] + rightHandBefore[1]) / 2;
 
-                const norm_centerX = (-centerX + arena_x) / (2 * arena_x);
-                const norm_centerY = (centerY + arena_y) / (2 * arena_y);
+                const norm_centerX = (x_max - centerX) / (x_max - x_min);
+                const norm_centerY = (centerY - y_min) / (y_max - y_min);
 
                 fallExplosionTargets = [
                     norm_centerX * canvas.clientWidth,
@@ -2028,10 +1948,10 @@ const handleSplatMessage = (function () {
                 const dx = fallExplosionTargets[0] - coord[0];
                 const dy = fallExplosionTargets[1] - coord[1];
                 const dist = Math.sqrt(dx * dx + dy * dy);
-                const normDist = Math.max(0, Math.min(dist / (2 * arena_x), 1.0));
+                const normDist = Math.max(0, Math.min(dist / (x_max - x_min), 1.0));
 
-                const cornerId = 9999 + index;
-                const pointer = pointerForId(cornerId);
+                const cornerKey = 9999 + index; // dedicated pointer key per corner
+                const pointer = pointerForKey(cornerKey);
 
                 updatePointerDownData(pointer, -1, posX, posY);
                 pointer.color = fallExplosionPalette[fallExplosionColorIndex];
@@ -2106,11 +2026,11 @@ const handleSplatMessage = (function () {
         //                let dirX = 0;
         //                let dirY = 1; // fallback
         //
-        //                if (m.ID === bodyPartsIndex['right_foot'] && rightFootBefore.length === 3) {
+        //                if (role === 'right_foot' && rightFootBefore.length === 3) {
         //                    // posX, posY are the *current* arena coords of the right foot
         //                    dirX = m.x - rightFootBefore[0];
         //                    dirY = m.y - rightFootBefore[1];
-        //                } else if (m.ID === bodyPartsIndex['left_foot'] && leftFootBefore.length === 3) {
+        //                } else if (role === 'left_foot' && leftFootBefore.length === 3) {
         //                    // same for left foot
         //                    dirX = m.x - leftFootBefore[0];
         //                    dirY = m.y - leftFootBefore[1];
@@ -2174,8 +2094,8 @@ const handleSplatMessage = (function () {
         //                const dist = Math.sqrt(dx * dx + dy * dy);
         //                const normDist = Math.max(0, Math.min(dist / (2 * arena_x), 1.0));
         //
-        //                const ghostId = 11000 + index; // dedicated ID for the ghost
-        //                const ghostPointer = pointerForId(ghostId);
+        //                const ghostKey = 11000 + index; // dedicated pointer key for the ghost
+        //                const ghostPointer = pointerForKey(ghostKey);
         //
         //                updatePointerDownData(ghostPointer, -1, posXg, posYg);
         //                // black "ghost" color
@@ -2245,9 +2165,9 @@ const handleSplatMessage = (function () {
         const velTh = 150; // maximum velocity to consider hand as still
         if (leftHandBefore.length === 3 && rightHandBefore.length === 3 &&
             (Date.now() - timeWhenLastTrigger) > 5000) {
-            const headX = m.ID === bodyPartsIndex['head'] ? m.x : 0;
-            const headY = m.ID === bodyPartsIndex['head'] ? m.y : 0;
-            const headZ = m.ID === bodyPartsIndex['head'] ? m.z : 0;
+            const headX = role === 'head' ? m.x : 0;
+            const headY = role === 'head' ? m.y : 0;
+            const headZ = role === 'head' ? m.z : 0;
 
             const distanceToHeadLeft = Math.sqrt(
                 (leftHandBefore[0] - headX) ** 2 +
@@ -2308,48 +2228,48 @@ const handleSplatMessage = (function () {
             handsOn = !handsOn;
             handsOnTriggerCounter = 0;
             timeWhenLastTriggerHandsOn = Date.now();
-            // if handsOn we add hand ids to tracked bodyparts and remove feet if they are in there
+            // if handsOn we add hand roles to tracked bodyparts and remove feet if they are in there
             if (handsOn) {
-                if (!trackedBodyParts.includes(bodyPartsIndex['left_hand'])) {
-                    trackedBodyParts.push(bodyPartsIndex['left_hand']);
+                if (!trackedBodyParts.includes('left_hand')) {
+                    trackedBodyParts.push('left_hand');
                 }
-                if (!trackedBodyParts.includes(bodyPartsIndex['right_hand'])) {
-                    trackedBodyParts.push(bodyPartsIndex['right_hand']);
+                if (!trackedBodyParts.includes('right_hand')) {
+                    trackedBodyParts.push('right_hand');
                 }
                 // remove feet if in trackedBodyParts
-                const leftFootIndex = trackedBodyParts.indexOf(bodyPartsIndex['left_foot']);
+                const leftFootIndex = trackedBodyParts.indexOf('left_foot');
                 if (leftFootIndex > -1) {
                     trackedBodyParts.splice(leftFootIndex, 1);
                 }
-                const rightFootIndex = trackedBodyParts.indexOf(bodyPartsIndex['right_foot']);
+                const rightFootIndex = trackedBodyParts.indexOf('right_foot');
                 if (rightFootIndex > -1) {
                     trackedBodyParts.splice(rightFootIndex, 1);
                 }
             } else {
                 //removing hands, adding feet to be tracked
-                const leftHandIndex = trackedBodyParts.indexOf(bodyPartsIndex['left_hand']);
+                const leftHandIndex = trackedBodyParts.indexOf('left_hand');
                 if (leftHandIndex > -1) {
                     trackedBodyParts.splice(leftHandIndex, 1);
                 }
-                const rightHandIndex = trackedBodyParts.indexOf(bodyPartsIndex['right_hand']);
+                const rightHandIndex = trackedBodyParts.indexOf('right_hand');
                 if (rightHandIndex > -1) {
                     trackedBodyParts.splice(rightHandIndex, 1);
                 }
-                if (!trackedBodyParts.includes(bodyPartsIndex['left_foot'])) {
-                    trackedBodyParts.push(bodyPartsIndex['left_foot']);
+                if (!trackedBodyParts.includes('left_foot')) {
+                    trackedBodyParts.push('left_foot');
                 }
-                if (!trackedBodyParts.includes(bodyPartsIndex['right_foot'])) {
-                    trackedBodyParts.push(bodyPartsIndex['right_foot']);
+                if (!trackedBodyParts.includes('right_foot')) {
+                    trackedBodyParts.push('right_foot');
                 }
             }
 
             for (let i = 0; i < 20; i++) {
                 if (DEBUG) console.log("PATTERN9 Creating swirl splats to signal activation");
-                let normX = (-((leftHandBefore[0] + rightHandBefore[0]) / 2) + arena_x) / (2 * arena_x);
-                let normY = (((leftHandBefore[1] + rightHandBefore[1]) / 2) + arena_y) / (2 * arena_y);
+                let normX = (x_max - (leftHandBefore[0] + rightHandBefore[0]) / 2) / (x_max - x_min);
+                let normY = ((leftHandBefore[1] + rightHandBefore[1]) / 2 - y_min) / (y_max - y_min);
                 let swirlPosXstart = normX * canvas.clientWidth;
                 let swirlPosYstart = normY * canvas.clientHeight;
-                const swirlPointer = pointerForId(20000 + i); // dedicated IDs for swirl splats
+                const swirlPointer = pointerForKey(20000 + i); // dedicated pointer keys for swirl splats
                 updatePointerDownData(swirlPointer, -1, swirlPosXstart, swirlPosYstart);
                 // Color based on direction of movement
                 swirlPointer.color = { r: 1.0, g: 1.0, b: 1.0 }; // random color
@@ -2380,11 +2300,11 @@ const handleSplatMessage = (function () {
             // Showing on status
             for (let i = 0; i < 20; i++) {
                 if (DEBUG) console.log("PATTERN9 Creating swirl splats to signal activation");
-                let normX = (-((leftHandBefore[0] + rightHandBefore[0]) / 2) + arena_x) / (2 * arena_x);
-                let normY = (((leftHandBefore[1] + rightHandBefore[1]) / 2) + arena_y) / (2 * arena_y);
+                let normX = (x_max - (leftHandBefore[0] + rightHandBefore[0]) / 2) / (x_max - x_min);
+                let normY = ((leftHandBefore[1] + rightHandBefore[1]) / 2 - y_min) / (y_max - y_min);
                 let swirlPosXstart = normX * canvas.clientWidth;
                 let swirlPosYstart = normY * canvas.clientHeight;
-                const swirlPointer = pointerForId(20000 + i); // dedicated IDs for swirl splats
+                const swirlPointer = pointerForKey(20000 + i); // dedicated pointer keys for swirl splats
                 updatePointerDownData(swirlPointer, -1, swirlPosXstart, swirlPosYstart);
                 // Color based on direction of movement
                 swirlPointer.color = { r: Math.random(), g: Math.random(), b: Math.random() }; // random color
@@ -2411,11 +2331,11 @@ const handleSplatMessage = (function () {
             timeWhenLastTrigger = Date.now();
             for (let i = 0; i < 20; i++) {
                 if (DEBUG) console.log("PATTERN9 Creating swirl splats to signal activation");
-                let normX = (-((leftHandBefore[0] + rightHandBefore[0]) / 2) + arena_x) / (2 * arena_x);
-                let normY = (((leftHandBefore[1] + rightHandBefore[1]) / 2) + arena_y) / (2 * arena_y);
+                let normX = (x_max - (leftHandBefore[0] + rightHandBefore[0]) / 2) / (x_max - x_min);
+                let normY = ((leftHandBefore[1] + rightHandBefore[1]) / 2 - y_min) / (y_max - y_min);
                 let swirlPosXstart = normX * canvas.clientWidth;
                 let swirlPosYstart = normY * canvas.clientHeight;
-                const swirlPointer = pointerForId(20000 + i); // dedicated IDs for swirl splats
+                const swirlPointer = pointerForKey(20000 + i); // dedicated pointer keys for swirl splats
                 updatePointerDownData(swirlPointer, -1, swirlPosXstart, swirlPosYstart);
                 // Color based on direction of movement
                 swirlPointer.color = { r: 1.0, g: 0.2, b: 0.2 }; // cyan for upward
@@ -2463,11 +2383,11 @@ const handleSplatMessage = (function () {
                 microsplatActive = true;
                 // Signalling activeation by triggering microsplats  at head position
                 for (let i = 0; i < numSwirlSplat; i++) {
-                    let normX = (-((leftHandBefore[0] + rightHandBefore[0]) / 2) + arena_x) / (2 * arena_x);
-                    let normY = (((leftHandBefore[1] + rightHandBefore[1]) / 2) + arena_y) / (2 * arena_y);
+                    let normX = (x_max - (leftHandBefore[0] + rightHandBefore[0]) / 2) / (x_max - x_min);
+                    let normY = ((leftHandBefore[1] + rightHandBefore[1]) / 2 - y_min) / (y_max - y_min);
                     let swirlPosXstart = normX * canvas.clientWidth;
                     let swirlPosYstart = normY * canvas.clientHeight;
-                    const swirlPointer = pointerForId(20000 + i); // dedicated IDs for swirl splats
+                    const swirlPointer = pointerForKey(20000 + i); // dedicated pointer keys for swirl splats
                     updatePointerDownData(swirlPointer, -1, swirlPosXstart, swirlPosYstart);
                     // Color based on direction of movement
                     swirlPointer.color = { r: 0.0, g: 1.0, b: 0.0 }; // cyan for upward
@@ -2490,11 +2410,11 @@ const handleSplatMessage = (function () {
                 console.log("MICROSPLAT OFF");
                 // Signalling deactiveation by triggering microsplats  at head position
                 for (let i = 0; i < numSwirlSplat; i++) {
-                    let normX = (-((leftHandBefore[0] + rightHandBefore[0]) / 2) + arena_x) / (2 * arena_x);
-                    let normY = (((leftHandBefore[1] + rightHandBefore[1]) / 2) + arena_y) / (2 * arena_y);
+                    let normX = (x_max - (leftHandBefore[0] + rightHandBefore[0]) / 2) / (x_max - x_min);
+                    let normY = ((leftHandBefore[1] + rightHandBefore[1]) / 2 - y_min) / (y_max - y_min);
                     let swirlPosXstart = normX * canvas.clientWidth;
                     let swirlPosYstart = normY * canvas.clientHeight;
-                    const swirlPointer = pointerForId(20000 + i); // dedicated IDs for swirl splats
+                    const swirlPointer = pointerForKey(20000 + i); // dedicated pointer keys for swirl splats
                     updatePointerDownData(swirlPointer, -1, swirlPosXstart, swirlPosYstart);
                     // Color based on direction of movement
                     swirlPointer.color = { r: 1.0, g: 0.0, b: 0.0 }; // cyan for upward
@@ -2520,17 +2440,17 @@ const handleSplatMessage = (function () {
         let maxVz = 3500;
         let dynNumSwirlSplatMax = 6;
         // Carrying out microsplats if active
-        if (microsplatActive && (m.ID === bodyPartsIndex['right_hand'] || m.ID === bodyPartsIndex['left_hand'])) {
+        if (microsplatActive && (role === 'right_hand' || role === 'left_hand')) {
             if (typeof m.vz === 'number') {
                 const vz = m.vz; // vertical velocity
                 if (Math.abs(vz) > activatedSwirlVelocityThreshold) {
-                    if (DEBUG) console.log("Creating swirl for hand ID ", m.ID, " with vz ", vz);
+                    if (DEBUG) console.log("Creating swirl for hand ", role, " with vz ", vz);
                     // calculating number of splats according to vz magnitude, normalizing between minVz and maxVz
                     let dynNumSwirlSplat = Math.floor((Math.abs(m.vz) - minVz) / (maxVz - minVz) * dynNumSwirlSplatMax);
                     for (let i = 0; i < dynNumSwirlSplat; i++) {
                         let swirlPosXstart = posX;
                         let swirlPosYstart = posY;
-                        const swirlPointer = pointerForId(20000 + i); // dedicated IDs for swirl splats
+                        const swirlPointer = pointerForKey(20000 + i); // dedicated pointer keys for swirl splats
                         updatePointerDownData(swirlPointer, -1, swirlPosXstart, swirlPosYstart);
                         // Color based on direction of movement
                         if (vz > 0) {
@@ -2558,7 +2478,7 @@ const handleSplatMessage = (function () {
 
 
         // Change color according to head tilt if mode is activated
-        if (headTiltColorMode && m.ID === bodyPartsIndex['head']) {
+        if (headTiltColorMode && role === 'head') {
             // Forward lean = asin(-forward.z), forward = q applied to (0, 1, 0); degrees, positive leaning forward
             const forwardZ = 2 * (m.qy * m.qz + m.qw * m.qx);
             let pitch = Math.asin(Math.max(-1, Math.min(1, -forwardZ))) * 180 / Math.PI;
@@ -2588,19 +2508,19 @@ const handleSplatMessage = (function () {
 
 
         // Updating memory variables
-        leftFootZBefore = m.ID === bodyPartsIndex['left_foot'] ? m.z : leftFootZBefore;
-        rightFootZBefore = m.ID === bodyPartsIndex['right_foot'] ? m.z : rightFootZBefore;
-        leftHandBefore = m.ID === bodyPartsIndex['left_hand'] ? [m.x, m.y, m.z] : leftHandBefore;
-        rightHandBefore = m.ID === bodyPartsIndex['right_hand'] ? [m.x, m.y, m.z] : rightHandBefore;
-        chestFrontBefore = m.ID === bodyPartsIndex['chest_front'] ? [m.x, m.y, m.z] : chestFrontBefore;
-        chestBackBefore = m.ID === bodyPartsIndex['chest_back'] ? [m.x, m.y, m.z] : chestBackBefore;
-        leftFootBefore = m.ID === bodyPartsIndex['left_foot'] ? [m.x, m.y, m.z] : leftFootBefore;
-        rightFootBefore = m.ID === bodyPartsIndex['right_foot'] ? [m.x, m.y, m.z] : rightFootBefore;
-        headBefore = m.ID === bodyPartsIndex['head'] ? [m.x, m.y, m.z] : headBefore;
-        leftHandVelBefore = m.ID === bodyPartsIndex['left_hand'] ? [m.vx, m.vy, m.vz] : leftHandVelBefore;
-        rightHandVelBefore = m.ID === bodyPartsIndex['right_hand'] ? [m.vx, m.vy, m.vz] : rightHandVelBefore;
+        leftFootZBefore = role === 'left_foot' ? m.z : leftFootZBefore;
+        rightFootZBefore = role === 'right_foot' ? m.z : rightFootZBefore;
+        leftHandBefore = role === 'left_hand' ? [m.x, m.y, m.z] : leftHandBefore;
+        rightHandBefore = role === 'right_hand' ? [m.x, m.y, m.z] : rightHandBefore;
+        chestFrontBefore = role === 'chest_front' ? [m.x, m.y, m.z] : chestFrontBefore;
+        chestBackBefore = role === 'chest_back' ? [m.x, m.y, m.z] : chestBackBefore;
+        leftFootBefore = role === 'left_foot' ? [m.x, m.y, m.z] : leftFootBefore;
+        rightFootBefore = role === 'right_foot' ? [m.x, m.y, m.z] : rightFootBefore;
+        headBefore = role === 'head' ? [m.x, m.y, m.z] : headBefore;
+        leftHandVelBefore = role === 'left_hand' ? [m.vx, m.vy, m.vz] : leftHandVelBefore;
+        rightHandVelBefore = role === 'right_hand' ? [m.vx, m.vy, m.vz] : rightHandVelBefore;
 
-        if (trackedBodyParts.includes(m.ID)) {
+        if (trackedBodyParts.includes(role)) {
             // Defining the parameters of the splat to be visualized and save it in the pointer move data
             updatePointerMoveData(pointer, posX, posY, splatRadius = splatRadius);
             //console.log("Fall body part pointer: ", pointer);
@@ -2614,15 +2534,21 @@ const handleSplatMessage = (function () {
     };
 })();
 
-// Single postMessage dispatcher for the sim, keyed on message type
+// Handles one 'frame' message (contract/frame.schema.json): every tracked body, in ROLES order
+function handleFrame(frame) {
+    latestBodies = frame.bodies;
+    for (const role of ROLES) {
+        const body = frame.bodies[role];
+        if (body) handleBody(role, body);
+    }
+}
+
+// Single postMessage dispatcher for the world (contract/CONTRACT.md: bridge messages), keyed on message type
 window.addEventListener('message', (e) => {
     const m = e.data;
     switch (m?.type) {
-        case 'splat':
-            latestRigidBodies.set(m.ID, m);
-            handleSplatMessage(m);
-            break;
-        case 'audio': latestAudio = m.audio; break;
+        case 'frame': handleFrame(m.frame); break;
+        case 'audio': latestAudio = m.audio; break; // null when the bridge reports the audio stale
     }
 });
 

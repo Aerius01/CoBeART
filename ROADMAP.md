@@ -2,7 +2,7 @@
 
 Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point into that review.
 
-**Status (2026-10-18):** Phases 0 to 4 are done (the original refactor). Phases 5 to 7 (module separation, one contract, swappable sources, Splat only) are agreed and scheduled; see "Foundation phases" below. This file is the backlog (Deferred) and decision log. Earlier phases added **Carry-over from Phase N** notes to later WPs: pass them to the agent with the WP block.
+**Status (2026-10-18):** Phases 0 to 4 (the original refactor) and 5 to 7 (module separation, one contract, swappable sources, Splat only; see "Foundation phases" below) are done. This file is the backlog (Deferred) and decision log. Earlier phases added **Carry-over from Phase N** notes to later WPs: pass them to the agent with the WP block.
 
 ## How this roadmap is meant to run
 
@@ -521,6 +521,10 @@ Depends on Phase 6. Implements D17-D19.
   1. Node test: mapping corners (top-left → `(x_max, y_min)`, bottom-right → `(x_min, y_max)`), z clamped at both arena ends, wheel steps accumulate; built pose_frames validate against the schema (held and released forms).
   2. Playwright on `PORT=3702 node server.js`, `/host/?world=splat&source=mouse`: a drag paints under the cursor (screenshot with cursor position noted); releasing stops painting; wheel changes the readout z; `G` cycles backgrounds while the mouse layer is active; `/health` shows one ingest client.
   3. `/host/?world=nope` shows the error; `npm test` green; fitness clean.
+
+**Phase 7 outcome (2026-10-18):** commits on `refactor/phase-7`: 7.1 `b62d962`, 7.2 `f113b5a`, each diff reviewed by the master. Merged-head gate: pytest 243 passed, `flake8 cobeart tests` clean, `npm test` 51/51, fitness 5 rules / 0 violations, fitness tests 16/16, `tests/e2e` 15 passed 2/2. Master browser check: launcher -> Splat + Mouse -> `/host/?world=splat&source=mouse`; small circles around (200, 600) paint a splat centred at about (205, 585) (D18 mapping holds); six wheel notches up move the readout from 1200 to 1500 mm. CLAUDE.md rewritten by the master for the new layout, contract, commands and workflow; stale `__pycache__`-only folders of the pre-Phase-5 packages removed from the main checkout.
+- **Settled by the WPs:** `listWorlds(publicDir)` is exported from `hub.js` and shared by the route and the Electron dialog; a missing `world` or `source` is a visible error (no default); the launcher keeps every query param (so `?debug` arrives as `debug=`, which `has('debug')` accepts); the mouse maths is an `.mjs` module so the browser and the CommonJS node tests share it; release fires on `pointerup` with no buttons left, `pointercancel`, document `mouseleave` or window `blur`.
+- **Observed:** Splat paints only while a body moves (`pointer.moved`), so a held but still mouse paints nothing, exactly like a still tracked hand. The mouse layer covers the world, so Splat's own GUI ("Open Controls") is not clickable in mouse mode.
 
 **Phase 7 gate:** Phase 6 gate plus: human runs `npm start`, picks Splat + Mouse, paints, scrolls z (hand-drop radius pattern visibly changes below 1800 mm), and picks Splat + Live with `start-simulator`. CLAUDE.md updated by the master (layout, commands, contract, testing workflow) and every command in it re-run.
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { hubOnlyServer, noArenaPortLiterals, noPrintHotPath, RULES } from './fitness.mjs';
+import { hubOnlyServer, moduleBoundaries, noArenaPortLiterals, noPrintHotPath, RULES } from './fitness.mjs';
 
 const ids = (violations) => violations.map((v) => v.rule);
 
@@ -31,37 +31,65 @@ test('no-arena-port-literals allows the docstring URLs', () => {
   const cfg = '    """Return `value` if it is an http(s) URL with a host, e.g. http://127.0.0.1:3000, else raise ConfigError."""';
   const cli = '    """argparse type: an http(s) URL with a host, e.g. http://127.0.0.1:3000."""';
   assert.deepEqual(noArenaPortLiterals('cobeart/settings/config.py', cfg), []);
-  assert.deepEqual(noArenaPortLiterals('cobeart/optitrackclient/start_client.py', cli), []);
+  assert.deepEqual(noArenaPortLiterals('cobeart/input/optitrack/start_client.py', cli), []);
 });
 
 test('no-arena-port-literals still flags other 3000s in the allowlisted files', () => {
   assert.equal(noArenaPortLiterals('cobeart-app/public/fluid/script.js', 'const halfX = 3000;').length, 1);
   assert.equal(noArenaPortLiterals('cobeart/settings/config.py', 'DEFAULT_PORT = 3000').length, 1);
-  assert.equal(noArenaPortLiterals('cobeart/optitrackclient/start_client.py', 'url = "http://127.0.0.1:3000"').length, 1);
+  assert.equal(noArenaPortLiterals('cobeart/input/optitrack/start_client.py', 'url = "http://127.0.0.1:3000"').length, 1);
 });
 
 test('no-arena-port-literals is clean without 3000', () => {
   assert.deepEqual(noArenaPortLiterals('cobeart/foo.py', 'x = 2700\ny = 4000'), []);
 });
 
-test('no-print-hot-path flags print( in packagesender and transform.py', () => {
-  const v = noPrintHotPath('cobeart/packagesender/sender.py', 'x = 1\n    print("x")\n');
+test('no-print-hot-path flags print( in sender, metrics and transform', () => {
+  const v = noPrintHotPath('cobeart/input/optitrack/sender.py', 'x = 1\n    print("x")\n');
   assert.deepEqual(ids(v), ['no-print-hot-path']);
   assert.equal(v[0].line, 2);
-  assert.equal(noPrintHotPath('cobeart/optitrackclient/transform.py', 'print(1)').length, 1);
+  assert.equal(noPrintHotPath('cobeart/input/optitrack/transform.py', 'print(1)').length, 1);
 });
 
 test('no-print-hot-path is clean for logging, other files and pprint', () => {
-  assert.deepEqual(noPrintHotPath('cobeart/packagesender/sender.py', 'logger.info("x")\npprint(x)'), []);
-  assert.deepEqual(noPrintHotPath('cobeart/audiocapture/capture.py', 'print("meter")'), []);
+  assert.deepEqual(noPrintHotPath('cobeart/input/optitrack/sender.py', 'logger.info("x")\npprint(x)'), []);
+  assert.deepEqual(noPrintHotPath('cobeart/audio/capture.py', 'print("meter")'), []);
 });
 
 test('RULES scope: tests directories are excluded from port and print rules', () => {
   const port = RULES.find((r) => r.check === noArenaPortLiterals);
   const print = RULES.find((r) => r.check === noPrintHotPath);
   assert.equal(port.applies('cobeart-app/test/config.test.js'), false);
-  assert.equal(port.applies('cobeart/audiocapture/tests/test_x.py'), false);
+  assert.equal(port.applies('cobeart/audio/tests/test_x.py'), false);
   assert.equal(port.applies('cobeart-app/electron/hub.js'), true);
-  assert.equal(print.applies('cobeart/packagesender/tests/test_sender.py'), false);
-  assert.equal(print.applies('cobeart/packagesender/sender.py'), true);
+  assert.equal(print.applies('cobeart/input/optitrack/tests/test_sender.py'), false);
+  assert.equal(print.applies('cobeart/input/optitrack/sender.py'), true);
+});
+
+test('no-print-hot-path flags metrics.py and skips other optitrack files', () => {
+  assert.equal(noPrintHotPath('cobeart/input/optitrack/metrics.py', 'print(1)').length, 1);
+  assert.deepEqual(noPrintHotPath('cobeart/input/optitrack/start_client.py', 'print(1)'), []);
+});
+
+test('module-boundaries flags audio importing input and input importing audio', () => {
+  const a = moduleBoundaries('cobeart/audio/capture.py', 'import os\nfrom cobeart.input.optitrack.sender import X\n');
+  assert.deepEqual(ids(a), ['module-boundaries']);
+  assert.equal(a[0].line, 2);
+  assert.equal(moduleBoundaries('cobeart/audio/x.py', 'import cobeart.input.optitrack').length, 1);
+  assert.equal(moduleBoundaries('cobeart/input/optitrack/x.py', '    from cobeart.audio import capture').length, 1);
+  assert.equal(moduleBoundaries('cobeart/input/optitrack/x.py', 'import cobeart.audio.capture as c').length, 1);
+});
+
+test('module-boundaries flags the simulator importing either producer', () => {
+  assert.equal(moduleBoundaries('cobeart/simulator/x.py', 'from cobeart.input.optitrack import sender').length, 1);
+  assert.equal(moduleBoundaries('cobeart/simulator/x.py', 'import cobeart.audio.capture').length, 1);
+});
+
+test('module-boundaries allows common, settings, own-module imports and comments', () => {
+  assert.deepEqual(moduleBoundaries('cobeart/audio/emitter.py', 'from cobeart.common.strict_json import StrictJson'), []);
+  assert.deepEqual(moduleBoundaries('cobeart/audio/capture.py', 'from cobeart.audio.utils import x\nfrom cobeart.settings.config import y'), []);
+  assert.deepEqual(moduleBoundaries('cobeart/input/optitrack/x.py', 'from cobeart.input.optitrack.sender import X'), []);
+  assert.deepEqual(moduleBoundaries('cobeart/simulator/x.py', 'from cobeart.settings.config import y'), []);
+  assert.deepEqual(moduleBoundaries('cobeart/audio/x.py', '# from cobeart.input import y\nx = "import cobeart.input"'), []);
+  assert.deepEqual(moduleBoundaries('cobeart/settings/config.py', 'from cobeart.input import y'), []);
 });

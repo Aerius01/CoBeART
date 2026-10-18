@@ -2,7 +2,7 @@
 
 Orientation follows contract D5: arena axes, identity faces +y with up = +z, forward lean = asin(-forward.z).
 A body orientation is Rz(yaw) * Rx(-lean). Velocities are finite differences over one frame period, computed
-here independently of cobeart.packagesender.metrics so they can serve as a reference.
+here independently of cobeart.input.optitrack.metrics so they can serve as a reference.
 """
 import json
 import math

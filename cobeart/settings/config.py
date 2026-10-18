@@ -72,17 +72,9 @@ class WindowSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class CompositeSettings:
-    z_threshold: float
-    clap_distance: float
-    show_interactive_elements: bool
-
-
-@dataclass(frozen=True, slots=True)
 class FrontendSettings:
     bridge_framerate: float
     splat_color: Rgb
-    composite: CompositeSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,14 +241,8 @@ def parse_settings(raw: object, hub_url_override: str | None = None) -> Settings
     win.done()
 
     fro: _Section = root.section("frontend")
-    com: _Section = fro.section("composite")
-    composite: CompositeSettings = CompositeSettings(
-        z_threshold=com.number("z_threshold"), clap_distance=com.number("clap_distance"),
-        show_interactive_elements=com.boolean("show_interactive_elements"),
-    )
-    com.done()
     frontend: FrontendSettings = FrontendSettings(
-        fro.number("bridge_framerate", positive=True), fro.rgb("splat_color"), composite
+        fro.number("bridge_framerate", positive=True), fro.rgb("splat_color")
     )
     fro.done()
 

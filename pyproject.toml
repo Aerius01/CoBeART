@@ -45,8 +45,8 @@ viz = [
 ]
 
 [project.scripts]
-start-optitrack-client = "cobeart.optitrackclient.start_client:start"
-start-audio-client = "cobeart.audiocapture.capture:main"
+start-optitrack-client = "cobeart.input.optitrack.start_client:start"
+start-audio-client = "cobeart.audio.capture:main"
 start-simulator = "cobeart.simulator.__main__:main"
 
 [project.urls]

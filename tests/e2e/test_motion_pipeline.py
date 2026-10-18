@@ -10,12 +10,13 @@ import pytest
 import socketio
 from jsonschema import Draft202012Validator
 
-from cobeart.optitrackclient.start_client import (
+from cobeart.common.strict_json import StrictJson
+from cobeart.input.optitrack.start_client import (
     FrameListener, FramePipeline, RigidBodyListener, arena_to_optitrack,
 )
-from cobeart.optitrackclient.transform import ArenaPose
-from cobeart.packagesender.metrics import MetricsTracker
-from cobeart.packagesender.sender import PayloadSender, StrictJson
+from cobeart.input.optitrack.transform import ArenaPose
+from cobeart.input.optitrack.metrics import MetricsTracker
+from cobeart.input.optitrack.sender import PayloadSender
 from cobeart.settings.config import Settings
 from tests.e2e.harness import (
     LOG_TAIL_CHARS, FrameMessage, Hub, RigidBodyMessage, Viewer, assert_all_valid, body_ids, start_python, wait_until,
@@ -143,7 +144,7 @@ def test_simulate_cli_streams_and_stops_cleanly(
     stop_signal: signal.Signals, shared_hub: Hub, shared_viewer: Viewer, frame_validator: Draft202012Validator
 ) -> None:
     process: subprocess.Popen[str] = start_python(
-        ["-m", "cobeart.optitrackclient.start_client", "--simulate", "--url", shared_hub.url]
+        ["-m", "cobeart.input.optitrack.start_client", "--simulate", "--url", shared_hub.url]
     )
     try:
         frames: list[FrameMessage] = shared_viewer.wait_for_count(SIMULATE_FRAMES, DELIVERY_TIMEOUT_S)

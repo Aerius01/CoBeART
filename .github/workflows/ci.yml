@@ -29,7 +29,7 @@ jobs:
           cache: npm
           cache-dependency-path: cobeart-app/package-lock.json
 
-      # Importing soundcard (via cobeart/audiocapture/utils.py) connects to
+      # Importing soundcard (via cobeart/audio/utils.py) connects to
       # PulseAudio at import time, so the audio tests need a daemon running.
       - name: Start PulseAudio with a null sink
         run: |

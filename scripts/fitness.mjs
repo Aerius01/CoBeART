@@ -34,10 +34,31 @@ export function noArenaPortLiterals(relPath, text) {
     (line) => PORT_ALLOWLIST.some((re) => re.test(line)));
 }
 
+const HOT_PATH_FILES = [
+  'cobeart/input/optitrack/sender.py',
+  'cobeart/input/optitrack/metrics.py',
+  'cobeart/input/optitrack/transform.py',
+];
+
 export function noPrintHotPath(relPath, text) {
-  const inScope = relPath.startsWith('cobeart/packagesender/') || relPath === 'cobeart/optitrackclient/transform.py';
+  const inScope = HOT_PATH_FILES.includes(relPath);
   if (!inScope) return [];
   return scanLines(relPath, text, 'no-print-hot-path', /(^|[^\w.])print\(/, 'use logging, not print(), on the hot path');
+}
+
+// Each module may not import the modules it must stay independent of (D11). Matches `import cobeart.x` and `from cobeart.x import`.
+const FORBIDDEN_IMPORTS = [
+  { dir: 'cobeart/audio/', modules: ['input'] },
+  { dir: 'cobeart/input/', modules: ['audio'] },
+  { dir: 'cobeart/simulator/', modules: ['input', 'audio'] },
+];
+
+export function moduleBoundaries(relPath, text) {
+  const forbidden = FORBIDDEN_IMPORTS.find((f) => relPath.startsWith(f.dir))?.modules ?? [];
+  if (forbidden.length === 0) return [];
+  const pattern = new RegExp(`^\\s*(?:from|import)\\s+cobeart\\.(?:${forbidden.join('|')})\\b`);
+  return scanLines(relPath, text, 'module-boundaries', pattern,
+    `${relPath.split('/')[1]} must not import cobeart.${forbidden.join(' or cobeart.')}`);
 }
 
 const isTestPath = (rel) => rel.split('/').some((p) => p === 'tests' || p === 'test');
@@ -56,6 +77,7 @@ export const RULES = [
     check: noPrintHotPath,
     applies: (rel) => !isTestPath(rel) && rel.endsWith('.py'),
   },
+  { check: moduleBoundaries, applies: (rel) => rel.endsWith('.py') },
 ];
 
 /** @returns {string[]} repo-relative posix paths of files under `dir`, skipping node_modules */

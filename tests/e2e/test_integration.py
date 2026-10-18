@@ -29,7 +29,7 @@ def test_simulator_frames_and_audio_reach_viewer_separately(
 ) -> None:
     simulator = Simulator(
         client=socketio.Client(),
-        motion=make_scenario("orbit", rate_hz=120.0),
+        motion=make_scenario("orbit"),
         audio=build_audio_scenario("beat", audio_config(start_epoch_s=time.time(), lock_in_s=0.5)),
         run=RunConfig(url=shared_hub.url, motion_rate_hz=120.0, audio_rate_hz=100.0, seed=0, duration_s=2.0),
     )

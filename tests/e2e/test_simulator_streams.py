@@ -93,7 +93,7 @@ def test_missing_role_is_absent_from_affected_frames(
     # Start half a second before the first gap (the left hand drops out at MISSING_CYCLE_S - MISSING_DURATION_S).
     gap_start_s: float = MISSING_CYCLE_S - MISSING_DURATION_S
     sent: list[dict[str, Any]] = []
-    scenario: Scenario = _recording(_offset(make_scenario("missing-body", MOTION_RATE_HZ), gap_start_s - 0.5), sent)
+    scenario: Scenario = _recording(_offset(make_scenario("missing-body"), gap_start_s - 0.5), sent)
     Simulator(
         client=socketio.Client(), motion=scenario, audio=None,
         run=RunConfig(url=shared_hub.url, motion_rate_hz=MOTION_RATE_HZ, audio_rate_hz=100.0, seed=0, duration_s=1.0),
@@ -146,7 +146,7 @@ def _analytic_speeds(scenario: Scenario) -> dict[str, float]:
 def test_orbit_speed_matches_the_analytic_circle(
     fresh_hub: Hub, fresh_viewer: Viewer, settings: Settings, frame_validator: Draft202012Validator
 ) -> None:
-    scenario: Scenario = make_scenario("orbit", ORBIT_RATE_HZ)
+    scenario: Scenario = make_scenario("orbit")
     expected: dict[str, float] = _analytic_speeds(scenario)
     assert len(expected) > 1 and all(speed > 100.0 for speed in expected.values()), expected
     Simulator(

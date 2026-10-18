@@ -332,9 +332,9 @@ def roles_of(frame: FrameMessage) -> set[str]:
 # construction lives below, so a signature change there is a change in this section only.
 # ---------------------------------------------------------------------------------------------------------------
 
-def make_scenario(name: str, rate_hz: float) -> Scenario:
-    """A named simulator motion scenario at `rate_hz`, stamped from now, with the config's roles and arena."""
-    return build_motion_scenario(name, motion_config(rate_hz=rate_hz, start_epoch_ms=time.time() * 1000.0))
+def make_scenario(name: str) -> Scenario:
+    """A named simulator motion scenario (a pure function of t) with the config's roles and arena."""
+    return build_motion_scenario(name, motion_config())
 
 
 def scenario_payload(scenario: Scenario, t: float) -> dict[str, Any]:

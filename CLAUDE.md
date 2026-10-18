@@ -8,7 +8,7 @@ CoBeART is an audio-visual art project using Spatial Augmented Reality. Three in
 
 ## Status
 
-The original refactor (Phases 0-4) and the foundation phases (5-7: module separation, contract v2, swappable sources, Splat only) are done. `ROADMAP.md` is the backlog (the "Deferred" section) and the decision log (D1-D19 and the per-phase decisions); `ARCHITECTURE_REVIEW.md` is the historical review it came from. Read the relevant decision before reversing a design choice.
+The original refactor (Phases 0-4) and the foundation phases (5-7: module separation, contract v2, swappable sources, Splat only) are done. `ROADMAP.md` is the backlog (the "Deferred" section) and the decision log (D1-D22 and the per-phase decisions); `ARCHITECTURE_REVIEW.md` is the historical review it came from. Read the relevant decision before reversing a design choice.
 
 Source of truth when prose disagrees: the code, `contract/` (message schemas) and `config/cobeart.yaml` (settings).
 
@@ -40,18 +40,18 @@ Beat detection runs madmom online in a spawned child process (`beat/process.py`,
 
 - `hub.js`: `createHub({port, host, publicDir, metrics, frontendConfig, now})` runs Express and Socket.IO. Used by both `main.js` (Electron window) and `server.js` (`npm run web`, same hub without a window). Nothing else may construct a Socket.IO `Server`.
 - Namespaces:
-  - `/ingest`, event `pose_frame`: each valid pose_frame produces exactly one `frame` on `/viewer`. The v1 event `frame` is rejected with a log line naming the fix.
+  - `/ingest`, event `pose_frame`: each valid pose_frame produces exactly one `frame` on `/viewer`. The v1 event `frame` is rejected with a log line naming the fix. One source drives the hub at a time (D20): the connection whose pose_frame was accepted last stays active while connected and sending within `metrics.max_gap_s`; other connections' frames are dropped with a log line, and a change of source resets the motion state.
   - `/audio`, event `audio_metrics`: each valid message is re-emitted on `/viewer` as `audio`, stamped with the hub `timestamp`.
   - `/viewer`, events `frame` and `audio`: two independent streams. Audio is never merged into frames, and a new viewer gets nothing until the next message (no replay).
 - `motion.js`: the velocity stage. Per role it derives `vx..vz`, `wx..wz` (from successive quaternions), `abs_vel` and `norm_abs_vel` (windowed hold) from the source clock `source_time_s`, not receipt time. A role restarts at 0 on first sighting or after a gap above `metrics.max_gap_s`; a source clock going backwards resets every role.
 - Every payload is validated with ajv against `contract/*.schema.json`; invalid ones are dropped with a rate-limited log line. An outgoing frame that does not validate (e.g. a non-finite velocity) is dropped too.
 - HTTP:
-  - `/health`: client counts, plus the last frame and audio age in ms.
+  - `/health`: client counts, the active source's socket id (or null), and the last frame and audio age in ms.
   - `/config.json`.
   - `/worlds.json`: the subfolders of `public/worlds/` that contain an `index.html`, rescanned on every request.
   - Static files from `public/`. Every served HTML page gets `window.__COBEART_CONFIG__` injected as its first script: the frontend subset of the YAML (`debug`, `arena`, `bridge_framerate`, `audio_max_age_ms`, `sources`).
 - `config.js`: loads and validates the YAML with `config/cobeart.schema.json`, whose role values reference the contract's role enum. Exports `loadConfig`, `resolvePort`, `trackingRoles`, `hubConfig` and `frontendConfig`. `server.js` and `main.js` exit on an invalid file. The hub binds `network.socketio.host`.
-- `main.js`: a dialog with one button per world, a "Mouse input" checkbox and Cancel, then loads `/host/?world=<name>&source=<live|mouse>`. DevTools open when `debug: true` in the YAML.
+- `main.js`: opens the window on the launcher page `/` (no native dialog, D21); the page navigates the same window to `/host/?world=<name>&source=<live|mouse>`. DevTools open when `debug: true` in the YAML.
 
 ### Contract and config
 
@@ -85,7 +85,7 @@ Beat detection runs madmom online in a spawned child process (`beat/process.py`,
   - `keys.js` forwards operator keys into the world iframe.
   - `border-control.js` draws the border (`B`).
   - With `?debug`, the bridge shows an overlay listing bodies by role plus the audio line.
-- `sources/`: browser input sources. `mouse.js` is a transparent layer over the world: while a button is held it sends `pose_frame`s at `rate_hz` for `sources.mouse.role`, with an identity quaternion and z from the wheel (persisting, clamped to `arena.z`, shown in a corner readout); on release it sends one empty frame. The maths is in `mouse-math.mjs` (pure, unit-tested). The layer covers the world, so a world's own GUI is not clickable in mouse mode.
+- `sources/`: browser input sources. `mouse.js` is a transparent layer over the world: while a button is held it sends `pose_frame`s at `rate_hz` for `sources.mouse.role`, with an identity quaternion and z from the wheel (persisting, clamped to `arena.z`, shown in a corner readout); on release it sends one empty frame. `M` toggles the layer off (so the world's own GUI is clickable) and on again, from the host or from inside the world. The maths is in `mouse-math.mjs` (pure, unit-tested).
 - `worlds/<name>/`: one folder per world, each a standalone page that only listens for `frame` and `audio` postMessages. The `worlds-receive-only` fitness rule forbids sockets there. Adding a folder with an `index.html` adds a world to both launchers. The only world is `splat/` (WebGL2 Navier-Stokes fluid). It paints the hands, the feet and `stick` while held, and only while they move. Its gesture patterns key on roles, it has its own colour, and its keys are `P` (pause the fluid physics) and `G` (cycle backgrounds).
 - Debug logging in the frontend is gated by `?debug` in the URL or `debug: true` in the YAML.
 
@@ -124,7 +124,7 @@ Known traps:
 
 ```bash
 cd cobeart-app && npm ci          # once
-cd cobeart-app && npm start       # hub + Electron: dialog picks the world and Mouse input on or off
+cd cobeart-app && npm start       # hub + Electron window on the launcher page (pick world and Live or Mouse)
 cd cobeart-app && npm run web     # hub only; browser launcher at http://127.0.0.1:3000/
 start-optitrack-client            # NatNet to hub; needs Motive streaming (addresses from the YAML or positional args)
 start-optitrack-client --simulate # scripted synthetic bodies through the real pipeline, no hardware
@@ -133,7 +133,7 @@ start-audio-client                # capture, meter and emit to the hub by defaul
 
 - `start-audio-client` flags: `--no-emit` (meter only, no hub), `--device INDEX` (skip the device prompt), `--debug`. Beat detection follows `audio.beat_detection` in the YAML.
 - `start-optitrack-client [server_address [client_address [transport]]] [--simulate] [--url URL] [--log-level L]`. `--simulate` sends Motive IDs 0-2, which the shipped `tracking.roles` maps to `left_hand`, `right_hand`, `head`.
-- Mouse input needs no Python process: choose Mouse in the launcher (or `/host/?world=splat&source=mouse`), hold a button and move; the wheel sets z.
+- Mouse input needs no Python process: choose Mouse in the launcher (or `/host/?world=splat&source=mouse`), hold a button and move; the wheel sets z; `M` toggles the mouse layer. Run one source at a time: while the simulator or OptiTrack client is sending, the hub drops the mouse's frames (and vice versa).
 - Audio reaches the world without any motion source; frames arrive only while a source sends pose_frames.
 - Use `PORT=<port> npm run web` for a second hub; pass the matching `COBEART_SOCKETIO_URL` or `--url` to Python tools.
 
@@ -187,7 +187,7 @@ A real microphone can be checked live with `start-audio-client` against the same
 
 1. Start Motive with streaming enabled; set `network.client_address`, `server_address` and `use_multicast` in the YAML.
 2. `start-optitrack-client` should print the connection info; `start-audio-client` should show audio metrics.
-3. `npm start` from `cobeart-app/`, choose Splat with Mouse input off.
+3. `npm start` from `cobeart-app/`, choose Splat and Live in the launcher.
 4. Bodies paint as splats; the debug overlay (`debug: true` or `?debug`) lists them by role with position and velocity.
 5. Tuning checklist (details in `ROADMAP.md`, Deferred):
    - Create each rigid body in Motive aligned to the global axes, with the performer facing OptiTrack +Z (D5 orientation and lean sign).

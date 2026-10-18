@@ -545,6 +545,8 @@ Depends on Phase 6. Implements D17-D19.
   4. Playwright: `/` -> Splat + Mouse; drag paints; `M` turns the layer off (readout says so), "Open Controls" opens Splat's GUI and a GUI click works; with focus inside the iframe, `M` turns the layer back on once (not twice) and a drag paints again. Screenshots.
   5. `npm test`, fitness, `pytest` (whole repo) green.
 
+**WP 7.3 outcome (2026-10-18):** commit `2428b1f`, reviewed by the master (interrupted once by an API usage limit and resumed). Merged-head gate: pytest 243 passed, `flake8 cobeart tests` clean, `npm test` 53/53, fitness 5 rules / 0 violations, `tests/e2e` 15 passed 2/2 (master) and 3/3 (agent). Settled: the active source is the socket whose pose_frame passed schema validation last; it stays active while connected and within `max_gap_s` of hub receipt time; `/health` reports `activeSource`; the e2e harness waits for `activeSource: null` before its end-of-stream marker (removes a race, no assertion weakened); `M` ignores key repeat, modifiers and focused text fields; Electron's `activate` reopens the launcher. CLAUDE.md updated by the master for D20-D22.
+
 **Phase 7 gate:** Phase 6 gate plus: human runs `npm start`, picks Splat + Mouse, paints, scrolls z (hand-drop radius pattern visibly changes below 1800 mm), and picks Splat + Live with `start-simulator`. CLAUDE.md updated by the master (layout, commands, contract, testing workflow) and every command in it re-run.
 
 ---

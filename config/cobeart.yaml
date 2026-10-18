@@ -36,10 +36,6 @@ window:
 frontend:
   bridge_framerate: 120           # Hz, bridge-to-simulation forwarding loop
   splat_color: [1.0, 0.6, 0.2]    # RGB, 0..1
-  composite:
-    z_threshold: 2700             # mm, hand height that triggers a switch
-    clap_distance: 200            # mm, hand separation counted as a clap
-    show_interactive_elements: false
 
 debug: false
 

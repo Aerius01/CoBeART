@@ -80,22 +80,13 @@
     },
     "frontend": {
       "type": "object", "additionalProperties": false,
-      "required": ["bridge_framerate", "splat_color", "composite"],
+      "required": ["bridge_framerate", "splat_color"],
       "properties": {
         "bridge_framerate": {"$ref": "#/$defs/positiveHz", "description": "Hz, bridge-to-simulation forwarding loop rate."},
         "splat_color": {
           "type": "array", "minItems": 3, "maxItems": 3,
           "items": {"type": "number", "minimum": 0, "maximum": 1},
           "description": "Default splat color as RGB, each channel 0 to 1."
-        },
-        "composite": {
-          "type": "object", "additionalProperties": false,
-          "required": ["z_threshold", "clap_distance", "show_interactive_elements"],
-          "properties": {
-            "z_threshold": {"type": "number", "description": "mm, hand height that triggers a simulation switch."},
-            "clap_distance": {"type": "number", "minimum": 0, "description": "mm, hand separation counted as a clap."},
-            "show_interactive_elements": {"type": "boolean", "description": "Show interactive UI elements in the composite view."}
-          }
         }
       }
     },

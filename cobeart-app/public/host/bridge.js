@@ -29,23 +29,8 @@
   }
 
   function init() {
-    // Finds the id=fluidFrame iframe element that was created in the index.html file,
-    // and that holds the embedded fluid simulation.
-    let frameEl = document.getElementById('fluidFrame')
-            || document.getElementById('moltenFrame')
-            || document.getElementById('inkFrame');
-     if (!frameEl) {
-       frameEl = document.createElement('iframe');
-       frameEl.id = 'fluidFrame';
-       frameEl.src = '/fluid/index.html';
-       frameEl.width = 960;
-       frameEl.height = 540;
-       frameEl.style.border = '0';
-       frameEl.style.maxWidth = '100%';
-       const host = document.getElementById('out')?.parentElement || document.body;
-       host.appendChild(document.createElement('h2')).textContent = 'Fluid Simulation';
-       host.appendChild(frameEl);
-     }
+    // The iframe in host/index.html that holds the embedded world.
+    const frameEl = document.getElementById('worldFrame');
 
     // Debug only: overlay with the latest rigid-body and audio values
     const overlay = DEBUG ? (document.getElementById('textOverlay') ?? createOverlay(frameEl)) : null;
@@ -53,8 +38,8 @@
     // Connects to the /viewer namespace on the server hosted in electron/main.js
     const socket = window.viewerSocket || io('/viewer', { transports: ['websocket'] });
 
-    socket.on('connect', () => console.log('[fluid-bridge] socket connected', socket.id));
-    socket.on('disconnect', () => console.log('[fluid-bridge] socket disconnected'));
+    socket.on('connect', () => console.log('[bridge] socket connected', socket.id));
+    socket.on('disconnect', () => console.log('[bridge] socket disconnected'));
 
     // Post a message to the given iframes, and to the window itself (for top-level scripts)
     function postToWindows(msg, frames) {
@@ -70,7 +55,7 @@
 
     // Receive frames emitted by the hub and keep only the latest one
     socket.on('frame', (payload) => {
-      if (DEBUG) console.log('[fluid-bridge] received frame', payload);
+      if (DEBUG) console.log('[bridge] received frame', payload);
       latestFrame = payload;
       if (payload.audio) latestAudio = payload.audio;
     });
@@ -98,7 +83,7 @@ Angular Velocity: (wx: ${rb.wx.toFixed(2)}, wy: ${rb.wy.toFixed(2)}, wz: ${rb.wz
       if (!latestFrame) return;
       const frame = latestFrame;
       latestFrame = null;
-      if (DEBUG) console.log('[fluid-bridge] sending splats', frame.rigidbodies);
+      if (DEBUG) console.log('[bridge] sending splats', frame.rigidbodies);
       const frames = document.querySelectorAll('iframe');
       for (const rb of frame.rigidbodies) {
         postToWindows(toSplat(rb), frames);

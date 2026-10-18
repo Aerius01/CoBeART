@@ -22,11 +22,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-import backgroundRegistry from '../backgrounds/registry.js';
+import backgroundRegistry from './backgrounds/registry.js';
 
 'use strict';
 
-// When embedded, fluid-bridge.js adds ?debug to this iframe's URL if the embedding page has it.
+// When embedded, host/bridge.js adds ?debug to this iframe's URL if the embedding page has it.
 const DEBUG = new URLSearchParams(location.search).has('debug') || window.__COBEART_CONFIG__?.debug === true;
 
 // Mobile promo section
@@ -1634,21 +1634,6 @@ window.addEventListener('touchend', e => {
     }
 });
 
-// Cursor events from the composite parent: { type: 'cursor', x: 0..1, y: 0..1, down?, up? }
-function handleCursorMessage(m) {
-    const px = m.x * canvas.width;
-    const py = (1.0 - m.y) * canvas.height;
-    const pointer = pointers[0] || new pointerPrototype();
-    if (m.down) {
-        updatePointerDownData(pointer, -1, px, py);
-        if (!pointers.includes(pointer)) pointers[0] = pointer;
-    } else if (m.up) {
-        updatePointerUpData(pointer);
-    } else {
-        updatePointerMoveData(pointer, px, py);
-    }
-}
-
 window.addEventListener('keydown', e => {
     if (e.code === 'KeyP')
         config.PAUSED = !config.PAUSED;
@@ -1672,8 +1657,6 @@ const handleSplatMessage = (function () {
     // Map rigid body IDs → pointer indices, so multiple bodies can paint at once (optional)
     const idToIndex = new Map();
 
-    // Use the first body (if any) to drive the parent “cursor”
-    // so molten reacts immediately; fluid receives splats for ALL bodies.
     let bodyPartsIndex = {};
     let trackedBodyParts = [];
     let objectIDs = [];
@@ -2640,7 +2623,6 @@ window.addEventListener('message', (e) => {
             handleSplatMessage(m);
             break;
         case 'audio': latestAudio = m.audio; break;
-        case 'cursor': handleCursorMessage(m); break;
     }
 });
 

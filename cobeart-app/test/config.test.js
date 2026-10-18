@@ -48,6 +48,6 @@ test('PORT overrides the configured port and must be a valid port', () => {
 test('the frontend config carries exactly what pages read', () => {
   assert.deepEqual(
     Object.keys(frontendConfig(REAL_CONFIG)).sort(),
-    ['arena', 'bridge_framerate', 'composite', 'debug', 'splat_color']
+    ['arena', 'bridge_framerate', 'debug', 'splat_color']
   );
 });

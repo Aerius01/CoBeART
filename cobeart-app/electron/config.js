@@ -40,8 +40,7 @@ function frontendConfig(config) {
     debug: config.debug,
     arena: config.arena,
     bridge_framerate: config.frontend.bridge_framerate,
-    splat_color: config.frontend.splat_color,
-    composite: config.frontend.composite
+    splat_color: config.frontend.splat_color
   };
 }
 

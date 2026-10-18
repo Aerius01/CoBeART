@@ -3,7 +3,7 @@
 // 1. Running a local web and WebSocket server to handle data from the OptiTrack system.
 // 2. Creating a native desktop window (renderer process) that displays the front-end visualization.
 
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow } = require('electron');
 const path = require('path');
 
 // The hub (Express + Socket.IO) runs directly within the main process (self-contained).
@@ -24,22 +24,8 @@ async function startHttpServer(config, port) {
   });
 }
 
-// Maps the dialog choice to the page the window loads.
-function resolveViewUrl(origin, shader, usePerfMode) {
-  switch (shader) {
-    case 'molten':
-      return `${origin}/molten/${usePerfMode ? '?performance=true' : ''}`;
-    case 'ink':
-      return `${origin}/ink/`;
-    case 'mixed':
-      return `${origin}/composite/`;
-    default:
-      return `${origin}/`;
-  }
-}
-
 // Creates and configures the main application window.
-function createWindow(config, origin, shader, usePerfMode) {
+function createWindow(config, origin) {
   const win = new BrowserWindow({
     width: config.window.width,
     height: config.window.height,
@@ -59,14 +45,13 @@ function createWindow(config, origin, shader, usePerfMode) {
   });
 
   // The window loads its content from the local server, just like a web browser.
-  const url = resolveViewUrl(origin, shader, usePerfMode);
+  const url = `${origin}/host/`;
   // Wait for the window to be ready before opening DevTools
   win.webContents.on('did-finish-load', () => {
     // Show window once content is loaded to prevent GPU errors
     win.show();
 
-    // Opening devtools breaks ink visualization, so never open it there.
-    if (config.debug && shader !== 'ink') {
+    if (config.debug) {
       // Small delay to ensure page is fully initialized
       setTimeout(() => {
         win.webContents.openDevTools();
@@ -89,25 +74,11 @@ app.whenReady().then(async () => {
   const origin = `http://${config.network.socketio.host}:${port}`;
   await startHttpServer(config, port);
 
-  const { response, checkboxChecked } = await dialog.showMessageBox({
-    type: 'question',
-    buttons: ['Splat', 'Molten', 'Ink', 'Mixed'],
-    defaultId: 0,
-    title: 'Choose Visualization',
-    message: 'Which visualization would you like to use?',
-    detail: 'Splat: fluid simulation. Molten: reflective shader. Ink: Dark fluid with washed contours. Mixed: spatial blend.',
-    checkboxLabel: 'Performance Mode (Molten only)',
-    checkboxChecked: false
-  });
-
-  const shader = ['splat', 'molten', 'ink', 'mixed'][response];
-  const usePerfMode = checkboxChecked;
-
-  createWindow(config, origin, shader, usePerfMode);
+  createWindow(config, origin);
 
   // Handle macOS-specific behavior for re-creating a window.
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(config, origin, shader, usePerfMode);
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(config, origin);
   });
 }).catch((err) => {
   console.error('Startup failed:', err);

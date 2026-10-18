@@ -5,10 +5,10 @@ The JSON Schemas in this directory (draft 2020-12) are the single source of trut
 | Message | Schema | Producer | Transport | Consumers |
 |---|---|---|---|---|
 | `frame` | `frame.schema.json` | Python motion producer (`cobeart/packagesender/sender.py`) | Socket.IO `/ingest`, event `frame` | Hub (`cobeart-app/electron/main.js`) |
-| `frame` (merged) | `frame.schema.json` | Hub | Socket.IO `/viewer`, event `frame` | `public/fluid-bridge.js`, `public/composite/composite.js` |
+| `frame` (merged) | `frame.schema.json` | Hub | Socket.IO `/viewer`, event `frame` | `public/host/bridge.js` |
 | `audio_metrics` | `audio_metrics.schema.json` | Python audio producer (`cobeart/audiocapture/capture.py` via `emitter.py`) | Socket.IO `/audio`, event `audio_metrics` | Hub, which embeds it as `frame.audio` |
-| `splat` | `splat.schema.json` | `public/fluid-bridge.js` | `window.postMessage`, `type: "splat"` | `public/fluid/script.js`, `public/molten/molten.js`, `public/ink/ink.js` |
-| `audio` (bridge) | `audio_metrics.schema.json` (the `audio` field) | `public/fluid-bridge.js` | `window.postMessage`, `{ type: "audio", audio }` | `public/fluid/script.js` |
+| `splat` | `splat.schema.json` | `public/host/bridge.js` | `window.postMessage`, `type: "splat"` | `public/worlds/splat/script.js` |
+| `audio` (bridge) | `audio_metrics.schema.json` (the `audio` field) | `public/host/bridge.js` | `window.postMessage`, `{ type: "audio", audio }` | `public/worlds/splat/script.js` |
 
 ## Rules
 

@@ -145,7 +145,7 @@ test('serves the frontend config at /config.json and injects it into every HTML 
   assert.deepEqual(await (await fetch(`${baseUrl}/config.json`)).json(), FRONTEND_CONFIG);
 
   const injection = `<script>window.__COBEART_CONFIG__=${JSON.stringify(FRONTEND_CONFIG)};</script>`;
-  for (const page of ['/', '/index.html', '/fluid/', '/molten/', '/ink/', '/composite/']) {
+  for (const page of ['/', '/index.html', '/host/', '/worlds/splat/']) {
     const html = await (await fetch(`${baseUrl}${page}`)).text();
     assert.ok(html.includes(injection), `${page} has no injected config`);
     assert.ok(html.indexOf(injection) < html.indexOf('<script', html.indexOf(injection) + 1), `${page}: config is not first`);

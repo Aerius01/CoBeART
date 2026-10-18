@@ -2,7 +2,7 @@
 
 Source: `ARCHITECTURE_REVIEW.md` (2026-10-03). Section refs like (§3.2.A) point into that review.
 
-**Status (2026-10-17):** Phases 0 to 4 are done. Phase 4 is merged into `main` (pushed) and CI is green, so the refactor is complete. This file is now the backlog (Deferred) and decision log. Earlier phases added **Carry-over from Phase 1/2/3** notes to later WPs: pass them to the agent with the WP block.
+**Status (2026-10-18):** Phases 0 to 4 are done (the original refactor). Phases 5 to 7 (module separation, one contract, swappable sources, Splat only) are agreed and scheduled; see "Foundation phases" below. This file is the backlog (Deferred) and decision log. Earlier phases added **Carry-over from Phase N** notes to later WPs: pass them to the agent with the WP block.
 
 ## How this roadmap is meant to run
 
@@ -343,7 +343,175 @@ Depends on everything above.
 
 ---
 
+## Foundation phases (5 to 7): module separation, one contract, swappable sources
+
+Agreed with the human on 2026-10-18 in a design interview. Goal: audio, input and visuals are independent modules; every world receives the same contract and cannot tell where input came from (OptiTrack on site, the mouse or the simulator at home); worlds never mix; Splat is the only world kept.
+
+### Decisions D10-D19
+
+| ID | Decision |
+|---|---|
+| D10 | **Splat is the only world.** Molten, Ink and Composite are deleted with everything that exists only for them: the visualization dialog, `frontend.composite`, the `cursor` message path, the `moltenFrame`/`inkFrame` bridge lookups. Composite's "mixing worlds" is not wanted: one world runs at a time. |
+| D11 | **Module layout follows the architecture.** Python: `cobeart/input/optitrack/` (NatNet, transform, role mapping, sender; was `optitrackclient/` + `packagesender/`), `cobeart/audio/` (was `audiocapture/`), `cobeart/simulator/`, `cobeart/settings/`, and `cobeart/common/` for code both producers share (`StrictJson`). `cobeart.audio` and `cobeart.input` never import each other; the simulator imports neither. Console script names do not change. Frontend: `public/host/` (host page, bridge, border toggle), `public/sources/` (browser input sources), `public/worlds/<name>/` (one folder per world, Splat's backgrounds inside it). |
+| D12 | **One contract per side of the hub.** Sources send `pose_frame` (pose only: no velocities, no audio, no source tag) on `/ingest`. The hub sends `frame` and `audio` on `/viewer`, and the bridge posts the very same objects to the world (`{type: 'frame', frame}`, `{type: 'audio', audio}`). Worlds only ever see `frame` and `audio`, whatever the source. `splat.schema.json` is deleted; `type: "optitrack"` is removed. All schemas move to `schemaVersion: 2`. |
+| D13 | **Bodies are keyed by role, not ID.** `bodies` is an object keyed by role, so a role occurs at most once by construction (one performer). Roles are a closed enum in the schema: `left_hand`, `right_hand`, `head`, `chest_front`, `chest_back`, `left_foot`, `right_foot`, `stick`. Objects get names, not a generic `object` role. Adding a role is a version bump. `ID` is removed from the contract. A missing role key means that body is not tracked in that frame. |
+| D14 | **The hub computes derived motion values.** Velocities, angular velocity, `abs_vel` and `norm_abs_vel` are computed in the hub (a Node port of `MetricsTracker`, per role) from the **source clock**: `pose_frame.source_time_s` (seconds, monotonic, arbitrary epoch per source: mocap frame time, `performance.now()/1000`, simulator time). State for a role resets on first sighting, a gap above `metrics.max_gap_s`, or a clock going backwards (as today). The outgoing `frame.timestamp` is hub receipt time (epoch ms). The Python metrics code and the simulator's own velocity code are deleted. |
+| D15 | **Audio is its own stream end to end.** The hub validates `audio_metrics`, stamps its receipt `timestamp`, and emits it on `/viewer` as event `audio`; it never merges audio into frames, so audio reaches worlds with no motion source running. The hub replays nothing to a new viewer (no last frame, no last audio). The bridge posts audio on change, and posts `{type: 'audio', audio: null}` once when the latest audio is older than `frontend.audio_max_age_ms` (stale policy moves from hub to bridge). |
+| D16 | **Sources.** OptiTrack maps Motive streaming IDs to roles with `tracking.roles` in the YAML (unmapped IDs are dropped, warned once; `max_num_objects` and `body_map.json` go). Mouse (D17) and both simulators (`start-optitrack-client --simulate` exercises the NatNet adapter; `start-simulator` is the headless scenario/fault/audio source) send `pose_frame`. The `shuffled` scenario is dropped (order no longer exists). |
+| D17 | **Mouse source** (`public/sources/mouse.js`, a layer in the host page above the world, enabled by `source=mouse`). A body exists only while a mouse button is held; it acts as `sources.mouse.role` (default `right_hand`) with a fixed identity quaternion. z starts at `sources.mouse.z_initial_mm`, each wheel notch moves it by `z_step_mm`, clamped to `arena.z`, and it stays until the wheel moves again. While held it sends `pose_frame` at `sources.mouse.rate_hz` (continuous like mocap, so a still mouse reads as still, not as a dropout); on release it sends one frame with no bodies. An always-on readout (mouse mode only) shows role and z. Operator keys keep working: the host forwards `keydown` into the world iframe (same origin). |
+| D18 | **Canonical top-down view.** Worlds that draw the arena in 2D use one projection, so screen-based sources line up: the viewer looks down on the arena with arena **x_max at the left edge** and **y_min at the top edge** (Splat's existing mapping in `handleSplatMessage`). The mouse source applies its inverse over the host viewport. Recorded in `contract/CONTRACT.md`. A world may ignore it, at the cost of the mouse not lining up. |
+| D19 | **Worlds and launcher.** A world is any `public/worlds/<name>/index.html` that listens for `frame`/`audio` messages; the hub discovers them and serves `/worlds.json`. The host page `/host/?world=<name>&source=live|mouse` embeds that world in an iframe and runs the bridge (and the mouse layer for `source=mouse`). The Electron launcher and the browser index page (`/`) both choose world and source. Worlds own their look: Splat's colour moves into Splat (`frontend.splat_color` goes). Splat drops its own mouse, touch, spacebar and `cursor` input and keeps operator keys (`P` pause, `G` backgrounds; `B` border is the host's). |
+
+Later option, not scheduled: move Splat's gesture patterns (clap, jump, hands-up...) out of the world into a gesture module that emits higher-level events as their own stream.
+
+### Execution model (Phases 5-7)
+
+- **Roles:** the master (Opus, holds the design context) writes all roadmap and WP documentation, briefs and supervises agents, and is the gatekeeper (diff review, re-running every success test, the phase gate). Every WP is implemented by one agent on the model its WP names, with `isolation: "worktree"`. Agents never edit `ROADMAP.md` or `CLAUDE.md`; the master updates both at each phase end.
+- The master protocol, worktree caveats and shared conventions above still apply, with these updates: integration branches are `refactor/phase-5` etc.; ports are 3500 + WP number (5.1 → 3501, 6.0 → 3600, ...); the console-script names in a worktree mean `python -m <module>` with the **new** module paths once Phase 5 is merged; after Phase 5 merges, the master re-runs `pip install -e ".[test,viz]"` in the main checkout (entry points moved).
+- **Success tests:** each WP lists **Must pass** checks. They are the agent's definition of done; the agent reports each one's literal result, and the master re-runs them before cherry-picking.
+- **Intermediate breakage:** Phase 6 changes the contract on both sides at once (the contract rule: old and new versions are never accepted side by side). WP 6.0 lands the schemas and config first; 6.1-6.4 then run in parallel against it. Individual 6.x commits may fail cross-WP tests; the Phase 6 gate is what must be green.
+
+---
+
+## Phase 5: Cleanup and layout (2 parallel WPs)
+
+Pure deletion and moves; no behaviour change for Splat, the hub or the producers. The contract is untouched (still v1).
+
+**Baseline at `bab2e43` (main):** pytest 165 passed, `npm test` 13/13, fitness clean.
+
+### WP 5.1: Remove the other worlds and move the frontend into host/worlds
+- **Model:** Sonnet. Deletion and file moves; the risk is a dangling reference.
+- **Owns:** `cobeart-app/public/**` except `body_map.json` (stays at `public/body_map.json` until Phase 6; the simulator reads that path), `cobeart-app/electron/main.js`, `cobeart-app/electron/config.js`, `cobeart-app/test/**`, `config/cobeart.yaml`, `config/cobeart.schema.json`, `contract/CONTRACT.md` (consumer rows only), `contract/splat.schema.json` (description wording only).
+- **Scope:**
+  - Delete `public/molten/`, `public/ink/`, `public/composite/`. Remove `frontend.composite` from the YAML, its schema and `frontendConfig`; remove the `cursor` handler (`handleCursorMessage` and its dispatch) from Splat; drop `moltenFrame`/`inkFrame` and the "no iframe found, create one" fallback from the bridge.
+  - Move with `git mv`: `public/fluid/` → `public/worlds/splat/`; `public/backgrounds/` → `public/worlds/splat/backgrounds/`; `public/index.html` → `public/host/index.html` (iframe `src="/worlds/splat/index.html"`; drop the leftover "Live Tracking Debug" heading, badges and `<pre id="out">` if nothing reads them); `fluid-bridge.js` → `public/host/bridge.js`; `border-control.js` and `shared-border.css` → `public/host/`. Fix every path that referenced the old locations (script and import paths in Splat, the registry, the host page).
+  - New `public/index.html`: a minimal page that redirects to `/host/` (Phase 7 replaces it with the launcher).
+  - `electron/main.js`: no dialog; load `/host/` directly. DevTools follow `debug` (the ink exception goes).
+  - Do not touch `fluid/script.js` beyond the `cursor` removal and path fixes (Phase 6 rewrites its input).
+- **Must pass:**
+  1. `npm test` green (update any test that referenced removed config keys or pages).
+  2. `node scripts/fitness.mjs` 0 violations (the `headDepth` allowlist line matches on content, so the move is fine).
+  3. `grep -rniE "molten|ink/|inkFrame|composite|cursor|fluid-bridge|/fluid/" cobeart-app/public cobeart-app/electron cobeart-app/server.js config contract` returns nothing (word "ink" in unrelated prose excepted; report any hit you keep and why).
+  4. Playwright against `PORT=3501 node server.js` plus `start-simulator --scenario orbit --audio beat --url http://127.0.0.1:3501 --duration 20`: `/` lands on `/host/`, Splat paints the orbiting hands, background toggle (`G`) still cycles, no console errors. Screenshot attached.
+  5. `pytest tests/e2e` green (the hub still serves the same contract).
+
+### WP 5.2: Python packages follow the module boundaries
+- **Model:** Sonnet. Mechanical moves plus one new fitness rule.
+- **Owns:** `cobeart/**`, `tests/**`, `pyproject.toml`, `.flake8`, `.github/workflows/ci.yml`, `scripts/fitness.mjs`, `scripts/fitness.test.mjs`.
+- **Scope:**
+  - `git mv`: `cobeart/optitrackclient/` and `cobeart/packagesender/` → `cobeart/input/optitrack/` (one package; tests merge into its `tests/`; `contract.py` test helper moves with them); `cobeart/audiocapture/` → `cobeart/audio/`. `StrictJson` moves to `cobeart/common/strict_json.py` and both the sender and the audio emitter import it from there. Keep the vendored NatNet files byte-identical (only their internal import lines change).
+  - Update every import, logger name in tests (`caplog` logger strings), `monkeypatch.setattr` paths, `[project.scripts]` (same script names, new module paths), `.flake8` excludes, the CI comment path, `tests/e2e` imports and `python -m` invocations.
+  - `fitness.mjs`: retarget `no-print-hot-path` to `cobeart/input/optitrack/sender.py`, `metrics.py` and `transform.py`; add rule **`module-boundaries`**: a file under `cobeart/audio/` must not import `cobeart.input`; under `cobeart/input/` must not import `cobeart.audio`; under `cobeart/simulator/` must import neither. Add violating and clean cases to `fitness.test.mjs`.
+  - Do not change behaviour; delete nothing but the emptied packages.
+- **Must pass:**
+  1. `pytest` (whole repo) green with the same count as baseline (165), none skipped.
+  2. `flake8 cobeart tests` clean.
+  3. `node scripts/fitness.mjs` 0 violations; `node --test scripts/fitness.test.mjs` green, including the new rule's cases.
+  4. `python -m cobeart.input.optitrack.start_client --simulate --url http://127.0.0.1:3502` streams to a hub on 3502 (`curl /health` shows ingest 1 and a fresh `lastFrameAge`), and Ctrl+C exits 0.
+  5. `python -m cobeart.audio.capture --no-emit` starts (device prompt or meter) without import errors; `grep -rn "optitrackclient\|packagesender\|audiocapture" --include=*.py --include=*.toml --include=*.mjs --include=*.yml --include=.flake8 .` returns nothing.
+
+**Phase 5 gate:** all Must-pass checks re-run on the merged head; pytest 165, `flake8 cobeart tests`, `npm test`, fitness and its tests; `pip install -e ".[test,viz]"` in the main checkout, then `start-optitrack-client --simulate` and `npm start` show Splat painting (human, port 3000).
+
+---
+
+## Phase 6: Contract v2 (WP 6.0 first, then 4 parallel WPs)
+
+Depends on Phase 5. Implements D12-D16 and the Splat side of D19.
+
+### WP 6.0: Contract v2 schemas and config (runs alone, before 6.1-6.4)
+- **Model:** Opus. Every other Phase 6 WP codes against this; precision matters more than speed.
+- **Owns:** `contract/**`, `config/cobeart.yaml`, `config/cobeart.schema.json`, `cobeart/settings/**`, `cobeart-app/electron/config.js`, `cobeart-app/test/config.test.js`, `tests/contract/` (new).
+- **Scope:**
+  - `pose_frame.schema.json` (new): `{schemaVersion: 2, source_time_s: number >= 0, bodies: {<role>: {x, y, z, qx, qy, qz, qw}}}`; positions integer mm as today; `bodies` may be empty; closed everywhere.
+  - `frame.schema.json`: `{schemaVersion: 2, timestamp: epoch ms (hub receipt), bodies: {<role>: {x, y, z, qx..qw, vx, vy, vz, wx, wy, wz, abs_vel, norm_abs_vel}}}`; no `type`, no `audio`, no `ID`. The role enum is defined once (`$defs`) and referenced by `pose_frame`; the pose fields are defined once and extended for `frame` (as `splat` extends `rigidBodyFields` today). Keep the existing field descriptions (units, D5 orientation), minus ID and merge wording.
+  - `audio_metrics.schema.json`: `schemaVersion` 2; document that on `/viewer` it carries the hub `timestamp` (required there; express it as the `audio` message shape however is cleanest, e.g. a `viewer_audio` `$def`).
+  - Delete `splat.schema.json`. Rewrite `CONTRACT.md`: one shape per side of the hub, the producer/consumer table (sources: OptiTrack sender, simulator, mouse source; hub; bridge; worlds), the bridge messages `{type:'frame', frame}` and `{type:'audio', audio | null}`, the role rule, and D18 (canonical top-down view).
+  - Config, final shape: `tracking.roles` (Motive ID → role, default: the current `body_map.json` mapping), remove `tracking.max_num_objects`; `metrics.max_gap_s: 0.25` added (hub reads `metrics.*` from now on); `hub.audio_max_age_ms` → `frontend.audio_max_age_ms` (drop the `hub` section if empty); remove `frontend.splat_color`; add `sources.mouse: {role: right_hand, z_initial_mm: 1200, z_step_mm: 50, rate_hz: 60}`. Role values validated against the enum in both loaders. Python `Settings` and Node `frontendConfig` reflect this (frontend gets `arena`, `bridge_framerate`, `audio_max_age_ms`, `sources`, `debug`); Node exports the hub-side values (`metrics`) for WP 6.1.
+- **Must pass:**
+  1. `tests/contract/test_schemas.py` (new): for each schema, valid fixtures pass and these fail: wrong `schemaVersion`, unknown role, extra field on a body, `ID` present, `audio` inside a frame, velocity fields in a `pose_frame`, `timestamp` in seconds, non-unit-range quaternion component.
+  2. Config tests on both sides: the shipped YAML loads; an unknown role in `tracking.roles` or `sources.mouse.role` fails with an error naming the key; a removed key (`max_num_objects`) present fails as unknown.
+  3. `flake8` clean on owned files. (Other suites are expected to fail until 6.1-6.4 land; list which ones fail and why in the report.)
+
+### WP 6.1: Hub velocity stage and separate streams
+- **Model:** Opus. Numerical port plus the hub's core loop.
+- **Owns:** `cobeart-app/electron/hub.js`, `cobeart-app/electron/motion.js` (new: the velocity stage), `cobeart-app/server.js`, `cobeart-app/electron/main.js` (createHub arguments only), `cobeart-app/test/**` except `config.test.js`.
+- **Scope:** `/ingest` validates `pose_frame` (v2) and emits exactly one `/viewer` `frame` per valid pose_frame, with derived fields from `motion.js` (port of `MetricsTracker`: per-role state, source-clock dt, `max_gap_s` reset, clock-backwards reset, `min_dt_s` hold, history-window max hold, `max_vel` cap, quaternion angular velocity; read the Python at the phase base including `cobeart/input/optitrack/tests/test_metrics.py`). `/audio` validates and emits `audio` on `/viewer` with the hub `timestamp`. No merge, no replay to new viewers, no duplicate-ID or max-bodies checks (the schema covers both). `/health` keeps client counts and ages. Non-finite derived values must not be emitted (drop the frame with a rate-limited log).
+- **Must pass (node tests):**
+  1. Every case of the Python `test_metrics.py` ported and passing against `motion.js`.
+  2. Two pose_frames for `right_hand` with `source_time_s` 0.1 s apart and x 100 mm apart, sent back to back: the second `/viewer` frame has `vx` ≈ 1000 mm/s (proves source clock, not receipt time).
+  3. A body moving then still for a full history window reaches `norm_abs_vel` 0; a gap > `max_gap_s` resets velocity to 0.
+  4. Rejected and never forwarded: v1 payload, unknown role, velocity fields in a pose_frame, NaN packet.
+  5. Audio arrives on `/viewer` as `audio` with no `/ingest` client connected; frames carry no `audio` key.
+  6. A viewer connecting after frames and audio were sent receives nothing until the next ingest/audio message.
+  7. `npm test` green; fitness clean.
+
+### WP 6.2: Python producers send pose_frame
+- **Model:** Sonnet. Mostly deletion and reshaping along a fixed spec.
+- **Owns:** `cobeart/**` except `cobeart/settings/**`; `cobeart-app/public/body_map.json` (delete it).
+- **Scope:** `PayloadSender` builds `pose_frame` (roles from `tracking.roles`, `source_time_s` = mocap frame time; keeps send-rate throttling and the finite check). `FramePipeline` drops unmapped IDs with one warning each (replacing `max_num_objects`). Delete `metrics.py` and its tests (6.1 ports them first; read-only for 6.1). `SyntheticNatNetSource` default paths use Motive IDs that `tracking.roles` maps (hands and head as today). Simulator: scenarios produce role-keyed pose_frames with `source_time_s`; delete its velocity code and `load_body_map`/`BODY_MAP_PATH` (roles come from settings); drop `shuffled`; `faults` still produce malformed / wrong-version (now v1) / NaN payloads. Audio: `schemaVersion` 2 in `capture.py` and the simulator's audio messages.
+- **Must pass:**
+  1. pytest under `cobeart/` green; every payload a test produces validates against `pose_frame` (motion) or `audio_metrics` v2 (audio).
+  2. A test that a Motive ID missing from `tracking.roles` is dropped and logged once; a mapped ID arrives under its role.
+  3. `grep -rnE "\bvx\b|abs_vel|norm_abs_vel|MetricsTracker|body_map|max_num_objects" cobeart` returns nothing outside comments that explain the hub owns them.
+  4. `flake8 cobeart` clean; fitness clean.
+
+### WP 6.3: Bridge posts whole frames; Splat reads roles
+- **Model:** Opus. `worlds/splat/script.js` is ~2700 lines with a dozen gesture patterns keyed on body IDs; the rewrite must keep every pattern's behaviour.
+- **Owns:** `cobeart-app/public/host/**`, `cobeart-app/public/worlds/**`.
+- **Scope:**
+  - Bridge: listens for `frame` and `audio` on `/viewer`; every tick posts the latest unposted frame as `{type: 'frame', frame}`; posts `{type: 'audio', audio}` on change and `{type: 'audio', audio: null}` once when the latest audio is older than `frontend.audio_max_age_ms` (re-arms when audio returns). Posts to the world iframe only (no self-post: nothing at host level consumes it). The debug overlay lists bodies by role.
+  - Splat: one `frame` handler that iterates `frame.bodies` by role; every `bodyPartsIndex[...]`/`m.ID` lookup becomes a role key; the object logic uses `stick`; per-body pointers keyed by role; colour from a constant in Splat (current `[1.0, 0.6, 0.2]`); `latestRigidBodies` becomes the latest `frame.bodies` (backgrounds' `ctx.rigidbodies` → `ctx.bodies` keyed by role; update the registry doc comment and any background that reads it). `audio: null` clears `latestAudio`. Delete the mouse, touch, spacebar-splat handlers; keep `P` and `G`. Single-body globals (`latestNormVel`, `latestAngVel`, `computeVelocityDissipation` reading `zdict[1]`, i.e. Motive ID 1 = `right_hand`) keep their current meaning by role.
+- **Must pass:**
+  1. `grep -nE "\.ID\b|bodyPartsIndex|body_map|mousedown|touchstart|'splat'|\"splat\"" public/worlds/splat/script.js public/host/*.js` returns nothing.
+  2. A table in the report: each old ID/name reference (file:line at the phase base) → its role-key replacement.
+  3. Playwright against `PORT=3603 node server.js` (WP 6.1 is not merged in this worktree, so drive the page with a scratch script that `postMessage`s v2 `frame`/`audio` messages into the world iframe, built from the 6.0 schemas): hands paint; a `stick` near `right_hand` turns yellow (pattern 10); `audio: null` causes no error; no console errors. Screenshots attached.
+  4. A scratch Node or browser check that a captured bridge message validates against `frame.schema.json` (and the audio one against the viewer audio shape).
+
+### WP 6.4: End-to-end suite and frontend fitness rule
+- **Model:** Sonnet. The harness exists; this re-targets it to v2.
+- **Owns:** `tests/e2e/**`, `scripts/fitness.mjs`, `scripts/fitness.test.mjs`.
+- **Scope:** Update the harness to watch `/viewer` `frame` and `audio` events separately, and rewrite the tests to v2. Add fitness rule **`worlds-receive-only`**: files under `cobeart-app/public/worlds/` must not contain `io(`, `socket.io`, `/viewer` or `/ingest` (worlds only receive postMessages).
+- **Must pass** (against the merged Phase 6 head; in the worktree, write them against the 6.0 schemas and expect them to fail until 6.1/6.2 land; the master re-runs them after merge):
+  1. Every `/viewer` frame validates against `frame` v2 and every `audio` against the viewer audio shape.
+  2. `--scenario none --audio beat`: audio arrives on `/viewer`, no frames. `--scenario orbit --audio none`: frames arrive without any `audio` key.
+  3. Every `--fault` and a v1 payload never reach `/viewer`.
+  4. `missing-body`: the missing role is absent from `bodies` in the affected frames.
+  5. Orbit speed check: a simulated orbiting body's `abs_vel` matches the scenario's analytic speed (2πr/T) within 5 % (proves the hub port end to end).
+  6. A body that moves then stops reaches `norm_abs_vel` 0 through the real `FramePipeline`, `PayloadSender` and hub.
+  7. `--simulate` CLI streams frames whose role keys are the `tracking.roles` values of the synthetic IDs.
+  8. A viewer connecting mid-stream gets no frame older than its connect time.
+  9. `pytest tests/e2e` 5 times in a row green, and under `taskset -c 0`; fitness and its tests green (new rule has violating and clean cases).
+
+**Phase 6 gate:** whole-repo `pytest`, `flake8 cobeart tests`, `npm test`, fitness + tests, `tests/e2e` 5x; CI green on push. Human (port 3000): `npm start` with `start-optitrack-client --simulate`, then with `start-simulator --scenario hands --audio beat`; Splat paints; the debug overlay (`?debug`) shows roles.
+
+---
+
+## Phase 7: Launcher and mouse source (2 parallel WPs)
+
+Depends on Phase 6. Implements D17-D19.
+
+### WP 7.1: World discovery and launcher
+- **Model:** Sonnet.
+- **Owns:** `cobeart-app/electron/hub.js` (the `/worlds.json` route only), `cobeart-app/electron/main.js`, `cobeart-app/public/index.html`, `cobeart-app/test/worlds.test.js` (new).
+- **Scope:** `/worlds.json` lists the subfolders of `public/worlds/` that contain an `index.html`, sorted, as `{worlds: [{name}]}`. The browser `/` page fetches it and lets you pick a world and a source (Live / Mouse), then opens `/host/?world=<name>&source=<live|mouse>`. Electron: a dialog with one button per world plus a "Mouse input" checkbox, then loads the same URL.
+- **Must pass:** node test: `/worlds.json` with a temp public dir containing two worlds and one folder without `index.html` lists exactly the two; `npm test` green; Playwright: `/` lists `splat` and navigates to the right URL for both sources; screenshot.
+
+### WP 7.2: Host page selects the world; mouse source
+- **Model:** Sonnet.
+- **Owns:** `cobeart-app/public/host/**`, `cobeart-app/public/sources/**` (new), `cobeart-app/test/mouse.test.js` (new).
+- **Scope:** The host page reads `world` (validated against `/worlds.json`; unknown or missing shows a visible error listing the valid names, no silent default) and `source`. For `source=mouse` it loads `sources/mouse.js` (D17): a transparent layer over the iframe capturing pointer and wheel; screen → arena per D18 (inverse of Splat's mapping, read from `worlds/splat/script.js`); its own Socket.IO client on `/ingest` sending `pose_frame` v2; the readout; `keydown` forwarded into the iframe window. Keep the screen → arena mapping and the z update as pure exported functions so they are testable.
+- **Must pass:**
+  1. Node test: mapping corners (top-left → `(x_max, y_min)`, bottom-right → `(x_min, y_max)`), z clamped at both arena ends, wheel steps accumulate; built pose_frames validate against the schema (held and released forms).
+  2. Playwright on `PORT=3702 node server.js`, `/host/?world=splat&source=mouse`: a drag paints under the cursor (screenshot with cursor position noted); releasing stops painting; wheel changes the readout z; `G` cycles backgrounds while the mouse layer is active; `/health` shows one ingest client.
+  3. `/host/?world=nope` shows the error; `npm test` green; fitness clean.
+
+**Phase 7 gate:** Phase 6 gate plus: human runs `npm start`, picks Splat + Mouse, paints, scrolls z (hand-drop radius pattern visibly changes below 1800 mm), and picks Splat + Live with `start-simulator`. CLAUDE.md updated by the master (layout, commands, contract, testing workflow) and every command in it re-run.
+
+---
+
 ## Deferred (not scheduled)
+
+Items that Phases 5-7 resolve or make moot (prune when the phase merges): duplicate molten/ink handlers and the triple bridge in composite (5.1); composite `z_threshold` and `tryBindSources` empty catches (5.1); `/viewer` audio bandwidth and the stale `lastFrame` replay (6.1); `ctx.rigidbodies` never pruned (6.3); stale CONTRACT.md hub consumer and `fluid-bridge.js` header (5.1/6.0); `max_num_objects`-related checks (6.0/6.2).
 
 - **Record and replay real sessions.** At the next session with the real system, record raw NatNet rigid-body callbacks (ID, position, quaternion, timestamp) to a file, and add a `ReplaySource` that plays them back through the `MotionSource` seam from WP 2.2. That replaces synthetic motion with real movement for regression tests, and is the only offline way to check that the D5 orientation convention matches real performers.
 - **On-site validation spikes** (cannot be done offline, per §5): NatNet multicast from the Debian box, and an end-to-end latency check with real bodies.

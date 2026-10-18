@@ -8,7 +8,7 @@ const path = require('path');
 
 // The hub (Express + Socket.IO) runs directly within the main process (self-contained).
 const { createHub } = require('./hub');
-const { loadConfig, resolvePort, frontendConfig } = require('./config');
+const { loadConfig, resolvePort, hubConfig, frontendConfig } = require('./config');
 
 let hub;
 
@@ -18,8 +18,7 @@ async function startHttpServer(config, port) {
     port,
     host: config.network.socketio.host,
     publicDir: path.join(__dirname, '..', 'public'),
-    audioMaxAgeMs: config.hub.audio_max_age_ms,
-    maxBodies: config.tracking.max_num_objects,
+    metrics: hubConfig(config).metrics,
     frontendConfig: frontendConfig(config)
   });
 }

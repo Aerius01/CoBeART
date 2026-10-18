@@ -9,7 +9,7 @@ from cobeart.audio.utils import select_audio_device
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-AUDIO_SCHEMA_VERSION: int = 1
+AUDIO_SCHEMA_VERSION: int = 2
 
 
 class AudioRecorder(Protocol):

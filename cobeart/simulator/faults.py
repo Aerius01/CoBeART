@@ -5,15 +5,15 @@ from typing import Any
 Payload = dict[str, Any]
 Fault = Callable[[Payload], Payload]
 
-WRONG_SCHEMA_VERSION: int = 2
+WRONG_SCHEMA_VERSION: int = 1  # the pre-pose_frame contract version
 
 
 def _malformed(payload: Payload) -> Payload:
     """Drop a required field and corrupt another field's type."""
     broken: Payload = dict(payload)
-    if "rigidbodies" in broken:
-        del broken["rigidbodies"]
-        broken["type"] = 42
+    if "bodies" in broken:
+        del broken["bodies"]
+        broken["source_time_s"] = "now"
     else:
         del broken["rms"]
         broken["peak"] = "loud"
@@ -25,14 +25,15 @@ def _wrong_version(payload: Payload) -> Payload:
 
 
 def _nan(payload: Payload) -> Payload:
-    """NaN in a coordinate (frame) or in rms (audio); neither is valid JSON for the hub."""
+    """NaN in a coordinate (pose_frame; in the timestamp if no body is present) or in rms (audio); not valid JSON."""
     broken: Payload = dict(payload)
-    if "rigidbodies" in broken:
-        bodies: list[Payload] = [dict(body) for body in broken["rigidbodies"]]
+    if "bodies" in broken:
+        bodies: dict[str, Payload] = {role: dict(body) for role, body in broken["bodies"].items()}
         if bodies:
-            bodies[0]["x"] = float("nan")
-            bodies[0]["vx"] = float("nan")
-        broken["rigidbodies"] = bodies
+            bodies[next(iter(bodies))]["x"] = float("nan")
+        else:
+            broken["source_time_s"] = float("nan")
+        broken["bodies"] = bodies
     else:
         broken["rms"] = float("nan")
     return broken

@@ -1,14 +1,16 @@
-"""Frozen payload models mirroring contract/frame.schema.json and contract/audio_metrics.schema.json."""
+"""Frozen payload models mirroring contract/pose_frame.schema.json and contract/audio_metrics.schema.json."""
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
-SCHEMA_VERSION: int = 1
+from cobeart.settings.config import Role
+
+SCHEMA_VERSION: int = 2
 
 
 @dataclass(frozen=True, slots=True)
-class RigidBody:
-    """One tracked body in arena coordinates (mm, unit quaternion, mm/s, deg/s)."""
-    ID: int
+class PoseBody:
+    """One tracked body's pose in arena coordinates (integer mm, unit quaternion). Velocities are the hub's job."""
     x: int
     y: int
     z: int
@@ -16,31 +18,21 @@ class RigidBody:
     qy: float
     qz: float
     qw: float
-    vx: float
-    vy: float
-    vz: float
-    wx: float
-    wy: float
-    wz: float
-    abs_vel: float
-    norm_abs_vel: float
 
 
 @dataclass(frozen=True, slots=True)
-class Frame:
-    """A motion frame as sent by the producer on /ingest (never carries audio)."""
-    timestamp: float  # epoch milliseconds
-    rigidbodies: tuple[RigidBody, ...]
+class PoseFrame:
+    """A pose_frame as sent by the producer on /ingest: bodies keyed by role, clocked by scenario time."""
+    source_time_s: float  # scenario time in seconds, from 0
+    bodies: Mapping[Role, PoseBody]
     schemaVersion: int = SCHEMA_VERSION
-    type: str = "optitrack"
 
     def to_payload(self) -> dict[str, Any]:
         """JSON-ready dict with the field set the contract defines."""
         return {
             "schemaVersion": self.schemaVersion,
-            "type": self.type,
-            "timestamp": self.timestamp,
-            "rigidbodies": [asdict(body) for body in self.rigidbodies],
+            "source_time_s": self.source_time_s,
+            "bodies": {role: asdict(body) for role, body in self.bodies.items()},
         }
 
 

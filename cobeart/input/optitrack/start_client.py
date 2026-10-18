@@ -32,7 +32,6 @@ from typing import Any, Protocol
 import socketio
 
 from cobeart.common.strict_json import StrictJson
-from cobeart.input.optitrack.metrics import MetricsTracker
 from cobeart.input.optitrack.sender import PayloadSender
 
 from cobeart.input.optitrack.NatNetClient import NatNetClient
@@ -40,7 +39,7 @@ import cobeart.input.optitrack.DataDescriptions as DataDescriptions
 import cobeart.input.optitrack.MoCapData as MoCapData
 from cobeart.input.optitrack.tracked_bodies import apply_rigid_body
 from cobeart.input.optitrack.transform import ArenaPose, Quaternion, Vec3
-from cobeart.settings.config import ConfigError, Settings, load_settings, validate_hub_url
+from cobeart.settings.config import ConfigError, Role, Settings, load_settings, validate_hub_url
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -63,16 +62,18 @@ class MotionSource(Protocol):
 
 
 class FramePipeline:
-    """Collects the bodies of one mocap frame and hands the frame to the sender with its mocap timestamp.
+    """Collects the bodies of one mocap frame and hands the frame to the sender, keyed by role, with its timestamp.
+
+    `roles` maps Motive streaming IDs to contract roles (`tracking.roles`); bodies with an unmapped ID are dropped.
 
     Both callbacks run on the motion source's receive thread, rigid bodies first, then the frame. An exception in
     either is logged and sets `failure` instead of killing that thread; the main thread watches `failure` and exits.
     """
 
-    def __init__(self, sender: PayloadSender, max_num_objects: int, failure: threading.Event) -> None:
+    def __init__(self, sender: PayloadSender, roles: Mapping[int, Role], failure: threading.Event) -> None:
         self._sender: PayloadSender = sender
         self._failure: threading.Event = failure
-        self._max_num_objects: int = max_num_objects
+        self._roles: Mapping[int, Role] = roles
         self._bodies: dict[int, list[float]] = {}  # [x, y, z, qx, qy, qz, qw] in arena axes (see transform.py)
         self._dropped_ids: set[int] = set()  # so dropout and return are each logged once
         self._warned_ids: set[int] = set()
@@ -103,16 +104,16 @@ class FramePipeline:
             self._failure.set()
 
     def _store_rigid_body(self, new_id: int, position: Vec3, rotation: Quaternion, tracking_valid: bool) -> None:
-        if new_id < self._max_num_objects:
+        if new_id in self._roles:
             apply_rigid_body(self._bodies, self._dropped_ids, new_id, position, rotation, tracking_valid)
         elif new_id not in self._warned_ids:
             self._warned_ids.add(new_id)
-            logger.warning("Ignoring rigid body ID %d: IDs must be below max_num_objects (%d), see config/cobeart.yaml",
-                           new_id, self._max_num_objects)
+            logger.warning("Ignoring rigid body ID %d: it has no role in tracking.roles, see config/cobeart.yaml",
+                           new_id)
 
     def _send_frame(self, data_dict: FrameData) -> None:
-        bodies: dict[int, ArenaPose] = {
-            body_id: ArenaPose(position=(v[0], v[1], v[2]), orientation=(v[3], v[4], v[5], v[6]))
+        bodies: dict[Role, ArenaPose] = {
+            self._roles[body_id]: ArenaPose(position=(v[0], v[1], v[2]), orientation=(v[3], v[4], v[5], v[6]))
             for body_id, v in self._bodies.items()
         }
         self._sender.handle_frame(float(data_dict["timestamp"]), bodies)
@@ -385,14 +386,13 @@ def start(argv: Sequence[str] | None = None) -> None:
     failure = threading.Event()
     sender = PayloadSender(
         client=socketio.Client(reconnection=False, json=StrictJson),
-        tracker=MetricsTracker(max_vel=settings.metrics.max_vel, window_length=settings.metrics.history_window),
         url=args.url,
         framerate=settings.tracking.package_framerate,
         failure=failure,
     )
-    logger.info("Hub %s, package rate %.0f Hz, max %d bodies",
-                args.url, settings.tracking.package_framerate, settings.tracking.max_num_objects)
-    pipeline = FramePipeline(sender, settings.tracking.max_num_objects, failure)
+    logger.info("Hub %s, package rate %.0f Hz, roles %s",
+                args.url, settings.tracking.package_framerate, dict(settings.tracking.roles))
+    pipeline = FramePipeline(sender, settings.tracking.roles, failure)
     sender.connect()
     try:
         if args.simulate:

@@ -11,7 +11,7 @@ from cobeart.settings.config import ConfigError, Settings, load_settings, valida
 from cobeart.simulator.audio import SIGNALS, AudioConfig, TempoChange, build_audio_scenario, parse_tempo_change
 from cobeart.simulator.emitter import RunConfig, Simulator
 from cobeart.simulator.faults import FAULTS
-from cobeart.simulator.scenarios import MOTION_SCENARIOS, MotionConfig, build_motion_scenario, load_body_map
+from cobeart.simulator.scenarios import MOTION_SCENARIOS, MotionConfig, build_motion_scenario
 
 logger: logging.Logger = logging.getLogger("cobeart.simulator")
 
@@ -19,7 +19,7 @@ logger: logging.Logger = logging.getLogger("cobeart.simulator")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m cobeart.simulator",
-        description="Emit simulated OptiTrack frames (/ingest) and audio metrics (/audio) to a CoBeART hub.",
+        description="Emit simulated role-keyed pose_frames (/ingest) and audio metrics (/audio) to a CoBeART hub.",
     )
     parser.add_argument(
         "--scenario", choices=[*sorted(MOTION_SCENARIOS), "none"], default="orbit", help="motion scenario"
@@ -30,7 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration", type=float, default=None, help="seconds to run (default: until interrupted)")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed; the same seed gives the same stream")
     parser.add_argument("--url", default=None, help="hub base URL (default: from config or $COBEART_SOCKETIO_URL)")
-    parser.add_argument("--bodies", type=int, default=4, help="number of bodies for orbit, still, shuffled, edge")
+    parser.add_argument(
+        "--bodies", type=int, default=4, metavar="N",
+        help="number of bodies for orbit, still and edge: the first N roles of tracking.roles in Motive ID order",
+    )
     parser.add_argument("--bpm", type=float, default=120.0, help="tempo of the beat scenario")
     parser.add_argument(
         "--beat-jitter", type=float, default=0.0, metavar="MS", help="std dev of beat time jitter in ms"
@@ -57,9 +60,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     now: float = time.time()
     rate_hz: float = settings.tracking.package_framerate if args.rate is None else args.rate
-    motion_cfg: MotionConfig = MotionConfig.from_settings(
-        settings, load_body_map(), rate_hz=rate_hz, num_bodies=args.bodies, start_epoch_ms=now * 1000.0
-    )
+    try:
+        motion_cfg: MotionConfig = MotionConfig.from_settings(settings, num_bodies=args.bodies)
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
     tempo_changes: tuple[TempoChange, ...] = tuple(parse_tempo_change(text) for text in args.tempo_change)
     audio_cfg: AudioConfig = AudioConfig(
         sample_rate=settings.audio.sample_rate, chunk_size=settings.audio.chunk_size, rate_hz=args.audio_rate,

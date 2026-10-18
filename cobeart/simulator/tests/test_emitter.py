@@ -38,7 +38,7 @@ def _simulator(client: DroppingClient, fault: str | None) -> Simulator:
 
 def test_fault_run_ends_cleanly_when_the_hub_drops_the_connection(caplog: pytest.LogCaptureFixture) -> None:
     client = DroppingClient()
-    assert _simulator(client, "nan").run() == {"frame": 0}
+    assert _simulator(client, "nan").run() == {"pose_frame": 0}
     assert client.disconnected
     assert any("Hub dropped the connection" in r.getMessage() for r in caplog.records)
 

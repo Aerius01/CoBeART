@@ -4,25 +4,23 @@ import threading
 import time
 from collections.abc import Callable
 
-import numpy as np
 import pytest
 from socketio.exceptions import BadNamespaceError
 
 from cobeart.common.strict_json import StrictJson
 from cobeart.input.optitrack.transform import ArenaPose
 from cobeart.input.optitrack.sender import INGEST_NAMESPACE, PayloadSender
-from cobeart.input.optitrack.tests.contract import RecordingClient, frame_validator, make_tracker
+from cobeart.input.optitrack.tests.contract import RecordingClient
+from tests.contract.schemas import contract_validator
 
 MOCAP_HZ: float = 240.0
-EPOCH_S: float = 1_800_000_000.0
 
 
 def make_sender(
     client: RecordingClient, framerate: float = MOCAP_HZ, failure: threading.Event | None = None, **kwargs: float
 ) -> PayloadSender:
-    return PayloadSender(client, make_tracker(), "http://127.0.0.1:1", framerate,
-                         failure=failure if failure is not None else threading.Event(),
-                         wall_clock=lambda: EPOCH_S, **kwargs)
+    return PayloadSender(client, "http://127.0.0.1:1", framerate,
+                         failure=failure if failure is not None else threading.Event(), **kwargs)
 
 
 def connected_sender(framerate: float = MOCAP_HZ) -> tuple[PayloadSender, RecordingClient]:
@@ -43,47 +41,46 @@ def wait_for(condition: Callable[[], bool], timeout_s: float = 2.0) -> None:
         time.sleep(0.005)
 
 
-def test_emitted_frames_validate_against_contract() -> None:
+def test_emitted_pose_frames_validate_against_contract() -> None:
     sender, client = connected_sender()
-    validator = frame_validator()
+    validator = contract_validator("pose_frame")
     for k in range(5):
         t: float = k / MOCAP_HZ
-        sender.handle_frame(t, {0: pose(100.0 * k, -50.0 * k, yaw_rad=0.1 * k), 3: pose(-2999.6, 2999.4, 0.0)})
+        sender.handle_frame(
+            t, {"right_hand": pose(100.0 * k, -50.0 * k, yaw_rad=0.1 * k), "chest_front": pose(-2999.6, 2999.4, 0.0)}
+        )
     assert len(client.emitted) == 5
-    for event, frame, namespace in client.emitted:
-        assert (event, namespace) == ("frame", INGEST_NAMESPACE)
+    for k, (event, frame, namespace) in enumerate(client.emitted):
+        assert (event, namespace) == ("pose_frame", INGEST_NAMESPACE)
         validator.validate(frame)
-        assert frame["schemaVersion"] == 1
-        assert frame["timestamp"] == EPOCH_S * 1000.0
-        assert {rb["ID"] for rb in frame["rigidbodies"]} == {0, 3}
-    assert all(isinstance(rb["x"], int) for _, frame, _ in client.emitted for rb in frame["rigidbodies"])
+        assert frame["schemaVersion"] == 2
+        assert frame["source_time_s"] == k / MOCAP_HZ
+        assert set(frame["bodies"]) == {"right_hand", "chest_front"}
+    assert all(isinstance(body[axis], int)
+               for _, frame, _ in client.emitted for body in frame["bodies"].values() for axis in "xyz")
 
 
-def test_empty_frame_validates() -> None:
+def test_empty_pose_frame_is_sent_and_validates() -> None:
     sender, client = connected_sender()
     sender.handle_frame(0.0, {})
-    frame_validator().validate(client.emitted[0][1])
+    assert client.emitted[0][1]["bodies"] == {}
+    contract_validator("pose_frame").validate(client.emitted[0][1])
 
 
-@pytest.mark.parametrize("timestamp_jitter_s", [0.0, 0.001])
-def test_constant_motion_gives_constant_velocity_with_jitter_and_lower_send_rate(timestamp_jitter_s: float) -> None:
-    rng = np.random.default_rng(3)
-    send_hz = 100.0
-    vx, vy = 1200.0, -500.0  # mm/s
-    wall: list[float] = [EPOCH_S]
-    client = RecordingClient()
-    sender = PayloadSender(client, make_tracker(), "http://127.0.0.1:1", send_hz, threading.Event(),
-                           wall_clock=lambda: wall[0])
-    client.connect("http://127.0.0.1:1", ["websocket"], [INGEST_NAMESPACE], True, 1.0)
-    n_frames = int(3 * MOCAP_HZ)
-    for k in range(n_frames):
-        # Arrival alternates 2 ms / 6 ms (wall clock); mocap timestamps optionally jitter too, poses follow them.
-        wall[0] += 0.002 if k % 2 else 0.006
-        t: float = k / MOCAP_HZ + float(rng.uniform(-timestamp_jitter_s, timestamp_jitter_s))
-        sender.handle_frame(t, {1: pose(vx * t, vy * t)})
-    speeds = [frame["rigidbodies"][0]["abs_vel"] for _, frame, _ in client.emitted[1:]]
-    assert speeds == pytest.approx([math.hypot(vx, vy)] * len(speeds), rel=1e-9)
+def test_pose_frames_carry_no_derived_fields() -> None:
+    sender, client = connected_sender()
+    sender.handle_frame(0.0, {"head": pose(1.0, 2.0)})
+    assert set(client.emitted[0][1]["bodies"]["head"]) == {"x", "y", "z", "qx", "qy", "qz", "qw"}
+
+
+def test_send_rate_gate_limits_emissions_on_the_mocap_clock() -> None:
+    send_hz: float = 100.0
+    sender, client = connected_sender(framerate=send_hz)
+    for k in range(int(3 * MOCAP_HZ)):
+        sender.handle_frame(k / MOCAP_HZ, {"left_hand": pose(10.0 * k, 0.0)})
     assert len(client.emitted) == pytest.approx(3 * send_hz, abs=2)
+    times: list[float] = [frame["source_time_s"] for _, frame, _ in client.emitted]
+    assert times == sorted(times)
 
 
 def test_send_gate_resyncs_when_mocap_clock_restarts() -> None:
@@ -94,23 +91,12 @@ def test_send_gate_resyncs_when_mocap_clock_restarts() -> None:
     assert len(client.emitted) == 2
 
 
-def test_metrics_update_on_frames_the_gate_skips() -> None:
-    sender, client = connected_sender(framerate=1.0)
-    for k in range(int(MOCAP_HZ) + 1):
-        t = k / MOCAP_HZ
-        sender.handle_frame(t, {0: pose(500.0 * t * t, 0.0)})  # accelerating: speed 1000 * t mm/s
-    # Frames at t = 0 and t = 1 s are sent. The second differentiates against the previous mocap frame
-    # (about 1000 mm/s), not against the last sent frame (500 mm/s average).
-    assert len(client.emitted) == 2
-    assert client.emitted[1][1]["rigidbodies"][0]["abs_vel"] == pytest.approx(1000.0, rel=0.01)
-
-
 def test_frames_while_disconnected_are_dropped_and_logged_once(caplog: pytest.LogCaptureFixture) -> None:
     client = RecordingClient()
     sender = make_sender(client)
     with caplog.at_level(logging.WARNING):
         for k in range(5):
-            assert sender.handle_frame(k / MOCAP_HZ, {0: pose(0.0, 0.0)}) is None
+            assert sender.handle_frame(k / MOCAP_HZ, {"left_hand": pose(0.0, 0.0)}) is None
     assert client.emitted == []
     assert sum("Dropping frames" in r.message for r in caplog.records) == 1
 
@@ -207,37 +193,27 @@ def test_stop_does_not_block_on_a_hanging_connect(
     client.release.set()
 
 
-def test_non_finite_timestamp_is_dropped_and_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize("bad_time_s", [float("nan"), float("inf"), -0.5])
+def test_invalid_timestamp_is_dropped_and_logged_once(bad_time_s: float, caplog: pytest.LogCaptureFixture) -> None:
     sender, client = connected_sender()
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
-            assert sender.handle_frame(float("nan"), {0: pose(0.0, 0.0)}) is None
-        assert sender.handle_frame(0.0, {0: pose(0.0, 0.0)}) is not None  # gate state was not poisoned
-        assert sender.handle_frame(1 / MOCAP_HZ, {0: pose(1.0, 0.0)}) is not None
+            assert sender.handle_frame(bad_time_s, {"left_hand": pose(0.0, 0.0)}) is None
+        assert sender.handle_frame(0.0, {"left_hand": pose(0.0, 0.0)}) is not None  # gate state was not poisoned
+        assert sender.handle_frame(1 / MOCAP_HZ, {"left_hand": pose(1.0, 0.0)}) is not None
     assert len(client.emitted) == 2
     assert sum("corrupt" in r.message for r in caplog.records) == 1
 
 
-@pytest.mark.filterwarnings("ignore:overflow encountered:RuntimeWarning")
-@pytest.mark.parametrize("bad_x", [float("nan"), float("inf"), 1e308])
+@pytest.mark.parametrize("bad_x", [float("nan"), float("inf")])
 def test_non_finite_body_values_are_dropped_not_emitted(bad_x: float, caplog: pytest.LogCaptureFixture) -> None:
-    # 1e308 is finite, but jumping between -1e308 and 1e308 overflows the velocity to inf on every frame.
     sender, client = connected_sender()
-    sender.handle_frame(0.0, {0: pose(-1e308, 0.0)})
+    sender.handle_frame(0.0, {"left_hand": pose(0.0, 0.0)})
     with caplog.at_level(logging.WARNING):
         for k in range(1, 4):
-            assert sender.handle_frame(k / MOCAP_HZ, {0: pose(bad_x if k % 2 else -bad_x, 0.0)}) is None
+            assert sender.handle_frame(k / MOCAP_HZ, {"left_hand": pose(bad_x, 0.0)}) is None
     assert len(client.emitted) == 1
     assert sum("corrupt" in r.message for r in caplog.records) == 1
-
-
-def test_nan_pose_does_not_poison_later_velocities() -> None:
-    sender, client = connected_sender()
-    sender.handle_frame(0.0, {0: pose(0.0, 0.0)})
-    assert sender.handle_frame(1 / MOCAP_HZ, {0: pose(float("nan"), 0.0)}) is None
-    frame = sender.handle_frame(2 / MOCAP_HZ, {0: pose(2000.0 / MOCAP_HZ, 0.0)})
-    assert frame is not None
-    assert frame["rigidbodies"][0]["abs_vel"] == pytest.approx(1000.0)
 
 
 def test_strict_json_refuses_nan() -> None:

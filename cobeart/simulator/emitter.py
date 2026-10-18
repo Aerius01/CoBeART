@@ -58,7 +58,7 @@ class _Stream:
 
 
 class Simulator:
-    """Emits `frame` on /ingest and `audio_metrics` on /audio at their own rates until the duration ends."""
+    """Emits `pose_frame` on /ingest and `audio_metrics` on /audio at their own rates until the duration ends."""
 
     def __init__(
         self,
@@ -84,7 +84,7 @@ class Simulator:
         if self._motion is not None:
             motion: Scenario = self._motion
             streams.append(_Stream(
-                "frame", INGEST_NAMESPACE, cfg.motion_rate_hz, cfg.motion_stop_after_s,
+                "pose_frame", INGEST_NAMESPACE, cfg.motion_rate_hz, cfg.motion_stop_after_s,
                 lambda t: apply_fault(cfg.fault, motion(t, motion_rng).to_payload()),
             ))
         if self._audio is not None:

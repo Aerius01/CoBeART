@@ -36,7 +36,8 @@ def test_payload_matches_contract(audio_validator: Draft202012Validator) -> None
         payload = capturer.compute_metrics_payload(rng.uniform(-0.5, 0.5, CHUNK_SIZE).astype(np.float32))
         assert payload is not None
         audio_validator.validate(payload)
-    assert payload["schemaVersion"] == 1
+    assert payload["schemaVersion"] == 2
+    assert "timestamp" not in payload
 
 
 def test_capture_thread_failure_is_observable(caplog: pytest.LogCaptureFixture) -> None:

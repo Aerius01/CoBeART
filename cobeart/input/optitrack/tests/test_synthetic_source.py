@@ -6,6 +6,7 @@ import time
 import pytest
 
 from cobeart.input.optitrack.start_client import (
+    DEFAULT_SYNTHETIC_PATHS,
     CirclePath,
     FramePipeline,
     SyntheticNatNetSource,
@@ -16,8 +17,9 @@ from cobeart.input.optitrack.start_client import (
 )
 from cobeart.input.optitrack.transform import pose_to_arena
 from cobeart.input.optitrack.sender import INGEST_NAMESPACE, PayloadSender
-from cobeart.input.optitrack.tests.contract import RecordingClient, frame_validator, make_tracker
+from cobeart.input.optitrack.tests.contract import RecordingClient
 from cobeart.settings.config import load_settings
+from tests.contract.schemas import contract_validator
 
 SETTINGS = load_settings({})
 PATH = CirclePath(body_id=2, radius_mm=1500.0, period_s=6.0, height_mm=1200.0, phase_rad=0.3)
@@ -28,10 +30,10 @@ def build_pipeline(
 ) -> tuple[SyntheticNatNetSource, RecordingClient]:
     failure = failure if failure is not None else threading.Event()
     client = RecordingClient()
-    sender = PayloadSender(client, make_tracker(), "http://127.0.0.1:1", send_hz, failure)
+    sender = PayloadSender(client, "http://127.0.0.1:1", send_hz, failure)
     client.connect("http://127.0.0.1:1", ["websocket"], [INGEST_NAMESPACE], True, 1.0)
     source = SyntheticNatNetSource([PATH], rate_hz=240.0)
-    FramePipeline(sender, max_num_objects=10, failure=failure).attach(source)
+    FramePipeline(sender, SETTINGS.tracking.roles, failure).attach(source)
     return source, client
 
 
@@ -89,20 +91,56 @@ def test_synthetic_body_faces_its_direction_of_travel() -> None:
     assert forward == pytest.approx((-math.sin(theta), math.cos(theta), 0.0))
 
 
-def test_known_speed_survives_transform_metrics_and_sender() -> None:
+def test_known_speed_survives_transform_and_sender() -> None:
     source, client = build_pipeline(send_hz=60.0)
     for _ in range(480):  # 2 s of mocap
         source.step()
-    validator = frame_validator()
+    validator = contract_validator("pose_frame")
     frames = [frame for _, frame, _ in client.emitted]
     assert len(frames) == pytest.approx(120, abs=1)
     for frame in frames:
         validator.validate(frame)
-    speeds = [frame["rigidbodies"][0]["abs_vel"] for frame in frames[1:]]
-    assert speeds == pytest.approx([PATH.speed_mm_s] * len(speeds), rel=1e-3)
-    # Constant turn rate about +z (counterclockwise): wz = 360 / period deg/s.
-    assert frames[-1]["rigidbodies"][0]["wz"] == pytest.approx(360.0 / PATH.period_s, rel=1e-3)
-    assert frames[-1]["rigidbodies"][0]["z"] == int(PATH.height_mm)
+        assert set(frame["bodies"]) == {SETTINGS.tracking.roles[PATH.body_id]}
+    # The hub derives velocity from successive poses: the chord speed is the path speed. Positions are integer mm,
+    # so differentiate over 0.1 s (6 sends) to keep the rounding error small.
+    speeds = [
+        math.dist(
+            [a["bodies"]["head"][axis] for axis in "xyz"], [b["bodies"]["head"][axis] for axis in "xyz"]
+        ) / (b["source_time_s"] - a["source_time_s"])
+        for a, b in zip(frames, frames[6:])
+    ]
+    assert speeds == pytest.approx([PATH.speed_mm_s] * len(speeds), rel=3e-2)
+    assert frames[-1]["bodies"]["head"]["z"] == int(PATH.height_mm)
+
+
+def test_default_synthetic_ids_arrive_under_their_configured_roles() -> None:
+    failure = threading.Event()
+    client = RecordingClient()
+    sender = PayloadSender(client, "http://127.0.0.1:1", 240.0, failure)
+    client.connect("http://127.0.0.1:1", ["websocket"], [INGEST_NAMESPACE], True, 1.0)
+    source = SyntheticNatNetSource(DEFAULT_SYNTHETIC_PATHS, rate_hz=240.0)
+    FramePipeline(sender, SETTINGS.tracking.roles, failure).attach(source)
+    source.step()
+    expected = {SETTINGS.tracking.roles[path.body_id] for path in DEFAULT_SYNTHETIC_PATHS}
+    assert set(client.emitted[0][1]["bodies"]) == expected == {"left_hand", "right_hand", "head"}
+
+
+def test_unmapped_motive_id_is_dropped_and_warned_once(caplog: pytest.LogCaptureFixture) -> None:
+    failure = threading.Event()
+    client = RecordingClient()
+    sender = PayloadSender(client, "http://127.0.0.1:1", 240.0, failure)
+    client.connect("http://127.0.0.1:1", ["websocket"], [INGEST_NAMESPACE], True, 1.0)
+    unmapped_id: int = max(SETTINGS.tracking.roles) + 1
+    paths = [PATH, CirclePath(body_id=unmapped_id, radius_mm=900.0, period_s=4.0, height_mm=1000.0)]
+    source = SyntheticNatNetSource(paths, rate_hz=240.0)
+    FramePipeline(sender, SETTINGS.tracking.roles, failure).attach(source)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(5):
+            source.step()
+    assert not failure.is_set()
+    assert all(set(frame["bodies"]) == {"head"} for _, frame, _ in client.emitted)
+    warnings = [r.getMessage() for r in caplog.records if "tracking.roles" in r.getMessage()]
+    assert len(warnings) == 1 and f"ID {unmapped_id}" in warnings[0]
 
 
 def test_run_emits_frames_on_a_thread_until_shutdown() -> None:

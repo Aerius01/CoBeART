@@ -1,27 +1,8 @@
-"""Test helpers: a contract validator built from contract/*.schema.json, and a recording Socket.IO stand-in."""
-import json
+"""Test helper: a recording Socket.IO stand-in. Contract validators live in tests/contract/schemas.py."""
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator
-from referencing import Registry, Resource
-from referencing.jsonschema import DRAFT202012
 from socketio.exceptions import ConnectionError as SocketIOConnectionError
-
-from cobeart.input.optitrack.metrics import MetricsTracker
-
-CONTRACT_DIR: Path = Path(__file__).resolve().parents[4] / "contract"
-
-
-def frame_validator() -> Draft202012Validator:
-    """Validator for frame.schema.json with all contract schemas registered."""
-    registry: Registry = Registry()
-    schemas: dict[str, dict[str, Any]] = {}
-    for name in ("frame", "audio_metrics", "splat"):
-        schemas[name] = json.loads((CONTRACT_DIR / f"{name}.schema.json").read_text())
-        registry = registry.with_resource(schemas[name]["$id"], Resource.from_contents(schemas[name], DRAFT202012))
-    return Draft202012Validator(schemas["frame"], registry=registry)
 
 
 class RecordingClient:
@@ -60,8 +41,3 @@ class RecordingClient:
         """Simulate the server going away."""
         self.connected = False
         self.handlers["disconnect"]("transport close")
-
-
-def make_tracker(max_vel: float = 13000.0, window_length: int = 15, **kwargs: float) -> MetricsTracker:
-    """A MetricsTracker with the values config/cobeart.yaml ships, overridable per test."""
-    return MetricsTracker(max_vel=max_vel, window_length=window_length, **kwargs)

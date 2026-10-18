@@ -1,8 +1,7 @@
-"""Builds contract `frame` messages from tracked arena poses and emits them on Socket.IO /ingest."""
+"""Builds contract `pose_frame` messages from tracked arena poses and emits them on Socket.IO /ingest."""
 import logging
 import math
 import threading
-import time
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
@@ -10,13 +9,13 @@ from socketio.exceptions import ConnectionError as SocketIOConnectionError
 from socketio.exceptions import SocketIOError
 
 from cobeart.input.optitrack.transform import ArenaPose
-from cobeart.input.optitrack.metrics import BodyMetrics, MetricsTracker
+from cobeart.settings.config import Role
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 INGEST_NAMESPACE: str = "/ingest"
-FRAME_EVENT: str = "frame"
+POSE_FRAME_EVENT: str = "pose_frame"
 DEFAULT_RECONNECT_INTERVAL_S: float = 2.0
 CONNECT_WAIT_TIMEOUT_S: float = 2.0
 STOP_JOIN_TIMEOUT_S: float = 3.0
@@ -42,12 +41,11 @@ class SocketClient(Protocol):
     def disconnect(self) -> None: ...
 
 
-def rigid_body_entry(pose: ArenaPose, metrics: BodyMetrics) -> Payload:
-    """One contract rigid-body entry: integer mm position, arena quaternion and velocities."""
+def pose_entry(pose: ArenaPose) -> Payload:
+    """One contract pose entry: integer mm position and the arena quaternion."""
     x, y, z = pose.position
     qx, qy, qz, qw = pose.orientation
     return {
-        "ID": metrics.id,
         "x": int(x),  # [mm]
         "y": int(y),
         "z": int(z),
@@ -55,24 +53,15 @@ def rigid_body_entry(pose: ArenaPose, metrics: BodyMetrics) -> Payload:
         "qy": float(qy),
         "qz": float(qz),
         "qw": float(qw),
-        "vx": float(metrics.velocity[0]),  # [mm/s]
-        "vy": float(metrics.velocity[1]),
-        "vz": float(metrics.velocity[2]),
-        "wx": float(metrics.angular_velocity[0]),  # [deg/s], arena axes
-        "wy": float(metrics.angular_velocity[1]),
-        "wz": float(metrics.angular_velocity[2]),
-        "abs_vel": float(metrics.abs_velocity),  # [mm/s]
-        "norm_abs_vel": float(metrics.norm_abs_velocity),  # [0..1]
     }
 
 
-def build_frame(rigidbodies: list[Payload], timestamp_ms: float) -> Payload:
-    """A contract `frame` message for the given rigid-body entries."""
+def build_pose_frame(bodies: dict[Role, Payload], source_time_s: float) -> Payload:
+    """A contract `pose_frame` message for the given role-keyed pose entries."""
     return {
         "schemaVersion": SCHEMA_VERSION,
-        "type": "optitrack",
-        "timestamp": timestamp_ms,
-        "rigidbodies": rigidbodies,
+        "source_time_s": source_time_s,
+        "bodies": bodies,
     }
 
 
@@ -81,32 +70,29 @@ def _all_finite(values: tuple[float, ...]) -> bool:
 
 
 class PayloadSender:
-    """Updates per-body metrics on every mocap frame and emits frames on /ingest at most at `framerate`.
+    """Emits role-keyed pose_frames on /ingest, at most at `framerate`, clocked by the mocap frame time.
 
-    `handle_frame` may be called from the motion source's receive thread; metric and schedule state are guarded
-    by a lock. Connection state is driven by Socket.IO handler threads and a background reconnect loop. Inject a
-    client created with `reconnection=False` and `json=StrictJson`: this class owns reconnection. An unexpected
-    error in the reconnect loop is logged, sets `failure` and ends the loop; the owner must watch `failure`.
+    Velocities are not computed here: the hub derives them from successive pose_frames. `handle_frame` may be
+    called from the motion source's receive thread; schedule state is guarded by a lock. Connection state is
+    driven by Socket.IO handler threads and a background reconnect loop. Inject a client created with
+    `reconnection=False` and `json=StrictJson`: this class owns reconnection. An unexpected error in the
+    reconnect loop is logged, sets `failure` and ends the loop; the owner must watch `failure`.
     """
 
     def __init__(
         self,
         client: SocketClient,
-        tracker: MetricsTracker,
         url: str,
         framerate: float,
         failure: threading.Event,
         reconnect_interval_s: float = DEFAULT_RECONNECT_INTERVAL_S,
-        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         if framerate <= 0:
             raise ValueError(f"framerate must be positive, got {framerate}")
         self._client: SocketClient = client
-        self._tracker: MetricsTracker = tracker
         self._url: str = url
         self._period_s: float = 1.0 / framerate
         self._reconnect_interval_s: float = reconnect_interval_s
-        self._wall_clock: Callable[[], float] = wall_clock
         self._failure: threading.Event = failure
 
         self._frame_lock: threading.Lock = threading.Lock()
@@ -195,28 +181,22 @@ class PayloadSender:
 
     # Frames
 
-    def handle_frame(self, frame_time_s: float, bodies: Mapping[int, ArenaPose]) -> Payload | None:
-        """Update metrics for one mocap frame (`frame_time_s` from the mocap clock); emit it if a send is due.
+    def handle_frame(self, frame_time_s: float, bodies: Mapping[Role, ArenaPose]) -> Payload | None:
+        """Emit one mocap frame (`frame_time_s` from the mocap clock, seconds) if a send is due.
 
-        Returns the emitted frame, or None when the send-rate gate skipped it, the frame was corrupt (non-finite
-        timestamp or value) or the hub is not connected.
+        Returns the emitted pose_frame, or None when the send-rate gate skipped it, the frame was corrupt
+        (negative or non-finite timestamp, non-finite pose value) or the hub is not connected.
         """
-        if not math.isfinite(frame_time_s):
-            self._log_corrupt_once(f"non-finite mocap timestamp {frame_time_s!r}")
+        if not math.isfinite(frame_time_s) or frame_time_s < 0:
+            self._log_corrupt_once(f"invalid mocap timestamp {frame_time_s!r}")
             return None
         with self._frame_lock:
-            entries: list[Payload] = []
-            for body_id, pose in bodies.items():
-                # Check the pose before the tracker sees it, so a NaN cannot poison the body's velocity state.
+            entries: dict[Role, Payload] = {}
+            for role, pose in bodies.items():
                 if not _all_finite((*pose.position, *pose.orientation)):
-                    self._log_corrupt_once(f"non-finite pose for body {body_id}")
+                    self._log_corrupt_once(f"non-finite pose for body {role}")
                     return None
-                metrics: BodyMetrics = self._tracker.update(body_id, frame_time_s, *pose.position, *pose.orientation)
-                if not _all_finite((*metrics.velocity, *metrics.angular_velocity,
-                                    metrics.abs_velocity, metrics.norm_abs_velocity)):
-                    self._log_corrupt_once(f"non-finite velocity for body {body_id}")
-                    return None
-                entries.append(rigid_body_entry(pose, metrics))
+                entries[role] = pose_entry(pose)
             with self._episode_lock:
                 self._corrupt_logged = False
             if not self._send_due(frame_time_s):
@@ -224,13 +204,13 @@ class PayloadSender:
         if not self._connected.is_set():
             self._log_drop_once("not connected to the hub")
             return None
-        frame: Payload = build_frame(entries, self._wall_clock() * 1000.0)
+        frame: Payload = build_pose_frame(entries, frame_time_s)
         try:
-            self._client.emit(FRAME_EVENT, frame, namespace=INGEST_NAMESPACE)
+            self._client.emit(POSE_FRAME_EVENT, frame, namespace=INGEST_NAMESPACE)
         except SocketIOError as exc:
             self._log_drop_once(f"emit failed: {exc!r}")
             return None
-        logger.debug("Sent frame with %d bodies", len(entries))
+        logger.debug("Sent pose_frame with %d bodies", len(entries))
         return frame
 
     def _send_due(self, frame_time_s: float) -> bool:

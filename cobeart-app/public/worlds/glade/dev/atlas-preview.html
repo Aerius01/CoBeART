@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glade atlas preview</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; background: #000; color: #eee; font: 14px monospace; }
+  canvas { display: block; width: 100%; height: auto; }
+  #error { color: #f66; padding: 1em; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="error" hidden></div>
+<canvas id="view"></canvas>
+<script type="module">
+import { generateAtlas } from '../render/atlas.mjs';
+
+try {
+  const { canvas } = generateAtlas({ nFrames: 30, cellPx: 96 });
+  const view = document.getElementById('view');
+  view.width = canvas.width;
+  view.height = canvas.height;
+  view.getContext('2d').drawImage(canvas, 0, 0);
+} catch (err) {
+  console.error(err);
+  const box = document.getElementById('error');
+  box.hidden = false;
+  box.textContent = String(err);
+}
+</script>
+</body>
+</html>

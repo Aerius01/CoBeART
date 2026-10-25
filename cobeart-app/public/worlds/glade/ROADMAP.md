@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-25):** Phases 0 and 1 done on `gl-1-foundation`. **Next phase:** 2. **Phase 2 base:** the `[GL 1]` outcomes commit at the tip of `main` once Phase 1 is merged (see Outcomes, Phase 1).
+**Status (2026-10-25):** Phases 0 and 1 done on `gl-1-foundation`. **Next phase:** 2. **Phase 2 base:** the tip of `main` after the Phase 1 merge (the `[GL 1]` commit that moved the e2e flake to `TODO.md`).
 
 ## Project facts
 
@@ -302,7 +302,7 @@ Deferred items went to the Phase 2 and Phase 3 grill lists and the WP 4.1 scope.
 - flake8: clean.
 - pytest: 243 pass on 3 consecutive full runs.
 
-**Known flake (pre-existing, not this phase):** `tests/e2e/test_motion_pipeline.py::test_body_that_stops_reaches_zero_norm_velocity` failed in 2 of 7 full pytest runs, once while reviewers loaded the machine. It passes in isolation, and nothing on its path reads the changed mouse config. Worth a look outside this roadmap.
+**Known flake (pre-existing, not this phase):** `tests/e2e/test_motion_pipeline.py::test_body_that_stops_reaches_zero_norm_velocity` failed in 2 of 7 full pytest runs, once while reviewers loaded the machine. It passes in isolation, and nothing on its path reads the changed mouse config. Tracked in the repo-root `TODO.md`.
 
 **Notes:**
 - The vendored lil-gui 0.21.0 matches the npm registry integrity (sha512); `dist/lil-gui.esm.min.js` sha256 is `609142ae...a954d`. The package's licence file is `LICENSE.md`, copied as `vendor/LICENSE`.

@@ -46,8 +46,8 @@ frontend:
 sources:
   mouse:                          # browser mouse source (host page, source=mouse)
     role: right_hand              # role the held mouse button acts as
-    z_initial_mm: 1200            # height before the first wheel notch, inside arena.z
-    z_step_mm: 50                 # height change per wheel notch, clamped to arena.z
+    z_initial_mm: 100             # height before the first wheel notch, inside arena.z
+    z_step_mm: 20                 # height change per wheel notch, clamped to arena.z
     rate_hz: 60                   # pose_frame rate while a button is held
 
 debug: false

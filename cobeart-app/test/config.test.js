@@ -34,7 +34,7 @@ test('loads and validates the real config/cobeart.yaml', () => {
   assert.equal(REAL_CONFIG.network.socketio.host, '127.0.0.1');
   assert.equal(REAL_CONFIG.metrics.max_gap_s, 0.25);
   assert.equal(REAL_CONFIG.frontend.audio_max_age_ms, 500);
-  assert.deepEqual(REAL_CONFIG.sources.mouse, { role: 'right_hand', z_initial_mm: 1200, z_step_mm: 50, rate_hz: 60 });
+  assert.deepEqual(REAL_CONFIG.sources.mouse, { role: 'right_hand', z_initial_mm: 100, z_step_mm: 20, rate_hz: 60 });
 });
 
 test('trackingRoles maps numeric Motive IDs to roles (js-yaml gives the keys as strings)', () => {

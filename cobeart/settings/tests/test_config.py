@@ -43,7 +43,7 @@ def test_real_file_parses() -> None:
     assert settings.metrics.max_gap_s == 0.25
     assert settings.frontend.audio_max_age_ms == 500
     assert settings.sources.mouse == MouseSourceSettings(
-        role="right_hand", z_initial_mm=1200, z_step_mm=50, rate_hz=60.0
+        role="right_hand", z_initial_mm=100, z_step_mm=20, rate_hz=60.0
     )
 
 

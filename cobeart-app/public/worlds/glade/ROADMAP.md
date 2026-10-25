@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-25):** Phase 0 done (`ce14233`), Phase 1 in progress. **Phase 1 base:** the grill-decisions commit on `gl-1-foundation` that follows `ce14233` (its id is in Outcomes, Phase 1).
+**Status (2026-10-25):** Phases 0 and 1 done on `gl-1-foundation`. **Next phase:** 2. **Phase 2 base:** the `[GL 1]` outcomes commit at the tip of `main` once Phase 1 is merged (see Outcomes, Phase 1).
 
 ## Project facts
 
@@ -123,7 +123,16 @@ Builds what every later WP depends on: the parameter contract, the state layout 
 
 Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither touches the DOM.
 
-**Open for the phase grill:** the exact function signatures under the double-buffer decision, and whether `field.mjs` exposes a `drawAt(grid, x, y, amount)` helper (bilinear withdrawal that returns what was actually taken) for plants to use, or plants implement withdrawal through `state.mjs` `bilinear` themselves.
+**Open for the phase grill:**
+- the exact function signatures under the double-buffer decision, and whether `field.mjs` exposes a `drawAt(grid, x, y, amount)` helper (bilinear withdrawal that returns what was actually taken) for plants to use, or plants implement withdrawal through `state.mjs` `bilinear` themselves
+- **Scratch buffers** (from the GL 1 review): diffusion/spill need an nx·ny ping-pong and an excess buffer; spawning needs a cell-to-plant bucket index (e.g. `cellStart: Int32Array(nx*ny+1)`, `cellItems: Int32Array(capacity)`) that includes plants spawned earlier in the same step; WP 3.1 needs per-step accounting (deposited, consumed). Recommendation: a separate `Scratch` object from `createScratch(grid, capacity)`, grown with the pool, not part of the double-buffered state. Who owns `createScratch` (a WP 2.x file, or an extension of `state.mjs` ownership)?
+- **Float32 versus Float64 density** (from the GL 1 review): WP 2.1 asks for conservation to 1e-6 relative over up to ~21 substeps; Float32 rounding may exceed that. Options: Float64 density plus a Float32 copy at heatmap upload, or Float32 with float64 accumulation and per-step tolerances. Settle before the tests are written; changing the density type touches `state.mjs`.
+
+**Carry-over from Phase 1 (API as built):**
+- `state.mjs`: `createState(params, arena)`, `ensureCapacity(state, needed, live)` (copies `[0, live)`, because `next.count` is stale while a step fills `next`), `cloneInto(src, dst)`, `cellOf(grid, x, y)` (returns `iy * nx + ix`), `createBilinear()` and `bilinear(grid, x, y, out)` with `out` required. Grid is `{ nx, ny, h, x0, y0, density }`; `DIRECTION = { UP: 0, DOWN: 1 }` is also the atlas row; `INITIAL_CAPACITY = 4096`.
+- `rng.mjs`: `seedRng(seed, out)`, `nextU32(in, out)`, `nextFloat(in, out)`; `in` and `out` may be the same array (`next.rng` after `cloneInto`).
+- Pool positions are Float32: derive a plant's cell from the stored (`Math.fround`ed) value, never from the double used at spawn, or the bucket index and later `cellOf(pool.x[i])` can disagree at a cell edge.
+- `id`/`nextId` are Uint32 (wrap after 2^32 spawns, days at the maximum rate); accepted for the MVP.
 
 ### WP 2.1: Ground field
 
@@ -172,7 +181,9 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 ## Phase 3: Step and renderer (2 parallel WPs)
 
 **Open for the phase grill:**
-- the instance buffer layout and how the renderer reads the pool (direct typed-array upload versus packing)
+- the instance buffer layout and how the renderer reads the pool (direct typed-array upload versus packing). "Newest first" is reverse pool order, which instanced attributes cannot iterate: pack in reverse (one O(n) pass) or fetch at `count - 1 - gl_InstanceID`. `ensureCapacity` replaces the pool arrays, so the renderer must read `state.plants.*` every frame and never cache array references.
+- **Atlas mip bleed** (from the GL 1 review): the atlas gutter is `2 * ceil(cellPx / 16)` (12 px at 96) and the pitch is not a power of two, so mip levels above about 3 mix neighbouring cells, while `shadow_blur` (range 0 to 8, default 2) biases the halo onto coarse levels. Options: a power-of-two pitch with more margin and a returned `maxBleedFreeLod` (renderer sets `TEXTURE_MAX_LEVEL`), shrinking the art radius, and/or narrowing `shadow_blur`'s range in `params.mjs`. Either way WP 3.2 needs ownership of `render/atlas.mjs` (and possibly the `shadow_blur` entry in `params.mjs`), and may add a pure `cellRect(geom, frame, row)` UV helper with a test.
+- `shadow_offset_mm` is a scalar; pick its direction.
 - heatmap texture format: `R32F` is not filterable without `OES_texture_float_linear`, so `texelFetch` with manual bilinear, or `R16F`
 - the renderer's public API
 
@@ -229,6 +240,8 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
   - **Loop:** the fixed-step accumulator with `max_steps_per_frame`, logging a rate-limited warning with the dropped ms. Double-buffer swap per step, then render the latest state.
   - **Panel:** lil-gui built from `PARAMS`, with structural entries marked. A structural edit validates and then resets; a live edit validates, and an invalid value is rejected with the error shown in the panel and the console.
   - **Keys:** `E` heatmap, `T` panel, `D` dump (JSON to the console and the clipboard), `R` reset. Log the seed at start.
+  - **Atlas size:** pick `cellPx = min(desired, maxCellPx(N_frames))` from `render/atlas.mjs` before a structural `N_frames` edit regenerates the atlas, since `N_frames` up to 64 is valid but a fixed cellPx is not.
+  - lil-gui snaps edited values to `step`, so `dt` (1/60) and `r` (1/3) change slightly once touched in the panel; acceptable, but the D dump then differs from the defaults.
   - Grill-decided defaults are written into `params.mjs` **only through the orchestrator** (a one-line follow-up commit), not by this WP.
 - **Must pass:**
   - With a hub on port 3401, Playwright:
@@ -265,7 +278,40 @@ One subsection per phase: commit ids, test results, grill decisions, lessons, an
 
 ### Phase 1
 
-Not run.
+**Commits** on `gl-1-foundation`: `984ada5` grill decisions (the Phase 1 base), `29f0087` GL 1.1, `701dde3` GL 1.2, `36f507e` GL 1.3, then the `[GL 1]` outcomes commit (this text).
+
+**Grill decisions:** G1 to G10 above.
+
+**Gate review** (code-optimizer-reviewer and system-architect on `984ada5..` the WP head). Fixed by amending the owning WP:
+- GL 1.1:
+  - `ensureCapacity` copied `[0, state.count)`, which is stale while a step fills `next`, so growth lost plants; it now takes `live` explicitly.
+  - A NaN printed as `null` in `GladeParamError`.
+  - `cloneInto` ignored the grid origin.
+  - `bilinear` hid a per-call allocation when `out` was omitted; `out` is now required.
+  - `GladeParams` is now an explicit typedef.
+  - Ranges: `E_spawn_min` min is 1 and `foot_timeout_ms` min is 50.
+  - `h` suggestions come only from values the slider can reach.
+  - Stronger tests: bounds in isolation, a non-square arena, a 1xN grid, seed bounds.
+- GL 1.2: `N_frames` up to 64 is valid but a fixed cellPx overflowed 4096 px; `maxCellPx(nFrames)` is exported and tested (`test/glade-atlas.test.js`, ownership extended).
+
+Deferred items went to the Phase 2 and Phase 3 grill lists and the WP 4.1 scope.
+
+**Gate results:**
+- `npm test`: 83 pass.
+- Fitness: 0 violations, and `fitness.test.mjs` 16 pass.
+- flake8: clean.
+- pytest: 243 pass on 3 consecutive full runs.
+
+**Known flake (pre-existing, not this phase):** `tests/e2e/test_motion_pipeline.py::test_body_that_stops_reaches_zero_norm_velocity` failed in 2 of 7 full pytest runs, once while reviewers loaded the machine. It passes in isolation, and nothing on its path reads the changed mouse config. Worth a look outside this roadmap.
+
+**Notes:**
+- The vendored lil-gui 0.21.0 matches the npm registry integrity (sha512); `dist/lil-gui.esm.min.js` sha256 is `609142ae...a954d`. The package's licence file is `LICENSE.md`, copied as `vendor/LICENSE`.
+- Splat side effect of the mouse defaults, accepted by the brief: the mouse now starts at z 100 (near Splat's largest splat radius) and needs many more wheel notches to reach its radius knee. This is not a regression.
+- `atlas-preview.html` renders 3300 px wide; use a viewport of about 1700 px for a screenshot of all 30 cells.
+
+**Lessons:**
+- A worktree check found a second test pinning the mouse defaults (the Python one). Grep for every consumer of a changed config value when assigning ownership.
+- Under double buffering, any helper that reads `state.count` from the output buffer is suspect; pass live lengths explicitly.
 
 ### Phase 2
 

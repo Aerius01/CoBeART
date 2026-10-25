@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-25):** planned, nothing implemented. **Next phase:** 0, then 1. **Phase 1 base:** the Phase 0 commit (record its id here once made).
+**Status (2026-10-25):** Phase 0 done (`ce14233`), Phase 1 in progress. **Phase 1 base:** the grill-decisions commit on `gl-1-foundation` that follows `ce14233` (its id is in Outcomes, Phase 1).
 
 ## Project facts
 
@@ -44,6 +44,18 @@ Builds what every later WP depends on: the parameter contract, the state layout 
 2. **RNG.** Algorithm (recommendation: `sfc32`, seeded from `seed` through `splitmix32`) and where its state lives (inside the simulation state, so it is double-buffered with everything else).
 3. **Grid sizing.** Should `validateParams` require `h` to divide both arena spans exactly (recommendation), or should the grid round up and treat the last row and column as partial?
 4. **Pool capacity.** Initial capacity, growth by doubling into the next buffer, and whether a hard maximum should throw (recommendation: no hard maximum in the MVP; log the capacity when it grows).
+
+**Grill decisions (2026-10-25):**
+- **G1 Double buffering.** `step(prev, next, ...)` reads `prev`, writes only into `next` and returns it; inputs are never mutated observably. `next`'s old contents are scratch and every field a function owns is fully rewritten, so nothing stale survives a swap.
+- **G2 RNG.** `sfc32`, its 4-word state expanded from `seed` by `splitmix32`, then 12 warm-up draws. Float in [0, 1) is `u32 / 2^32`. API is explicit-state and pure: read from one state, write the advanced state into another.
+- **G3 RNG location.** Inside the simulation state as `rng: Uint32Array(4)`, copied by `cloneInto`, so `(prev, foot, params)` fully determines `next`; `resetState` reseeds it from `seed`.
+- **G4 Grid sizing.** `validateParams` requires `h` to divide both arena x and y spans exactly; the error lists the nearby valid values. Origin `(x_min, y_min)`, `ix = floor((x - x_min) / h)`, with `x = x_max` clamped into the last cell.
+- **G5 `plant_max`.** Not a `PARAMS` entry. `params.mjs` exports `PLANT_MAX = 1` (the energy unit, one grown plant). `kind` stays `live | structural`.
+- **G6 Kinds.** Only `h` and `N_frames` are structural. `seed` is live and its description says it applies on reset (`R`); `dt` and `foot_role` are live.
+- **G7 Placeholder defaults** for the brief's TBD values, each described as "provisional (GL 4 grill)": `r = 1/3`, `input_power = 50`, `lambda_max = 200`, `shadow_strength = 0.5`, `shadow_scale = 1.3`, `shadow_blur = 2`.
+- **G8 Ranges.** The WP 1.1 agent picks `min`/`max`/`step`: wide enough to tune (about 0.1x to 10x the default for rates and coefficients), tight enough to exclude invalid values (no zero or negative rates, `dt` in [1/240, 1/15], `N_frames` in [2, 64]). Reviewed in the diff.
+- **G9 Pool capacity.** Initial capacity 4,096. A write past `next`'s capacity reallocates its pool arrays at double size, copying the live prefix; `cloneInto` grows `dst` the same way. No hard maximum. The state exposes `capacity`; the sim never logs, `main.mjs` (GL 4.1) logs when it changes. Growth replaces arrays inside the state object, never the object itself.
+- **G10 `cloneInto(src, dst)`** copies density, the pool prefix `[0, count)`, `count`, `nextId`, `rng` (and grows `dst` per G9). It throws when `nx`, `ny` or `h` differ, naming both shapes; structural changes go through `createState`/`resetState`. Slots past `count` are left as is.
 
 ### WP 1.1: Parameters, state and grid helpers
 
@@ -249,7 +261,7 @@ One subsection per phase: commit ids, test results, grill decisions, lessons, an
 
 ### Phase 0
 
-Not run.
+`ce14233` on `gl-1-foundation` (from `main` at `704fc63`): BRIEF.md and ROADMAP.md committed. The Phase 1 baseline check added `cobeart/settings/tests/test_config.py` to WP 1.3's ownership (it also pins the mouse defaults).
 
 ### Phase 1
 

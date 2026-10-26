@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-25):** Phases 0 and 1 done on `gl-1-foundation`. **Next phase:** 2. **Phase 2 base:** the tip of `main` after the Phase 1 merge (the `[GL 1]` commit that moved the e2e flake to `TODO.md`).
+**Status (2026-10-26):** Phases 0 and 1 merged to `main` (`81de254`). Phase 2 running on `gl-2-simulation`.
 
 ## Project facts
 
@@ -134,6 +134,20 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 - Pool positions are Float32: derive a plant's cell from the stored (`Math.fround`ed) value, never from the double used at spawn, or the bucket index and later `cellOf(pool.x[i])` can disagree at a cell edge.
 - `id`/`nextId` are Uint32 (wrap after 2^32 spawns, days at the maximum rate); accepted for the MVP.
 
+**Grill decisions (2026-10-26):**
+- **G11 Copy, then in place.** `step` (GL 3.1) runs `cloneInto(prev, next)` first; every operator then mutates only the grid or state it is handed (always `next`), so `next.count` is valid throughout. Pinned API:
+  - `field.mjs`: `createFieldScratch(grid)`, `deposit(grid, foot, params, scratch) -> E deposited`, `diffuse(grid, params, scratch)`, `spill(grid, params, scratch)`, `totalEnergy(grid) -> E` (density sum times cell area). `foot` is `{ x, y, z }` in mm or `null`.
+  - `plants.mjs`: `createPlantScratch(grid, capacity)`, `drawAt(grid, x, y, amount, bil) -> E taken`, `feed(state, params, scratch) -> E consumed`, `spawn(state, params, scratch) -> spawned count`, `updateFrames(state, params)`.
+  - Implementations may add exports (e.g. `substeps(D, dt, h)`), but must not change these signatures.
+- **G12 `drawAt` in `plants.mjs`.** Bilinear withdrawal: cell `i` is asked for `w_i * amount` and gives `min(ask, density_i * area)`; a short cell is not made up by the others.
+- **G13 Scratch per module**, not double-buffered: field scratch holds Float64 nx·ny buffers; plant scratch holds the cell-bucket index (built from the stored Float32 positions) plus a per-cell "spawned this step" slot so spacing sees same-step spawns, and grows with the pool. Accounting is via return values.
+- **G14 Float64 density** (`[GL 2]` commit to `state.mjs`); plant energy stays Float32. The Phase 3 heatmap converts at upload.
+- **G15 Analytic deposit.** Total `input_power * dt * (1 - z²/R²)³` (the kernel's exact integral relative to z = 0, zero for `z >= R`), spread over the in-grid cells by `f(centre) / Σ inside f`. One rule covers lifting, the edge and h-independence. When no cell centre lies inside the footprint, nothing is deposited and the return is 0.
+- **G16 Oono-Puri stencil** for both operators: per substep an orthogonal edge carries `(k/2)·Δ` and a diagonal edge `(k/4)·Δ`, `k = D·(dt/n)/h²` with `n = ceil(3·D·dt/h²)` (h in mm, D in mm²/s). Spill uses the excess `max(0, ρ - E_cap)` frozen at the start of each substep, so a cell never loses more than its excess.
+- **G17 Seed payment by the spawning cell only** (brief updated): the candidate's own cell must hold `seed_energy`, or there is no spawn and no charge. Bilinear payment would refuse most fringe spawns next to empty cells. Feeding stays bilinear.
+- **G18 Consumption.** A short plant's energy clamps at 0; consumption is exactly what leaves the system: `x + min(energy, shortfall)` when short, the demand when full, and the overflow above `PLANT_MAX` when nearly full. Computed from the stored Float32 values so the books close to float64 precision. `feed` removes plants at `energy <= 0` by order-preserving compaction.
+- **G19 Frames** loop the hysteresis rule until stable (several frames per step are possible at extreme settings), clamped to `[0, N_frames - 1]`; direction from the last change. New plants start at frame 0, `UP`, energy `seed_energy`, `seed` from `nextU32`.
+
 ### WP 2.1: Ground field
 
 - **Model:** Opus (numerics).
@@ -162,7 +176,7 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
   - **Feeding:** constant demand `r * dt` drawn bilinearly, oldest first. The pool is id-ordered, so pool order is the allocation order. Below full, the plant stores what it gets; at full, it consumes it; when short, it pays the shortfall from itself.
   - **Removal:** at `energy <= 0`, by order-preserving compaction.
   - **Frames:** hysteresis with `delta`; the direction comes from the last frame change.
-  - **Spawning:** after feeding, per cell in fixed order. Linear ramp from `E_spawn_min` to `E_cap`, with `p = 1 - exp(-lambda * h² * dt)`. Uniform position in the cell, `min_spacing_mm` rejection through the 3x3 cells, and `seed_energy` paid bilinearly or no spawn. New plants are appended with `nextId++`.
+  - **Spawning:** after feeding, per cell in fixed order. Linear ramp from `E_spawn_min` to `E_cap`, with `p = 1 - exp(-lambda * h² * dt)`. Uniform position in the cell, `min_spacing_mm` rejection through the 3x3 cells, and `seed_energy` paid by the spawning cell or no spawn (G17). New plants are appended with `nextId++`.
 - **Must pass:**
   - `npm test` green, covering:
     - a fed plant reaches 1 in `1/r` and holds

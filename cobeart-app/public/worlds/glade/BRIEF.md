@@ -50,8 +50,8 @@ f   = (1 - rho^2)^2   for rho < 1, else 0
 
 - **Height:** raw marker z, with no rest-height parameter. The marker sits about 100 mm up when the foot is flat; `R` = 300 mm still gives about 79% of the peak there. Calibration of `R` and `input_power` absorbs the mount offset.
 - **Footprint:** a disk of radius `sqrt(R^2 - z^2)` (about 283 mm at rest), which shrinks and fades as the foot lifts. No contact threshold or hysteresis is needed. A swinging foot leaves a weaker wake, and that is intended: the ground decides whether it is enough to grow anything.
-- **Power:** `input_power` is the total power (E/s) of a foot at z = 0. The kernel weights are normalised once at z = 0, so changing `R` or the cell size keeps the energy budget, and lifting the foot lowers the total naturally.
-- **Arena edge:** when part of the footprint falls outside the grid, the inside weights are scaled by `full sum / inside sum` at the current height, so a foot near a wall injects the same total as anywhere else.
+- **Power:** `input_power` is the total power (E/s) of a foot at z = 0. The total at height z is the kernel's exact integral relative to z = 0, `input_power * (1 - z^2/R^2)^3`, so changing `R` or the cell size keeps the energy budget, and lifting the foot lowers the total naturally.
+- **Distribution and arena edge:** each step's total is spread over the cells inside the grid in proportion to `f` at their centres (normalised by the inside sum), so a foot near a wall injects the same total as anywhere else (GL 2 grill).
 - **Presence:** the foot is absent when its role is missing or its last sighting is older than `foot_timeout_ms`, so a dropped source never leaves a permanent energy source.
 - **Speed:** no modulation in the MVP. Time spent over a cell already rewards staying put; a speed multiplier can be added later.
 - An ellipsoid (separate horizontal and vertical radii) is the upgrade path if lift-off and footprint size need separate tuning.
@@ -61,7 +61,7 @@ f   = (1 - rho^2)^2   for rho < 1, else 0
 The arena floor is discretised into square cells of size `h` = 50 mm (120 x 120 cells for the 6 m x 6 m arena), in arena axes. The D18 view is applied only when rendering. The grid starts empty.
 
 **Units:**
-- A cell stores energy **density** (E/m²) in a `Float32Array`. A plant draws absolute energy as `density * cell area`, so `h` is a pure resolution knob.
+- A cell stores energy **density** (E/m²) in a `Float64Array` (GL 2 grill: conservation precision; the heatmap converts to Float32 at upload). A plant draws absolute energy as `density * cell area`, so `h` is a pure resolution knob.
 - **1 E = one fully grown reference plant** (`plant_max = 1`). `E_cap` therefore reads as plants per m² of saturated ground, `input_power` as plants' worth per second, and the demand `r` as a fraction of a plant per second.
 - Rescaling E later is one multiplication across all energy parameters.
 
@@ -137,7 +137,7 @@ Spawning runs after the plant exchange, so a new plant is first fed on the next 
 - **Per cell:** each cell spawns as a Poisson process with probability `p = 1 - exp(-lambda(rho) * h^2 * dt)` per step, using the cell's own density, with at most one spawn per cell per step. Cells are visited in a fixed order with a seeded PRNG.
 - **Position:** uniform random within the cell.
 - **Spacing:** a candidate within `min_spacing_mm` of another plant (checked through the neighbouring cells) is rejected and charges nothing. This gives even, blue-noise spacing; spawning slows by itself as an area fills.
-- **Payment:** the candidate draws `seed_energy` bilinearly at its position. If the ground cannot pay, it does not spawn.
+- **Payment:** the candidate's own cell pays `seed_energy` (spawning is decided per cell, and validation guarantees a cell at `E_spawn_min` can pay). If the cell cannot pay, it does not spawn. Feeding stays bilinear (section 3).
 
 **Density:** the energy budget (`E_cap`, `input_power`, `r`) sets how many plants a patch sustains; spacing only prevents stacking (at 15 mm the implied ceiling is about 5,000 plants per m²). If the glade looks thin, tune sprite size first, then `E_cap` and `input_power`, and spacing last.
 
@@ -319,6 +319,6 @@ All sessions are done. Next: an implementation plan.
 - Session 1 (foot field): sphere, `R` = 300 mm, falloff `(1 - rho^2)^2`, raw marker z, no speed modulation, `input_power` normalised at z = 0, renormalised at the arena edge, foot absent after `foot_timeout_ms`.
 - Session 2 (ground field): `h` = 50 mm, cells store density (E/m²), 1 E = one grown plant, 9-point stencil (2 : 1), physical `D` and `D_spill` with automatic substepping, spill as pressure diffusion of the excess (soft cap), reflecting boundary, no passive decay.
 - Session 3 (plant lifecycle): state is only `energy`; constant demand `r` in every stage, stored 1:1 below full, shortfall paid from the plant; oldest-first allocation; `seed_energy` taken from the ground at birth; removal at 0; frame hysteresis `delta`, with the sprite set from the direction of the last frame change (revival needs no rule).
-- Session 4 (spawning): `lambda` as a density with a linear ramp from `E_spawn_min` to `E_cap`, at most one spawn per cell per step, uniform position in the cell, `min_spacing_mm` rejection (energy sets real density), `seed_energy` drawn bilinearly or no spawn.
+- Session 4 (spawning): `lambda` as a density with a linear ramp from `E_spawn_min` to `E_cap`, at most one spawn per cell per step, uniform position in the cell, `min_spacing_mm` rejection (energy sets real density), `seed_energy` paid by the spawning cell or no spawn (changed from bilinear in the GL 2 grill, so fringe cells next to empty ground can still spawn).
 - Session 5 (rendering): stretch-to-fill mapping (D18), top-down art at random rotation, Canvas 2D generated colour atlas (`N_frames` = 30 for now), birth and death handled by frame 0 of the art, per-seed size, rotation and brightness, order-preserving compaction with the oldest on top, black premultiplied depth halos visible only on overlap, `E` toggles the heatmap, the wilt colour jump accepted for the MVP.
 - Session 6 (runtime and tooling): fixed-step accumulator with `max_steps_per_frame` = 4 and a logged drop beyond it, no render interpolation, foot sighting on the receipt clock, parameter metadata driving defaults, validation and a vendored lil-gui panel, live versus structural parameters, keys `E` `T` `D` `R`, `seed` = 1, `foot_role` = `right_hand` for home testing with shipped mouse z 100 mm and 20 mm steps, `node --test` on `sim/` plus a Playwright browser check.

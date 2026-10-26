@@ -16,7 +16,7 @@ export const DIRECTION = Object.freeze({ UP: 0, DOWN: 1 });
  * @property {number} h cell size in mm
  * @property {number} x0 arena x_min in mm (grid origin)
  * @property {number} y0 arena y_min in mm (grid origin)
- * @property {Float32Array} density energy density per cell in E/m², index iy * nx + ix
+ * @property {Float64Array} density energy density per cell in E/m², index iy * nx + ix
  */
 
 /**
@@ -89,7 +89,7 @@ export function createState(params, arena) {
   const nx = (arena.x[1] - arena.x[0]) / h;
   const ny = (arena.y[1] - arena.y[0]) / h;
   return {
-    grid: { nx, ny, h, x0: arena.x[0], y0: arena.y[0], density: new Float32Array(nx * ny) },
+    grid: { nx, ny, h, x0: arena.x[0], y0: arena.y[0], density: new Float64Array(nx * ny) },
     plants: allocatePool(INITIAL_CAPACITY),
     capacity: INITIAL_CAPACITY,
     count: 0,

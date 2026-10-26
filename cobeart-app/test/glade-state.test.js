@@ -133,7 +133,7 @@ test('cellOf and bilinear on a non-square arena (6000 x 4000 mm, h 50: 120 x 80 
 
 test('bilinear on a 1 x N grid keeps every index in the single row', async () => {
   const { bilinear, createBilinear } = await loadState();
-  const grid = { nx: 5, ny: 1, h: 10, x0: 0, y0: 0, density: new Float32Array(5) };
+  const grid = { nx: 5, ny: 1, h: 10, x0: 0, y0: 0, density: new Float64Array(5) };
   const out = createBilinear();
   for (const [x, y] of [[0, 0], [5, 5], [12, 3], [25, 9], [50, 10]]) {
     bilinear(grid, x, y, out);

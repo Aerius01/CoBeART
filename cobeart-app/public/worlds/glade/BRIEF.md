@@ -65,11 +65,11 @@ The arena floor is discretised into square cells of size `h` = 50 mm (120 x 120 
 - **1 E = one fully grown reference plant** (`plant_max = 1`). `E_cap` therefore reads as plants per m² of saturated ground, `input_power` as plants' worth per second, and the demand `r` as a fraction of a plant per second.
 - Rescaling E later is one multiplication across all energy parameters.
 
-**Stencil:** diffusion and spill use 8 neighbours weighted orthogonal : diagonal = 2 : 1 (an isotropic 9-point stencil). With 4 neighbours, fronts would grow as diamonds.
+**Stencil:** diffusion and spill use 8 neighbours weighted orthogonal : diagonal = 4 : 1 (2/3 and 1/6, the 9-point stencil whose error is isotropic; GL 2 grill, after measuring that 2 : 1 is not). With 4 neighbours, fronts would grow as diamonds.
 
 **Coefficients and stability:**
 - Both coefficients are physical, in mm²/s. Energy spreads over roughly `sqrt(4 * D * t)` in t seconds; for example, D = 2,500 mm²/s spreads about 100 mm in one second.
-- The per-step factor is `k = D * dt / h^2`. Above `k = 1/3` the 9-point scheme would overshoot (negative energy, checkerboard oscillation), so each operator runs `n = ceil(3 * k)` substeps of `dt / n`.
+- The per-step factor is `k = D * dt / h^2`. Above `k = 0.3` the 9-point scheme would overshoot (negative energy, checkerboard oscillation), so each operator runs `n = ceil(10 * k / 3)` substeps of `dt / n`.
 - Tuning `D`, `h` or `dt` therefore keeps the same look and cannot destabilise the field.
 
 Per step, in order:
@@ -317,7 +317,7 @@ All sessions are done. Next: an implementation plan.
 - MVP: one foot, one abstract species, no audio.
 - Target plant count is left to tuning.
 - Session 1 (foot field): sphere, `R` = 300 mm, falloff `(1 - rho^2)^2`, raw marker z, no speed modulation, `input_power` normalised at z = 0, renormalised at the arena edge, foot absent after `foot_timeout_ms`.
-- Session 2 (ground field): `h` = 50 mm, cells store density (E/m²), 1 E = one grown plant, 9-point stencil (2 : 1), physical `D` and `D_spill` with automatic substepping, spill as pressure diffusion of the excess (soft cap), reflecting boundary, no passive decay.
+- Session 2 (ground field): `h` = 50 mm, cells store density (E/m²), 1 E = one grown plant, 9-point stencil (4 : 1 since the GL 2 grill), physical `D` and `D_spill` with automatic substepping, spill as pressure diffusion of the excess (soft cap), reflecting boundary, no passive decay.
 - Session 3 (plant lifecycle): state is only `energy`; constant demand `r` in every stage, stored 1:1 below full, shortfall paid from the plant; oldest-first allocation; `seed_energy` taken from the ground at birth; removal at 0; frame hysteresis `delta`, with the sprite set from the direction of the last frame change (revival needs no rule).
 - Session 4 (spawning): `lambda` as a density with a linear ramp from `E_spawn_min` to `E_cap`, at most one spawn per cell per step, uniform position in the cell, `min_spacing_mm` rejection (energy sets real density), `seed_energy` paid by the spawning cell or no spawn (changed from bilinear in the GL 2 grill, so fringe cells next to empty ground can still spawn).
 - Session 5 (rendering): stretch-to-fill mapping (D18), top-down art at random rotation, Canvas 2D generated colour atlas (`N_frames` = 30 for now), birth and death handled by frame 0 of the art, per-seed size, rotation and brightness, order-preserving compaction with the oldest on top, black premultiplied depth halos visible only on overlap, `E` toggles the heatmap, the wilt colour jump accepted for the MVP.

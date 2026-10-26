@@ -143,7 +143,7 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 - **G13 Scratch per module**, not double-buffered: field scratch holds Float64 nx·ny buffers; plant scratch holds the cell-bucket index (built from the stored Float32 positions) plus a per-cell "spawned this step" slot so spacing sees same-step spawns, and grows with the pool. Accounting is via return values.
 - **G14 Float64 density** (`[GL 2]` commit to `state.mjs`); plant energy stays Float32. The Phase 3 heatmap converts at upload.
 - **G15 Analytic deposit.** Total `input_power * dt * (1 - z²/R²)³` (the kernel's exact integral relative to z = 0, zero for `z >= R`), spread over the in-grid cells by `f(centre) / Σ inside f`. One rule covers lifting, the edge and h-independence. When no cell centre lies inside the footprint, nothing is deposited and the return is 0.
-- **G16 Oono-Puri stencil** for both operators: per substep an orthogonal edge carries `(k/2)·Δ` and a diagonal edge `(k/4)·Δ`, `k = D·(dt/n)/h²` with `n = ceil(3·D·dt/h²)` (h in mm, D in mm²/s). Spill uses the excess `max(0, ρ - E_cap)` frozen at the start of each substep, so a cell never loses more than its excess.
+- **G16 Isotropic 4 : 1 stencil** for both operators: per substep an orthogonal edge carries `(2k/3)·Δ` and a diagonal edge `(k/6)·Δ`, `k = D·(dt/n)/h²` with `n = ceil(10·D·dt/(3·h²))`, so k ≤ 0.3 (h in mm, D in mm²/s). First decided as Oono-Puri 2 : 1 per the brief; WP 2.1 measured +0.83% fourth-moment anisotropy for 2 : 1 against ~0 for 4 : 1, and the user switched (brief updated). Spill uses the excess `max(0, ρ - E_cap)` frozen at the start of each substep, so a cell never loses more than its excess.
 - **G17 Seed payment by the spawning cell only** (brief updated): the candidate's own cell must hold `seed_energy`, or there is no spawn and no charge. Bilinear payment would refuse most fringe spawns next to empty cells. Feeding stays bilinear.
 - **G18 Consumption.** A short plant's energy clamps at 0; consumption is exactly what leaves the system: `x + min(energy, shortfall)` when short, the demand when full, and the overflow above `PLANT_MAX` when nearly full. Computed from the stored Float32 values so the books close to float64 precision. `feed` removes plants at `energy <= 0` by order-preserving compaction.
 - **G19 Frames** loop the hysteresis rule until stable (several frames per step are possible at extreme settings), clamped to `[0, N_frames - 1]`; direction from the last change. New plants start at frame 0, `UP`, energy `seed_energy`, `seed` from `nextU32`.
@@ -154,7 +154,7 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 - **Owns:** `glade/sim/field.mjs`, `cobeart-app/test/glade-field.test.js`.
 - **Scope:** brief sections 1 and 2.
   - **Foot deposition:** sphere kernel `(1 - rho²)²`. It is normalised once at z = 0 so a planted foot injects `input_power` in total, and renormalised over inside cells near the arena edge. It handles an absent foot (`null`).
-  - **Operators:** diffusion and spill as conservative 9-point (2 : 1) edge fluxes with reflecting boundaries. Each runs `ceil(3k)` substeps, where `k = D * dt / h²`.
+  - **Operators:** diffusion and spill as conservative 9-point (4 : 1, G16) edge fluxes with reflecting boundaries. Each runs `ceil(10k/3)` substeps, where `k = D * dt / h²`.
   - **Spill** is the same operator applied to `max(0, E - E_cap)` with `D_spill`.
   - Densities are in E/m² throughout.
 - **Must pass:**

@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-26):** Phases 0 to 2 merged to `main`. Phase 3 in progress on `gl-3-step-render` (from `main` at `cab6f5b`).
+**Status (2026-10-26):** Phases 0 to 3 merged to `main`. **Next phase:** 4. **Phase 4 base:** the tip of `main` (the `[GL 3]` status commit).
 
 ## Project facts
 

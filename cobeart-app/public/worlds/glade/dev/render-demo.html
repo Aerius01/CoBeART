@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glade render demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 14px monospace; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 50%; top: 8px; transform: translateX(-50%); background: rgba(0, 0, 0, 0.6);
+    padding: 4px 8px; pointer-events: none; }
+  #error { position: fixed; inset: 0; color: #f66; padding: 1em; white-space: pre-wrap; background: #000; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud"></div>
+<div id="error" hidden></div>
+<script type="module">
+// Synthetic scene for the GL 3.2 check: one plant just inside each arena corner, a dense overlapping cluster
+// with mixed frames and both directions over a density blob that exceeds E_cap, and a few isolated plants.
+// Keys: E toggles the heatmap (also ?heatmap in the URL). Numeric params can be overridden in the URL, e.g.
+// ?sprite_size_mm=240 to see the halos at monitor scale. window.__gladeDemo exposes the scene for checks.
+import { defaultParams } from '../params.mjs';
+import { DIRECTION, createState } from '../sim/state.mjs';
+import { generateAtlas, maxCellPx } from '../render/atlas.mjs';
+import { createRenderer } from '../render/renderer.mjs';
+
+/** @param {unknown} err */
+function showError(err) {
+  console.error(err);
+  const box = document.getElementById('error');
+  box.hidden = false;
+  box.textContent = String(err?.stack ?? err);
+}
+
+/** Deterministic 32-bit generator (mulberry32) so the scene is identical on every load. */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildScene(params, arena) {
+  const state = createState(params, arena);
+  const rand = mulberry32(7);
+  const [xMin, xMax] = arena.x;
+  const [yMin, yMax] = arena.y;
+  const spanX = xMax - xMin;
+  const spanY = yMax - yMin;
+  const last = params.N_frames - 1;
+  const { plants } = state;
+
+  const add = (x, y, frame, direction) => {
+    const i = state.count;
+    plants.x[i] = x;
+    plants.y[i] = y;
+    plants.seed[i] = Math.floor(rand() * 4294967296) >>> 0;
+    plants.frame[i] = frame;
+    plants.direction[i] = direction;
+    plants.energy[i] = frame / last;
+    plants.id[i] = state.nextId;
+    state.count += 1;
+    state.nextId += 1;
+  };
+
+  // Corners: inset so the whole sprite (at maximum jitter) stays inside the arena.
+  const inset = params.sprite_size_mm * (1 + params.size_jitter) * Math.SQRT1_2;
+  const corners = [
+    { name: 'x_min,y_min', x: xMin + inset, y: yMin + inset },
+    { name: 'x_max,y_min', x: xMax - inset, y: yMin + inset },
+    { name: 'x_min,y_max', x: xMin + inset, y: yMax - inset },
+    { name: 'x_max,y_max', x: xMax - inset, y: yMax - inset },
+  ];
+  for (const c of corners) add(c.x, c.y, last, DIRECTION.UP);
+
+  // Dense cluster: overlapping plants at mixed frames and both directions. Added in descending frame order so
+  // an older plant (lower id) never shows an earlier growth stage than a younger one, as in a real run.
+  const cluster = { x: xMin + 0.35 * spanX, y: yMin + 0.45 * spanY, r: params.sprite_size_mm * 2.5 };
+  const members = [];
+  for (let k = 0; k < 80; k++) {
+    const a = rand() * Math.PI * 2;
+    const r = Math.sqrt(rand()) * cluster.r;
+    const direction = rand() < 0.3 ? DIRECTION.DOWN : DIRECTION.UP;
+    members.push({ x: cluster.x + r * Math.cos(a), y: cluster.y + r * Math.sin(a),
+      frame: Math.floor(rand() * params.N_frames), direction });
+  }
+  members.sort((m, n) => n.frame - m.frame);
+  for (const m of members) add(m.x, m.y, m.frame, m.direction);
+
+  // Isolated plants, well apart from each other and from the cluster.
+  const isolated = [
+    [0.7, 0.25, last, DIRECTION.UP], [0.75, 0.7, Math.floor(last / 2), DIRECTION.UP],
+    [0.5, 0.8, last, DIRECTION.DOWN], [0.2, 0.75, Math.floor(last * 0.7), DIRECTION.DOWN],
+  ];
+  for (const [fx, fy, frame, direction] of isolated) add(xMin + fx * spanX, yMin + fy * spanY, frame, direction);
+
+  // Density: a blob peaking at 1.6 E_cap under the cluster and a gentler one below the cap.
+  const { grid } = state;
+  const blobs = [
+    { x: cluster.x, y: cluster.y, sigma: 0.08 * Math.min(spanX, spanY), peak: 1.6 * params.E_cap },
+    { x: xMin + 0.7 * spanX, y: yMin + 0.65 * spanY, sigma: 0.05 * Math.min(spanX, spanY), peak: 0.7 * params.E_cap },
+  ];
+  for (let iy = 0; iy < grid.ny; iy++) {
+    for (let ix = 0; ix < grid.nx; ix++) {
+      const cx = grid.x0 + (ix + 0.5) * grid.h;
+      const cy = grid.y0 + (iy + 0.5) * grid.h;
+      let d = 0;
+      for (const b of blobs) d += b.peak * Math.exp(-((cx - b.x) ** 2 + (cy - b.y) ** 2) / (2 * b.sigma ** 2));
+      grid.density[iy * grid.nx + ix] = d;
+    }
+  }
+  return { state, corners, cluster };
+}
+
+try {
+  const arena = window.__COBEART_CONFIG__?.arena;
+  if (!arena) throw new Error('window.__COBEART_CONFIG__.arena is missing; open this page through the hub (npm run web)');
+  const query = new URLSearchParams(location.search);
+  // Numeric parameter overrides from the URL, e.g. ?sprite_size_mm=240 (validated by createState).
+  const params = { ...defaultParams() };
+  for (const [key, value] of query) {
+    if (key in params && typeof params[key] === 'number') params[key] = Number(value);
+  }
+  const { state, corners, cluster } = buildScene(params, arena);
+  const atlas = generateAtlas({ nFrames: params.N_frames, cellPx: Math.min(128, maxCellPx(params.N_frames)) });
+  const canvas = document.getElementById('view');
+  const renderer = createRenderer(canvas, arena, atlas);
+  const hud = document.getElementById('hud');
+  let heatmap = query.has('heatmap');
+
+  const draw = () => {
+    renderer.render(state, params, { heatmap });
+    hud.textContent = `${state.count} plants · heatmap ${heatmap ? 'on' : 'off'} (E)`;
+  };
+  /** D18 screen position in CSS px of arena (x, y) mm. */
+  const toScreen = (x, y) => ({
+    left: (arena.x[1] - x) / (arena.x[1] - arena.x[0]) * canvas.clientWidth,
+    top: (y - arena.y[0]) / (arena.y[1] - arena.y[0]) * canvas.clientHeight,
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'e' || e.key === 'E') {
+      heatmap = !heatmap;
+      draw();
+    }
+  });
+  window.addEventListener('resize', () => {
+    renderer.resize();
+    draw();
+  });
+  draw();
+  window.__gladeDemo = {
+    arena, params, state, renderer, corners, cluster, toScreen,
+    setHeatmap(on) { heatmap = on; draw(); },
+    draw,
+  };
+} catch (err) {
+  showError(err);
+}
+</script>
+</body>
+</html>

@@ -212,6 +212,7 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 - **G25 Heatmap blocky:** `R32F` with `NEAREST` (each cell a flat square, as the model stores it), from a persistent Float32 staging array. Ramp 0 to `E_cap`, separate tint above the cap.
 - **G26 Halo offset direction:** screen bottom right (light from the top left), i.e. arena `(-1, +1) / √2 * shadow_offset_mm` under D18; negative flips it.
 - **G27 Renderer details:** throws a named error without WebGL2; drawing buffer = client size x `devicePixelRatio`; sprite size maps through the independent x and y scales (oval on a non-square monitor, accepted); brightness jitter multiplies RGB only; no context-loss recovery, but `webglcontextlost` logs a `console.error` telling the operator to reload.
+- **G28 Draw order stays by age** (decided at the gate, after the user noticed young-looking plants over older ones in the demo, whose synthetic sizes ignored age; the demo now assigns sizes that fall with id). Oldest on top, never reshuffled. Known case: a wilting old plant shrinks but stays above larger young neighbours. The alternative, ordering by current frame, pops layers whenever two overlapping plants cross sizes. Revisit in tuning if the wilting case shows.
 
 ### WP 3.1: Simulation step
 
@@ -270,6 +271,14 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
   - **Atlas size:** pick `cellPx = min(desired, maxCellPx(N_frames))` from `render/atlas.mjs` before a structural `N_frames` edit regenerates the atlas, since `N_frames` up to 64 is valid but a fixed cellPx is not.
   - lil-gui snaps edited values to `step`, so `dt` (1/60) and `r` (1/3) change slightly once touched in the panel; acceptable, but the D dump then differs from the defaults.
   - Grill-decided defaults are written into `params.mjs` **only through the orchestrator** (a one-line follow-up commit), not by this WP.
+- **Carry-over from Phase 3 (API as built and traps from the gate review):**
+  - Loop per step: `const stats = step(a, b, resolveFoot(sighting, performance.now(), params), params, scratch); [a, b] = [b, a];` then `renderer.render(a, params, { heatmap })`. Log capacity growth (G9) by comparing `a.capacity` before and after a step.
+  - `R` and an `h` edit: replace `{ a, b, scratch }` with `resetState(params, arena)` (it validates first). The renderer rebuilds its density texture when `nx`/`ny` change, and throws if the state's grid does not cover its arena.
+  - An `N_frames` edit, in one synchronous handler: validate a candidate params object, `generateAtlas({ nFrames, cellPx: min(desired, maxCellPx(n)) })`, `renderer.setAtlas(atlas)`, commit `N_frames`, `resetState`. `render` throws when `params.N_frames` differs from the atlas.
+  - **lil-gui writes into its bound object on every drag tick.** Bind the panel to a candidate copy and commit to the live `params` only after `validateParams`; commit structural keys on finish. Binding straight to `params` would make `render` throw every frame mid-drag.
+  - The renderer does not watch for resizes: call `renderer.resize()` from a `ResizeObserver` (catches devicePixelRatio changes across monitors too).
+  - `shadow_strength` 0 skips the halo quads; `dispose()` makes later calls throw.
+  - Not done, measure first: skipping the instance upload on frames without a step (0.6 ms pack and 1.6 MB upload at 100k plants), and the redundant clear under the opaque heatmap.
 - **Must pass:**
   - With a hub on port 3401, Playwright:
     - `/worlds.json` lists `glade`
@@ -388,7 +397,44 @@ Deferred to the Phase 3 grill: the rescale test versus G5, the step signature an
 
 ### Phase 3
 
-Not run.
+**Commits** on `gl-3-step-render` (from `main` at `cab6f5b`):
+- `41389f2`: baseline, grill decisions G20 to G27 and the default-parameter measurement (the WP base).
+- `06d3fd8`: GL 3.1 (amended after the gate review).
+- `a8fe0e5`: GL 3.2 (amended after the gate review).
+- Then the `[GL 3]` outcomes commit (this text).
+
+**Grill decisions:** G20 to G27 above; G28 (draw order by age) at the gate.
+
+**API as built:**
+- `sim/step.mjs`: as G21. `step` throws when `prev === next`. `resolveFoot` treats an age exactly equal to `foot_timeout_ms` as present.
+- `render/renderer.mjs`: `createRenderer(canvas, arena, atlas)` returns `{ render, setAtlas, resize, dispose }` and exports `GladeWebGL2Error`. It checks the atlas shape (canvas size, even gutter), that the grid covers the arena, and that `N_frames` matches the atlas. The context is `antialias: false`.
+- `render/shaders.mjs`: PCG hash per instance; atlas `u = 1 - corner.x` so the art is not mirrored under D18.
+- `dev/render-demo.html`: synthetic scene (corners, an 80-plant cluster with sizes falling with id, isolated plants, two density blobs); `E` or `?heatmap` toggles the heatmap; numeric URL overrides such as `?sprite_size_mm=240` (an extra, kept).
+
+**Gate review** (code-optimizer-reviewer and system-architect on `41389f2..aa07b2b`): no blocking defects. Fixed by amending the owning WP:
+- GL 3.1: the "glade keeps widening" test passed by 2 mm for seed 1 and failed for seed 7; it now averages seeds 1 to 3 (3-seed means gain 21 to 33 mm in the last interval and 105 to 126 mm from 10 to 20 s, over seeds 1 to 9) and asserts strict growth plus over 50 mm from 10 to 20 s.
+- GL 3.2:
+  - Sprites were mirrored (u followed arena +x, which is screen left); verified fixed with an asymmetric test atlas.
+  - Checks for grid/arena agreement, atlas canvas size and gutter parity, and calls after `dispose()`.
+  - `antialias: false`; halo quads skipped at `shadow_strength` 0.
+  - Demo cluster sizes now fall with id (the user's draw-order observation, G28).
+
+Deferred to Phase 4 (in WP 4.1's carry-over): the lil-gui candidate-copy trap, resize observation, and the unmeasured upload and clear savings. Dropped: per-vertex hash cost, pure-function extraction for node tests of the renderer.
+
+**Measured** (reviewer bench, 6 x 6 m arena, h = 50, 100k plants): `step` 3.5 ms without spawning, `cloneInto` 0.1 ms, instance pack 0.6 ms per frame, density copy 0.01 ms. The GPU was not profiled.
+
+**What the defaults show** (G22, foot at z = 100 mm): standing still gives no expanding glade (core above the cap for about 5 s, radius about 260 mm then shrinking, about 100 plants); walking works (peak 86 E/m²); die-off empties the pool about 5 s after the foot leaves, with youngest-first only about 2 : 1 by same-cell pairs (about 5 : 1 at `input_power` 200, `lambda_max` 20). At those pinned values a walking foot at z = 0 peaks at 414 E/m², just over the cap, so "walking never saturates" depends on foot height and `input_power`.
+
+**Gate results:**
+- `npm test`: 125 pass (11 step tests new).
+- Fitness: 0 violations, and `fitness.test.mjs` 16 pass.
+- No Python or config changed, so pytest was not run.
+- Browser: Firefox (Playwright) and Electron 37.4 / Chromium 138 at devicePixelRatio 2 (orchestrator script with a hidden `BrowserWindow` and `capturePage`) both render the demo correctly with a clean console, apart from Electron's generic development security notice.
+
+**Lessons:**
+- Synthetic demo data must respect the model's invariants (here: older plants are not smaller); otherwise a correct renderer looks wrong.
+- A test margin chosen from one seed is a measurement of that seed. Check margins over several seeds before asserting.
+- Electron can serve as the Chromium check: a short script with a hidden window, `capturePage` and `console-message` covers what Playwright's Firefox cannot.
 
 ### Phase 4
 

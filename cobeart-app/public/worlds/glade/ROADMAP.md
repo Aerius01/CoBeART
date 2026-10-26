@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-26):** Phases 0 to 2 merged to `main`. **Next phase:** 3. **Phase 3 base:** the tip of `main` (`6cad3c9` or this status fix on top of it).
+**Status (2026-10-26):** Phases 0 to 2 merged to `main`. Phase 3 in progress on `gl-3-step-render` (from `main` at `cab6f5b`).
 
 ## Project facts
 
@@ -194,52 +194,59 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 
 ## Phase 3: Step and renderer (2 parallel WPs)
 
-**Open for the phase grill:**
-- **Rescale-by-10 test vs G5** (GL 2 review): `PLANT_MAX` is fixed at 1, so multiplying every energy parameter by 10 changes plant fill time and saturation, and Float32 plant energy cannot rescale bit-exactly. Recommendation: narrow WP 3.1's test to ground-field invariance plus h-independence, and record that rescaling E is a code change (G5); the alternative is a `plant_max` input to `feed`/`updateFrames`, which breaks the G11 signatures.
-- **Step signature and scratch** (GL 2 review): `step(prev, next, foot, params, arena)` has nowhere to keep `FieldScratch`/`PlantScratch`. Recommendation: `createStepScratch(grid, capacity) -> { field, plants }` and `step(prev, next, foot, params, scratch) -> { deposited, consumed, spawned }` (drop `arena`, the grid carries it), rebuilt with `resetState`; the operators' scratch guards make a forgotten rebuild throw. A `totalPlantEnergy(state)` helper for the conservation test belongs in `step.mjs`.
-- **Renderer inputs** (GL 2 review): `frame` is Uint16, `direction` Uint8, `seed` Uint32 (integer attributes need `vertexAttribIPointer` or packing); density is Float64, so the heatmap needs a persistent Float32 staging array, not one per frame.
-- the instance buffer layout and how the renderer reads the pool (direct typed-array upload versus packing). "Newest first" is reverse pool order, which instanced attributes cannot iterate: pack in reverse (one O(n) pass) or fetch at `count - 1 - gl_InstanceID`. `ensureCapacity` replaces the pool arrays, so the renderer must read `state.plants.*` every frame and never cache array references.
-- **Atlas mip bleed** (from the GL 1 review): the atlas gutter is `2 * ceil(cellPx / 16)` (12 px at 96) and the pitch is not a power of two, so mip levels above about 3 mix neighbouring cells, while `shadow_blur` (range 0 to 8, default 2) biases the halo onto coarse levels. Options: a power-of-two pitch with more margin and a returned `maxBleedFreeLod` (renderer sets `TEXTURE_MAX_LEVEL`), shrinking the art radius, and/or narrowing `shadow_blur`'s range in `params.mjs`. Either way WP 3.2 needs ownership of `render/atlas.mjs` (and possibly the `shadow_blur` entry in `params.mjs`), and may add a pure `cellRect(geom, frame, row)` UV helper with a test.
-- `shadow_offset_mm` is a scalar; pick its direction.
-- heatmap texture format: `R32F` is not filterable without `OES_texture_float_linear`, so `texelFetch` with manual bilinear, or `R16F`
-- the renderer's public API
+**Baseline (verified 2026-10-26):** `main` = `origin/main` = `cab6f5b`; `npm test` 114 pass, fitness 0 violations, `fitness.test.mjs` 16 pass. The hub injects `window.__COBEART_CONFIG__` into pages under `/worlds/glade/dev/`. The Playwright MCP browser is **Firefox** (Electron is Chromium): it supports WebGL2, `R16F`/`R32F` uploads from FLOAT data and a 96x96x60 `TEXTURE_2D_ARRAY` with mipmaps, and prints its own WebGL performance warnings.
+
+**Measured at the defaults** (orchestrator script with the Phase 2 operators; foot at the arena centre, z = 100 mm, 20 s): above-cap cells for about 5 s, then the plants drain the ground and settle near 100 plants (about `input_power * lift / r`) with the spawnable radius shrinking from 414 to about 250 mm. No expanding glade. With `input_power` 200 and `lambda_max` 20 the spawnable radius keeps growing (965 mm at 10 s, 1,188 mm at 20 s) with the core above the cap. Input to the Phase 4 tuning, not a reason to change defaults now.
+
+**Grill decisions (2026-10-26):**
+- **G20 No rescale test.** With `PLANT_MAX` = 1 (G5), multiplying the energy parameters by 10 is a different world, not a unit change; rescaling E is a code change. WP 3.1 instead tests step-level h-independence: h = 25 and h = 50 give matching total ground energy and plant count within tolerance.
+- **G21 Step API.**
+  - `createStepScratch(grid, capacity) -> { field, plants }`.
+  - `step(prev, next, foot, params, scratch) -> { deposited, consumed, spawned }`: `cloneInto(prev, next)`, then deposit, diffuse, spill, feed, spawn, frames on `next`. No `arena` (the grid carries it). Amends G1: the caller already holds `next`, so the step returns its accounting.
+  - `resetState(params, arena) -> { a, b, scratch }`: two fresh states seeded from `seed` plus the scratch; used at start, on `R` and after a structural edit.
+  - `totalPlantEnergy(state) -> E`.
+  - `resolveFoot(sighting, nowMs, params) -> Foot`, with `sighting` `{ x, y, z, receivedMs } | null`; `null` when `nowMs - receivedMs > foot_timeout_ms` (receipt clock, brief "Runtime").
+- **G22 Emergent tests pin their own values** for every parameter the behaviour depends on, so tuning the defaults in Phase 4 cannot break CI. They test the mechanism, not the look. The worker reports which behaviours the defaults show.
+- **G23 Atlas as a `TEXTURE_2D_ARRAY`**, one layer per picture, layer `direction * N_frames + frame`, cut out of the `generateAtlas` canvas (art square only, no gutter), premultiplied at upload, full mip chain per layer. No bleed at any LOD; `atlas.mjs` and the `shadow_blur` range are unchanged. A heavily blurred halo is clipped at its layer's square (accepted).
+- **G24 Instance data** (orchestrator decision): each frame one O(n) pass packs the pool in reverse (newest first, so the oldest draw on top) into a persistent 16-byte-per-instance staging buffer grown by doubling: `x`, `y` as f32, `seed` as u32, `frame | direction << 16` as u32; `bufferSubData`, integers through `vertexAttribIPointer`; an integer hash of `seed` in the shader gives rotation, size and brightness. `state.plants.*` is read every frame, never cached (`ensureCapacity` replaces the arrays).
+- **G25 Heatmap blocky:** `R32F` with `NEAREST` (each cell a flat square, as the model stores it), from a persistent Float32 staging array. Ramp 0 to `E_cap`, separate tint above the cap.
+- **G26 Halo offset direction:** screen bottom right (light from the top left), i.e. arena `(-1, +1) / √2 * shadow_offset_mm` under D18; negative flips it.
+- **G27 Renderer details:** throws a named error without WebGL2; drawing buffer = client size x `devicePixelRatio`; sprite size maps through the independent x and y scales (oval on a non-square monitor, accepted); brightness jitter multiplies RGB only; no context-loss recovery, but `webglcontextlost` logs a `console.error` telling the operator to reload.
 
 ### WP 3.1: Simulation step
 
-- **Model:** Opus (integration semantics and emergent-behaviour tests).
+- **Model:** Opus (integration semantics and emergent-behaviour tests). Fork.
 - **Owns:** `glade/sim/step.mjs`, `cobeart-app/test/glade-step.test.js`.
-- **Scope:**
-  - `step(prev, next, foot, params, arena)` runs, in order: deposit, diffuse, spill, feeding, spawning, frames.
-  - `resolveFoot(sighting, nowMs, params)` turns the latest sighting (body plus receipt time) into a foot or `null` per `foot_timeout_ms`.
-  - `resetState(params, arena)` creates a fresh state from `seed`.
+- **Scope:** the G21 API.
 - **Must pass:**
   - `npm test` green, covering:
     - multi-step energy accounting: total ground plus plants equals initial plus deposit minus consumption
     - the same seed and input give identical states
-    - rescaling all energy parameters by 10 gives the same plant positions and frames
-    - a foot standing still for 20 s grows a glade whose radius keeps increasing after the core saturates
+    - h = 25 and h = 50 give matching total ground energy and plant count (G20)
+    - a foot standing still for 20 s grows a glade whose radius keeps increasing after the core saturates (pinned values, G22)
     - a foot moving at walking speed leaves no cell above `E_cap`
     - after the foot leaves, plants die youngest first and the pool eventually empties
+    - `resolveFoot` returns `null` past `foot_timeout_ms` and for no sighting
   - `node scripts/fitness.mjs` clean.
 
 ### WP 3.2: WebGL2 renderer
 
-- **Model:** Opus, agent type `glsl-shader-expert`.
+- **Model:** Opus, agent type `glsl-shader-expert`. Fresh agent.
 - **Owns:** `glade/render/renderer.mjs`, `glade/render/shaders.mjs`, `glade/dev/render-demo.html`.
-- **Scope:** brief "Rendering".
+- **Scope:** brief "Rendering", with G23 to G27.
   - **API:** `createRenderer(canvas, arena, atlas)` returns `{ render(state, params, { heatmap }), setAtlas(atlas), resize(), dispose() }`.
   - **Mapping:** stretch to fill per D18: screen x from `x_max` (left) to `x_min`, screen y from `y_min` (top) to `y_max`.
-  - **Draw:** one instanced draw with 12 vertices per instance (halo quad, then sprite quad), drawn newest first (reverse pool order), premultiplied blending `(ONE, ONE_MINUS_SRC_ALPHA)`, and the atlas uploaded premultiplied with mipmaps.
-  - **Per instance:** rotation, size and brightness jitter from `seed`; the atlas cell from `(frame, direction)`.
-  - **Halo:** sprite alpha at `shadow_scale` with mip bias `shadow_blur`, black at `shadow_strength`, offset by `shadow_offset_mm`.
-  - **Heatmap** under the plants: a ramp from 0 to `E_cap`, plus an overshoot tint.
+  - **Draw:** one instanced draw with 12 vertices per instance (halo quad, then sprite quad), drawn newest first (G24), premultiplied blending `(ONE, ONE_MINUS_SRC_ALPHA)`, the atlas as a premultiplied, mipmapped texture array (G23).
+  - **Per instance:** rotation, size and brightness jitter from `seed`; the layer from `(frame, direction)`.
+  - **Halo:** sprite alpha at `shadow_scale` with mip bias `shadow_blur`, black at `shadow_strength`, offset by `shadow_offset_mm` (G26).
+  - **Heatmap** under the plants (G25).
   - **`dev/render-demo.html`** builds a synthetic state with `sim/state.mjs` (dense overlapping plants at mixed frames and directions, plus a density blob) and renders it with the GL 1.2 atlas.
 - **Must pass:**
   - With a hub on port 3302, Playwright screenshots of the demo show:
     - plants at the expected screen positions for known arena coordinates (one plant at each arena corner)
     - visible darkening only where plants overlap
     - the heatmap toggled on and off
-  - The console is clean (no GL errors).
+  - The console has no errors and no warnings caused by the renderer (Firefox's own driver notices are listed in the report, not hidden).
   - `node scripts/fitness.mjs` clean.
 
 **Phase 3 gate:** the gate commands.
@@ -248,6 +255,7 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 
 **Open for the phase grill:**
 - **Substep budget** (GL 2 review): diffusion/spill cost scales with `substeps * nx * ny`, i.e. `1/h⁴`; at `h` = 10, `D_spill` = 1e6, `dt` = 1/15 (all in range) one step needs ~2,200 substeps over 360k cells and freezes the page from a slider. Spill now relaxes only the above-cap bounding box, which fixes small hot spots but not a wide saturated area. Decide a `validateParams` budget (e.g. `substeps(D_spill, dt, h) <= 32` and the same for `D`) with an error naming `D_spill`, `h` and `dt`; that is a `params.mjs` change for WP 4.1 or an orchestrator commit.
+- At the current defaults a planted foot does not grow an expanding glade (Phase 3 measurement above); the tuning decides whether that changes.
 - Starting values for the parameters still marked TBD (`input_power`, `r`, `lambda_max`, `shadow_strength`, `shadow_scale`, `shadow_blur`). The orchestrator proposes values derived from target behaviours, for example "a planted foot saturates its footprint in about 2 s" and "a plant grows in about 3 s", and the user picks.
 
 ### WP 4.1: World page, loop, panel and keys

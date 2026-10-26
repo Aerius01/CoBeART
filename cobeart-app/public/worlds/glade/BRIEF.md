@@ -35,7 +35,7 @@ Vegetation grows around a performer's feet. A foot carries an energy field. Wher
 
 ## Model
 
-Everything runs on a fixed simulation timestep `dt`, independent of frame arrival (`bridge_framerate`) and display rate (see Runtime). Each step uses the latest known foot position. The step is a pure function `step(state, foot, dt, params, rng) -> state` with a seeded RNG, so runs are reproducible and testable.
+Everything runs on a fixed simulation timestep `dt`, independent of frame arrival (`bridge_framerate`) and display rate (see Runtime). Each step uses the latest known foot position. The step is deterministic, `step(prev, next, foot, params, scratch)`: it reads `prev`, writes only `next` (double buffering) and draws from a seeded RNG held in the state, so runs are reproducible and testable (GL grill G1, G21).
 
 ### 1. Foot energy field
 

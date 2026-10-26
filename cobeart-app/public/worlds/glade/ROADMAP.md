@@ -142,7 +142,7 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 - **G12 `drawAt` in `plants.mjs`.** Bilinear withdrawal: cell `i` is asked for `w_i * amount` and gives `min(ask, density_i * area)`; a short cell is not made up by the others.
 - **G13 Scratch per module**, not double-buffered: field scratch holds Float64 nx·ny buffers; plant scratch holds the cell-bucket index (built from the stored Float32 positions) plus a per-cell "spawned this step" slot so spacing sees same-step spawns, and grows with the pool. Accounting is via return values.
 - **G14 Float64 density** (`[GL 2]` commit to `state.mjs`); plant energy stays Float32. The Phase 3 heatmap converts at upload.
-- **G15 Analytic deposit.** Total `input_power * dt * (1 - z²/R²)³` (the kernel's exact integral relative to z = 0, zero for `z >= R`), spread over the in-grid cells by `f(centre) / Σ inside f`. One rule covers lifting, the edge and h-independence. When no cell centre lies inside the footprint, nothing is deposited and the return is 0.
+- **G15 Analytic deposit.** Total `input_power * dt * (1 - z²/R²)³` (the kernel's exact integral relative to z = 0, zero for `z >= R`), spread over the in-grid cells by `f(centre) / Σ inside f`. One rule covers lifting, the edge and h-independence. When no cell centre lies inside the footprint, nothing is deposited and the return is 0. **Amended at the gate review:** the edge boost `fullSum / insideSum` is capped at 4 (the corner case), so a foot mostly outside the arena fades continuously to 0 instead of dumping the whole total into the last few cells; on the floor the cap never binds. `deposit` throws on a non-finite foot coordinate.
 - **G16 Isotropic 4 : 1 stencil** for both operators: per substep an orthogonal edge carries `(2k/3)·Δ` and a diagonal edge `(k/6)·Δ`, `k = D·(dt/n)/h²` with `n = ceil(10·D·dt/(3·h²))`, so k ≤ 0.3 (h in mm, D in mm²/s). First decided as Oono-Puri 2 : 1 per the brief; WP 2.1 measured +0.83% fourth-moment anisotropy for 2 : 1 against ~0 for 4 : 1, and the user switched (brief updated). Spill uses the excess `max(0, ρ - E_cap)` frozen at the start of each substep, so a cell never loses more than its excess.
 - **G17 Seed payment by the spawning cell only** (brief updated): the candidate's own cell must hold `seed_energy`, or there is no spawn and no charge. Bilinear payment would refuse most fringe spawns next to empty cells. Feeding stays bilinear.
 - **G18 Consumption.** A short plant's energy clamps at 0; consumption is exactly what leaves the system: `x + min(energy, shortfall)` when short, the demand when full, and the overflow above `PLANT_MAX` when nearly full. Computed from the stored Float32 values so the books close to float64 precision. `feed` removes plants at `energy <= 0` by order-preserving compaction.
@@ -153,14 +153,14 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 - **Model:** Opus (numerics).
 - **Owns:** `glade/sim/field.mjs`, `cobeart-app/test/glade-field.test.js`.
 - **Scope:** brief sections 1 and 2.
-  - **Foot deposition:** sphere kernel `(1 - rho²)²`. It is normalised once at z = 0 so a planted foot injects `input_power` in total, and renormalised over inside cells near the arena edge. It handles an absent foot (`null`).
+  - **Foot deposition:** sphere kernel `(1 - rho²)²`. Analytic total and inside-cell distribution per G15 (amended: edge boost capped at 4). It handles an absent foot (`null`).
   - **Operators:** diffusion and spill as conservative 9-point (4 : 1, G16) edge fluxes with reflecting boundaries. Each runs `ceil(10k/3)` substeps, where `k = D * dt / h²`.
   - **Spill** is the same operator applied to `max(0, E - E_cap)` with `D_spill`.
   - Densities are in E/m² throughout.
 - **Must pass:**
   - `npm test` green, covering:
     - deposition totals `input_power * dt` at z = 0, less when lifted, and nothing at `z >= R`
-    - edge renormalisation keeps the total
+    - edge renormalisation keeps the total (on the floor; G15 cap outside)
     - diffusion and spill conserve total energy to 1e-6 relative
     - no flux leaves the grid
     - no negative density at `D_spill` = 1e6
@@ -195,6 +195,9 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 ## Phase 3: Step and renderer (2 parallel WPs)
 
 **Open for the phase grill:**
+- **Rescale-by-10 test vs G5** (GL 2 review): `PLANT_MAX` is fixed at 1, so multiplying every energy parameter by 10 changes plant fill time and saturation, and Float32 plant energy cannot rescale bit-exactly. Recommendation: narrow WP 3.1's test to ground-field invariance plus h-independence, and record that rescaling E is a code change (G5); the alternative is a `plant_max` input to `feed`/`updateFrames`, which breaks the G11 signatures.
+- **Step signature and scratch** (GL 2 review): `step(prev, next, foot, params, arena)` has nowhere to keep `FieldScratch`/`PlantScratch`. Recommendation: `createStepScratch(grid, capacity) -> { field, plants }` and `step(prev, next, foot, params, scratch) -> { deposited, consumed, spawned }` (drop `arena`, the grid carries it), rebuilt with `resetState`; the operators' scratch guards make a forgotten rebuild throw. A `totalPlantEnergy(state)` helper for the conservation test belongs in `step.mjs`.
+- **Renderer inputs** (GL 2 review): `frame` is Uint16, `direction` Uint8, `seed` Uint32 (integer attributes need `vertexAttribIPointer` or packing); density is Float64, so the heatmap needs a persistent Float32 staging array, not one per frame.
 - the instance buffer layout and how the renderer reads the pool (direct typed-array upload versus packing). "Newest first" is reverse pool order, which instanced attributes cannot iterate: pack in reverse (one O(n) pass) or fetch at `count - 1 - gl_InstanceID`. `ensureCapacity` replaces the pool arrays, so the renderer must read `state.plants.*` every frame and never cache array references.
 - **Atlas mip bleed** (from the GL 1 review): the atlas gutter is `2 * ceil(cellPx / 16)` (12 px at 96) and the pitch is not a power of two, so mip levels above about 3 mix neighbouring cells, while `shadow_blur` (range 0 to 8, default 2) biases the halo onto coarse levels. Options: a power-of-two pitch with more margin and a returned `maxBleedFreeLod` (renderer sets `TEXTURE_MAX_LEVEL`), shrinking the art radius, and/or narrowing `shadow_blur`'s range in `params.mjs`. Either way WP 3.2 needs ownership of `render/atlas.mjs` (and possibly the `shadow_blur` entry in `params.mjs`), and may add a pure `cellRect(geom, frame, row)` UV helper with a test.
 - `shadow_offset_mm` is a scalar; pick its direction.
@@ -243,7 +246,9 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 
 ## Phase 4: Runtime (1 WP)
 
-**Open for the phase grill:** starting values for the parameters still marked TBD (`input_power`, `r`, `lambda_max`, `shadow_strength`, `shadow_scale`, `shadow_blur`). The orchestrator proposes values derived from target behaviours, for example "a planted foot saturates its footprint in about 2 s" and "a plant grows in about 3 s", and the user picks.
+**Open for the phase grill:**
+- **Substep budget** (GL 2 review): diffusion/spill cost scales with `substeps * nx * ny`, i.e. `1/h⁴`; at `h` = 10, `D_spill` = 1e6, `dt` = 1/15 (all in range) one step needs ~2,200 substeps over 360k cells and freezes the page from a slider. Spill now relaxes only the above-cap bounding box, which fixes small hot spots but not a wide saturated area. Decide a `validateParams` budget (e.g. `substeps(D_spill, dt, h) <= 32` and the same for `D`) with an error naming `D_spill`, `h` and `dt`; that is a `params.mjs` change for WP 4.1 or an orchestrator commit.
+- Starting values for the parameters still marked TBD (`input_power`, `r`, `lambda_max`, `shadow_strength`, `shadow_scale`, `shadow_blur`). The orchestrator proposes values derived from target behaviours, for example "a planted foot saturates its footprint in about 2 s" and "a plant grows in about 3 s", and the user picks.
 
 ### WP 4.1: World page, loop, panel and keys
 

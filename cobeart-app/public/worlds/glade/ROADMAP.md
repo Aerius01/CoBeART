@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-26):** Phases 0 and 1 merged to `main` (`81de254`). Phase 2 running on `gl-2-simulation`.
+**Status (2026-10-26):** Phases 0 to 2 done; Phase 2 on `gl-2-simulation`. **Next phase:** 3. **Phase 3 base:** the tip of `main` after the Phase 2 merge (the `[GL 2]` outcomes commit).
 
 ## Project facts
 
@@ -334,7 +334,49 @@ Deferred items went to the Phase 2 and Phase 3 grill lists and the WP 4.1 scope.
 
 ### Phase 2
 
-Not run.
+**Commits** on `gl-2-simulation` (from `main` at `81de254`):
+- `8075dac`: grill decisions G11 to G19, and Float64 density in `state.mjs` (G14). This is the WP base.
+- `bee01a8`: G16 switched to the 4 : 1 stencil.
+- `ad657b5`: GL 2.1.
+- `01af17d`: GL 2.2.
+- `42d96f0`: the G15 edge cap and the deferred review items.
+- Then the `[GL 2]` outcomes commit (this text).
+
+**Grill decisions:** G11 to G19 above. Two were amended mid-phase on evidence from the WPs:
+- **G16:** 2 : 1 measured +0.83% fourth-moment anisotropy, so the stencil is now 4 : 1, with k ≤ 0.3 and `n = ceil(10k/3)`.
+- **G15:** the edge boost is capped at 4.
+
+**API as built** (adds to the G11 pin):
+- `field.mjs` also exports `substeps`, `K_MAX = 0.3` and `EDGE_BOOST_MAX = 4`.
+- `deposit` returns the energy actually deposited, which is less than the total only beyond the arena edge, and throws on a non-finite foot.
+- Both scratches carry `nx`/`ny` and their operators throw on a shape mismatch.
+- `PlantScratch` grows its own index arrays to `state.capacity`.
+
+**Gate review** (code-optimizer-reviewer and system-architect on `81de254..` the WP head): no correctness defects. Fixed by amending the owning WP:
+- GL 2.1:
+  - The G15 cap.
+  - The non-finite foot throws.
+  - Spill relaxes only the above-cap box plus one cell; the result is identical to the full-grid version to 1e-15.
+  - No per-substep `delta.fill`.
+- GL 2.2:
+  - The scratch shape check compares `nx` and `ny`.
+  - The bucket index is built lazily on a step's first spawn candidate.
+  - The cell is cached per plant while building the index.
+
+Deferred to the Phase 3 grill: the rescale test versus G5, the step signature and scratch, and renderer inputs. Deferred to the Phase 4 grill: the substep budget. Both are listed in those phases. Accepted and not pursued:
+- `Math.exp` is not required to round identically in every engine, so "same seed, same result" holds within one engine (Electron), not across browsers.
+- `feed` (about 3.5 ms at 100k plants) is the largest per-step cost. Caching per-plant bilinear data was judged not worth an extra `cloneInto` copy without a browser profile.
+
+**Measured** (reviewer bench, defaults, 120x120 grid, 100k live plants, before the lazy-index and spill-box fixes): about 5.9 ms per step. The breakdown: `feed` 3.5, `spawn` 1.3, `spill` 0.42, `updateFrames` 0.36, `diffuse` 0.15, `cloneInto` 0.12.
+
+**Gate results:**
+- `npm test`: 114 pass (12 field and 15 plant tests are new).
+- Fitness: 0 violations, and `fitness.test.mjs` 16 pass.
+- pytest (no Python changed): 242 pass, with 1 failure from the known `TODO.md` e2e flake, which passes in isolation.
+
+**Lessons:**
+- A ratio quoted from the brief ("2 : 1, isotropic") was taken on trust in the grill. The WP measured it and found it wrong. Ask workers to verify numerical claims they implement, and surface rather than silently follow a contradiction.
+- The "own cell pays" decision (G17) came from walking through a fringe-spawn example in the grill. Concrete scenarios find behaviour changes that the wording hides.
 
 ### Phase 3
 

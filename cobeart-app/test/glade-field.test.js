@@ -133,7 +133,7 @@ test('deposit rejects a non-finite foot, naming it', async () => {
 
 test('diffusion and spill conserve total energy to 1e-6 relative', async () => {
   const { createState, createFieldScratch, diffuse, spill, totalEnergy, defaultParams } = await load();
-  for (const overrides of [{}, { D: 25000, dt: 1 / 15 }, { D_spill: 1e6 }, { D_spill: 1e6, dt: 1 / 15, h: 25 }]) {
+  for (const overrides of [{}, { D: 25000, dt: 1 / 15 }, { D_spill: 1e6 }, { D_spill: 1e6, dt: 1 / 15 }]) {
     const p = paramsWith(defaultParams, overrides);
     const { grid } = createState(p, ARENA);
     const scratch = createFieldScratch(grid);

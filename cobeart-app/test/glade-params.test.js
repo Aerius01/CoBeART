@@ -125,6 +125,8 @@ test('every cross-parameter rule throws with the parameter named', async () => {
     [{ delta: 0.5 }, 'delta', '0.49'],
     [{ max_steps_per_frame: 0 }, 'max_steps_per_frame', '[1, 16]'],
     [{ h: 35 }, 'h', '6000 x 6000', 'nearby valid values: 25, 30, 40, 50'],
+    [{ h: 15, E_spawn_min: 100 }, 'D_spill', 'h = 15 mm', 'dt = ', 'budget 2000000', 'lower D_spill to at most'],
+    [{ h: 15, E_spawn_min: 100, D: 25000, dt: 1 / 15 }, 'D', 'h = 15 mm', 'lower D to at most'],
   ];
   for (const [overrides, param, ...parts] of cases) {
     const p = await withDefaults(overrides);
@@ -138,4 +140,19 @@ test('h must divide both spans of a non-square arena', async () => {
   validateParams(await withDefaults({ h: 50 }), arena);
   const p = await withDefaults({ h: 60, min_spacing_mm: 15 });
   await assertParamError(() => validateParams(p, arena), 'h', '6000 x 4000', '40, 50, 80, 100');
+});
+
+test('the substep budget suggestion fits and the extremes at h = 50 stay within it', async () => {
+  const { GladeParamError, validateParams } = await loadParams();
+  const p = await withDefaults({ h: 15, E_spawn_min: 100 });
+  let fit = null;
+  try {
+    validateParams(p, ARENA);
+  } catch (err) {
+    assert.ok(err instanceof GladeParamError);
+    fit = Number(/at most (\d+)/.exec(err.message)[1]);
+  }
+  assert.ok(fit > 0);
+  validateParams({ ...p, D_spill: fit }, ARENA);
+  validateParams(await withDefaults({ D: 25000, D_spill: 1e6, dt: 1 / 15 }), ARENA);
 });

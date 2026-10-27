@@ -9,7 +9,7 @@ const SMALL = { x: [0, 500], y: [0, 500], z: [0, 2500] };
 
 /**
  * Values for the emergent tests, pinned so tuning the defaults cannot break them (GL grill G22). At these values a
- * planted foot saturates its core and the glade keeps widening; at the provisional defaults it does not.
+ * planted foot saturates its core and the glade keeps widening for 20 s.
  */
 const PINNED = { input_power: 200, lambda_max: 20, r: 1 / 3, E_cap: 400, E_spawn_min: 40, D: 2500, D_spill: 100000,
   R: 300, seed_energy: 0.02, min_spacing_mm: 15, dt: 1 / 60, h: 50 };

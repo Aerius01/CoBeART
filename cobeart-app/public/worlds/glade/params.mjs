@@ -1,5 +1,6 @@
 // Glade parameter contract: metadata, frozen defaults and validation (BRIEF.md "Parameters").
 // Pure module: no DOM, window or WebGL, so node --test can import it.
+import { K_MAX, substeps } from './sim/field.mjs';
 
 /**
  * Contract roles, a literal copy of contract/frame.schema.json $defs/role (the browser cannot read the contract).
@@ -31,7 +32,8 @@ export const PLANT_MAX = 1;
  * @typedef {{ x: readonly number[], y: readonly number[], z: readonly number[] }} Arena  arena bounds in mm
  */
 
-const PROVISIONAL = 'provisional (GL 4 grill)';
+/** Most cell updates (substeps x cells) one diffusion operator may cost per step, so no edit can freeze the page. */
+export const MAX_CELL_SUBSTEPS = 2_000_000;
 
 /** @type {(spec: ParamSpec) => Readonly<ParamSpec>} */
 const param = (spec) => Object.freeze(spec);
@@ -44,8 +46,8 @@ export const PARAMS = Object.freeze([
     kind: 'structural', description: 'cell size; must divide both arena spans' }),
   param({ key: 'R', type: 'number', default: 300, min: 50, max: 1000, step: 10, unit: 'mm',
     kind: 'live', description: 'foot field sphere radius' }),
-  param({ key: 'input_power', type: 'number', default: 50, min: 1, max: 500, step: 1, unit: 'E/s',
-    kind: 'live', description: `total power of a foot at z = 0, plants' worth per second; ${PROVISIONAL}` }),
+  param({ key: 'input_power', type: 'number', default: 100, min: 1, max: 500, step: 1, unit: 'E/s',
+    kind: 'live', description: "total power of a foot at z = 0, plants' worth per second" }),
   param({ key: 'foot_timeout_ms', type: 'int', default: 200, min: 50, max: 2000, step: 10, unit: 'ms',
     kind: 'live', description: 'sighting age after which the foot is absent' }),
   param({ key: 'E_cap', type: 'number', default: 400, min: 40, max: 4000, step: 10, unit: 'E/m²',
@@ -55,7 +57,7 @@ export const PARAMS = Object.freeze([
   param({ key: 'D_spill', type: 'number', default: 100000, min: 10000, max: 1000000, step: 1000, unit: 'mm²/s',
     kind: 'live', description: 'spill (excess above E_cap) diffusion coefficient' }),
   param({ key: 'r', type: 'number', default: 1 / 3, min: 0.02, max: 5, step: 0.01, unit: 'E/s',
-    kind: 'live', description: `per-plant demand in every stage; growth and wither time 1/r; ${PROVISIONAL}` }),
+    kind: 'live', description: 'per-plant demand in every stage; growth and wither time 1/r' }),
   param({ key: 'seed_energy', type: 'number', default: 0.02, min: 0.001, max: 0.5, step: 0.001, unit: 'E',
     kind: 'live', description: 'energy a new plant takes from the ground' }),
   param({ key: 'N_frames', type: 'int', default: 30, min: 2, max: 64, step: 1, unit: 'frames',
@@ -64,8 +66,8 @@ export const PARAMS = Object.freeze([
     kind: 'live', description: 'frame hysteresis margin, a fraction of one frame band (below 0.5)' }),
   param({ key: 'E_spawn_min', type: 'number', default: 40, min: 1, max: 4000, step: 1, unit: 'E/m²',
     kind: 'live', description: 'spawn threshold; below E_cap, and ground at it must pay seed_energy per cell' }),
-  param({ key: 'lambda_max', type: 'number', default: 200, min: 1, max: 5000, step: 1, unit: 'spawns/(m²·s)',
-    kind: 'live', description: `spawn rate at E_cap; ${PROVISIONAL}` }),
+  param({ key: 'lambda_max', type: 'number', default: 20, min: 1, max: 5000, step: 1, unit: 'spawns/(m²·s)',
+    kind: 'live', description: 'spawn rate at E_cap' }),
   param({ key: 'min_spacing_mm', type: 'number', default: 15, min: 0, max: 200, step: 1, unit: 'mm',
     kind: 'live', description: 'minimum distance between plants; at most h' }),
   param({ key: 'sprite_size_mm', type: 'number', default: 60, min: 5, max: 500, step: 1, unit: 'mm',
@@ -75,11 +77,11 @@ export const PARAMS = Object.freeze([
   param({ key: 'brightness_jitter', type: 'number', default: 0.15, min: 0, max: 0.9, step: 0.01, unit: 'fraction',
     kind: 'live', description: 'per-plant brightness variation, brightness * (1 ± brightness_jitter)' }),
   param({ key: 'shadow_strength', type: 'number', default: 0.5, min: 0, max: 1, step: 0.01, unit: 'opacity',
-    kind: 'live', description: `depth halo opacity; ${PROVISIONAL}` }),
+    kind: 'live', description: 'depth halo opacity' }),
   param({ key: 'shadow_scale', type: 'number', default: 1.3, min: 1, max: 3, step: 0.01, unit: 'x sprite',
-    kind: 'live', description: `depth halo size relative to the sprite; ${PROVISIONAL}` }),
+    kind: 'live', description: 'depth halo size relative to the sprite' }),
   param({ key: 'shadow_blur', type: 'number', default: 2, min: 0, max: 8, step: 0.1, unit: 'mip bias',
-    kind: 'live', description: `depth halo softness (mipmap bias); ${PROVISIONAL}` }),
+    kind: 'live', description: 'depth halo softness (mipmap bias)' }),
   param({ key: 'shadow_offset_mm', type: 'number', default: 0, min: -100, max: 100, step: 1, unit: 'mm',
     kind: 'live', description: 'depth halo offset for a directional look' }),
   param({ key: 'dt', type: 'number', default: 1 / 60, min: 1 / 240, max: 1 / 15, step: 0.0001, unit: 's',
@@ -192,5 +194,14 @@ export function validateParams(p, arena) {
   if (v.min_spacing_mm > v.h) {
     throw new GladeParamError('min_spacing_mm', v.min_spacing_mm,
       `must not exceed h (${v.h} mm), or the 3x3 neighbour check misses plants; lower it or raise h`);
+  }
+  const cells = (spanX / v.h) * (spanY / v.h);
+  for (const key of /** @type {const} */ (['D', 'D_spill'])) {
+    const work = substeps(v[key], v.dt, v.h) * cells;
+    if (work > MAX_CELL_SUBSTEPS) {
+      const fit = Math.floor(Math.floor(MAX_CELL_SUBSTEPS / cells) * K_MAX * v.h * v.h / v.dt);
+      throw new GladeParamError(key, v[key], `costs ${work} cell updates per step at h = ${v.h} mm and ` +
+        `dt = ${v.dt} s (budget ${MAX_CELL_SUBSTEPS}); lower ${key} to at most ${fit}, raise h or lower dt`);
+    }
   }
 }

@@ -47,7 +47,7 @@ export const PARAMS = Object.freeze([
     kind: 'structural', description: 'cell size; must divide both arena spans' }),
   param({ key: 'R', type: 'number', default: 300, min: 50, max: 1000, step: 10, unit: 'mm',
     kind: 'live', description: 'foot field sphere radius' }),
-  param({ key: 'input_power', type: 'number', default: 100, min: 1, max: 500, step: 1, unit: 'E/s',
+  param({ key: 'input_power', type: 'number', default: 100, min: 1, max: 5000, step: 1, unit: 'E/s',
     kind: 'live', description: "total power of a foot at z = 0, plants' worth per second" }),
   param({ key: 'foot_timeout_ms', type: 'int', default: 200, min: 50, max: 2000, step: 10, unit: 'ms',
     kind: 'live', description: 'sighting age after which the foot is absent' }),

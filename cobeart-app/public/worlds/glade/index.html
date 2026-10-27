@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glade</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #error { position: fixed; inset: 0; color: #f66; padding: 1em; white-space: pre-wrap; background: #000;
+    font: 14px monospace; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="error" hidden></div>
+<!-- Receives frame postMessages from the host bridge (audio is ignored); keys: E heatmap, T panel, D dump, R reset. -->
+<script type="module" src="main.mjs"></script>
+</body>
+</html>

@@ -1,5 +1,6 @@
 // Glade parameter contract: metadata, frozen defaults and validation (BRIEF.md "Parameters").
 // Pure module: no DOM, window or WebGL, so node --test can import it.
+// sim/field.mjs must import only types from this module, or the two form an ES module cycle.
 import { K_MAX, substeps } from './sim/field.mjs';
 
 /**
@@ -200,8 +201,9 @@ export function validateParams(p, arena) {
     const work = substeps(v[key], v.dt, v.h) * cells;
     if (work > MAX_CELL_SUBSTEPS) {
       const fit = Math.floor(Math.floor(MAX_CELL_SUBSTEPS / cells) * K_MAX * v.h * v.h / v.dt);
+      const lower = fit >= /** @type {number} */ (SPEC_BY_KEY.get(key)?.min) ? `lower ${key} to at most ${fit}, ` : '';
       throw new GladeParamError(key, v[key], `costs ${work} cell updates per step at h = ${v.h} mm and ` +
-        `dt = ${v.dt} s (budget ${MAX_CELL_SUBSTEPS}); lower ${key} to at most ${fit}, raise h or lower dt`);
+        `dt = ${v.dt} s (budget ${MAX_CELL_SUBSTEPS}); ${lower}raise h or lower dt`);
     }
   }
 }

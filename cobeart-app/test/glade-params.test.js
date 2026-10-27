@@ -156,3 +156,10 @@ test('the substep budget suggestion fits and the extremes at h = 50 stay within 
   validateParams({ ...p, D_spill: fit }, ARENA);
   validateParams(await withDefaults({ D: 25000, D_spill: 1e6, dt: 1 / 15 }), ARENA);
 });
+
+test('the substep budget never suggests a value below the parameter minimum', async () => {
+  const { GladeParamError, validateParams } = await loadParams();
+  const p = await withDefaults({ h: 10, E_spawn_min: 200, min_spacing_mm: 10 });
+  assert.throws(() => validateParams(p, ARENA), (err) => err instanceof GladeParamError && err.param === 'D_spill' &&
+    !err.message.includes('at most') && err.message.includes('raise h or lower dt'));
+});

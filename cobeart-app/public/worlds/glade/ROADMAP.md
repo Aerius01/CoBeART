@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-27):** Phases 0 to 3 merged to `main`; Phase 4 running on `gl-4-runtime`.
+**Status (2026-10-27):** Phases 0 to 4 merged to `main`. **Next phase:** 5 (growth model, proposed; starts with its grill). **Phase 5 base:** the tip of `main` (the `[GL 4]` outcomes commit).
 
 ## Project facts
 
@@ -318,6 +318,20 @@ Walking at 1.2 m/s peaks at 100 / 200 / 400 E/m² respectively (`E_cap` 400).
 - Update `CLAUDE.md`: Glade alongside Splat in the worlds list, its keys, and home testing with the mouse.
 - Human check: live tuning in the Electron window on port 3000 with the mouse source. This is where the TBD parameters get their real values.
 
+## Phase 5: Growth model (proposed after the Phase 4 live tuning)
+
+**Problem** (G29, confirmed by the user's live tuning, 2026-10-27): no parameter set makes a planted foot's glade stabilise and then widen slowly. Every plant draws `r` forever, so at equilibrium `N * r` equals the input and the glade settles at about `input_power * lift / r` plants. While the ground charges, energy outruns spawning; a wave of plants then overshoots and starves back to that size. `lambda_max`, `E_cap` and `D_spill` shape the overshoot; `input_power / r` fixes the end state.
+
+**Starting proposal for the grill** (orchestrator, not yet decided):
+- **`r_maintain`:** the draw of a full plant, well below `r` (e.g. `r / 20`). Growth costs `r`, holding costs `r_maintain`, so the energy keeps paying for new plants at the edge: the glade widens at about `input / growth cost` until upkeep reaches `input / r_maintain` plants, much larger and reached slowly.
+- **`decline_rate`:** how fast an unfed plant loses energy, separate from `r` (the brief already names it for species), so cheap upkeep does not make the die-off slow.
+
+**Open for the phase grill:**
+- How `r_maintain` applies near full (switch at `PLANT_MAX`, or blend over the top frame band), and whether a declining plant that is fed again pays `r` or `r_maintain`.
+- Energy accounting: is the `decline_rate` loss counted as consumption (it leaves the system), and do the conservation tests change?
+- Whether to prototype first: run the proposal in a scratch copy of `sim/` at the tuned defaults and measure the glade radius over 60 s before writing the brief change.
+- Brief section 3, `sim/plants.mjs` and its tests change; `sim/step.mjs` should not. The G22 emergent test "the glade keeps widening" becomes a steady-state test.
+
 ## Deferred (from the brief, not in this roadmap)
 
 - Wilt colour bridging, the final `N_frames`, hand-drawn atlas loading, wind.
@@ -460,4 +474,34 @@ Deferred to Phase 4 (in WP 4.1's carry-over): the lil-gui candidate-copy trap, r
 
 ### Phase 4
 
-Not run.
+**Commits** on `gl-4-runtime` (from `main` at `24ea299`):
+- `aeb7b0e`: baseline, measurement and grill decisions G29 to G34.
+- `b854283`: the substep budget (G30) and starting values (G31). This is the WP base.
+- `a6a06ff`: GL 4.1 (amended after the gate review).
+- `30a0138`: the budget hint stays within the parameter range (gate review).
+- `fc5ca7e`: `input_power` maximum raised to 5000 for live tuning.
+- `be467d5`: live-tuned defaults `input_power` 800, `r` 2, `lambda_max` 200 (from the user's `D` dump).
+- Then the `[GL 4]` outcomes commit (this text, plus the `CLAUDE.md` update).
+
+**Grill decisions:** G29 to G34 above.
+
+**API as built:** `main.mjs` holds the loop, frame intake, keys and `commitReset(nextParams, nextSim)` (the one path for `R`, `h` and `N_frames`; it zeroes the owed time and the capacity baseline); `panel.mjs` exports `createPanel({ getParams, apply, arena })` returning `{ show, visible }`; `params.mjs` exports `MAX_CELL_SUBSTEPS`. A frame without the `foot_role` body clears the sighting at once (the brief's "missing role means no input"), so `foot_timeout_ms` only covers frames that stop arriving. `window.__glade` exposes `params`, `state` and `heatmap` for checks.
+
+**Gate review** (code-optimizer-reviewer and system-architect on `24ea299..31c5eb8`): no blocking defects. Fixed:
+- GL 4.1, amended: the capacity log baseline resets with the glade; one reset helper that zeroes owed time; no per-step allocation (in-place swap, foot resolved once per frame); every dropped interval is logged once the rate limit allows.
+- Orchestrator: the budget error no longer suggests a value below the parameter minimum; a comment pins the `params.mjs` to `sim/field.mjs` import direction.
+Dropped: panel visibility duplicating lil-gui's private state, finite checks on frames (the hub validates).
+
+**Measured** (tuned defaults, foot at the centre, z = 100 mm, 60 s): saturates at 0.07 s; about 296 plants within 274 mm at 10 s, settling at 280 plants within about 205 mm. Bounded, as G29 predicts.
+
+**Gate results:**
+- `npm test`: 127 pass.
+- Fitness: 0 violations, and `fitness.test.mjs` 16 pass.
+- No Python or config changed, so pytest was not run.
+- Browser: the WP's Firefox checks (Playwright) and the orchestrator's Electron 37 check (offscreen window at 60 fps; growth, host-forwarded `E`, full die-off, clean console). The user tuned live in the Electron window.
+
+**Lessons:**
+- A hidden Electron `BrowserWindow` throttles `requestAnimationFrame` to about 1 Hz even with `backgroundThrottling: false`; use `webPreferences.offscreen: true` with `setFrameRate(60)` for loop-driven checks.
+- A browser-driven worker can stall for many minutes between steps; ask workers to batch browser checks into scripted calls and read state through a debug handle instead of watching in real time.
+- A grill measurement that contradicts the brief's vision (G29) is worth stating plainly before tuning: the user confirmed it by hand, and it is now the next phase.
+- The Playwright MCP writes to the main checkout's `.playwright-mcp/`, not the worktree's; look there when checking a worker's progress.

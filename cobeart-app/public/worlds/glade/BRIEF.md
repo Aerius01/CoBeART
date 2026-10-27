@@ -226,18 +226,18 @@ All values are starting guesses, tuned live through the panel (see Runtime).
 | `foot_role` | the tracked body (`left_foot` for live testing) | `right_hand` |
 | `h` | cell size (mm) | 50 |
 | `R` | foot field sphere radius (mm) | 300 |
-| `input_power` | total power of a foot at z = 0 (E/s, plants' worth per second) | 100 |
+| `input_power` | total power of a foot at z = 0 (E/s, plants' worth per second) | 800 |
 | `foot_timeout_ms` | sighting age after which the foot is absent | 200 |
 | `E_cap` | soft ground cap (E/m², plants per m²) | 400 |
 | `D` | background diffusion (mm²/s) | 2,500 |
 | `D_spill` | excess (spill) diffusion (mm²/s) | 100,000 |
-| `r` | per-plant demand in every stage (E/s); growth and wither time `1/r` | 1/3 |
+| `r` | per-plant demand in every stage (E/s); growth and wither time `1/r` | 2 |
 | `plant_max` | plant full energy (the unit, fixed) | 1 |
 | `seed_energy` | energy a new plant takes from the ground (E) | 0.02 |
 | `N_frames` | animation frames per sprite set (open: depends on how many will be drawn) | 30 |
 | `delta` | frame hysteresis margin (fraction of a frame band) | 0.25 |
 | `E_spawn_min` | spawn threshold (E/m²) | 40 |
-| `lambda_max` | spawn rate at `E_cap` (spawns per m² per second) | 20 |
+| `lambda_max` | spawn rate at `E_cap` (spawns per m² per second) | 200 |
 | `min_spacing_mm` | minimum distance between plants (mm) | 15 |
 | `sprite_size_mm` | plant sprite size on the floor (mm) | 60 |
 | `size_jitter` | per-plant size variation (fraction) | 0.2 |
@@ -324,3 +324,4 @@ All sessions are done. Next: an implementation plan.
 - Session 5 (rendering): stretch-to-fill mapping (D18), top-down art at random rotation, Canvas 2D generated colour atlas (`N_frames` = 30 for now), birth and death handled by frame 0 of the art, per-seed size, rotation and brightness, order-preserving compaction with the oldest on top, black premultiplied depth halos visible only on overlap, `E` toggles the heatmap, the wilt colour jump accepted for the MVP.
 - Session 6 (runtime and tooling): fixed-step accumulator with `max_steps_per_frame` = 4 and a logged drop beyond it, no render interpolation, foot sighting on the receipt clock, parameter metadata driving defaults, validation and a vendored lil-gui panel, live versus structural parameters, keys `E` `T` `D` `R`, `seed` = 1, `foot_role` = `right_hand` for home testing with shipped mouse z 100 mm and 20 mm steps, `node --test` on `sim/` plus a Playwright browser check.
 - GL 4 grill: the glade is bounded by `input_power / r` for the MVP (a model change is deferred to after live tuning); starting values `input_power` 100, `r` 1/3, `lambda_max` 20, halos 0.5 / 1.3 / 2; `validateParams` caps each diffusion operator at 2,000,000 cell updates per step; Glade's keys are ignored while the focus is in a panel field.
+- GL 4 live tuning: `input_power` 800, `r` 2, `lambda_max` 200. No setting gives a slowly widening glade (G29); a growth-model change is proposed as GL Phase 5.

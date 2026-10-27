@@ -86,7 +86,9 @@ Beat detection runs madmom online in a spawned child process (`beat/process.py`,
   - `border-control.js` draws the border (`B`).
   - With `?debug`, the bridge shows an overlay listing bodies by role plus the audio line.
 - `sources/`: browser input sources. `mouse.js` is a transparent layer over the world: while a button is held it sends `pose_frame`s at `rate_hz` for `sources.mouse.role`, with an identity quaternion and z from the wheel (persisting, clamped to `arena.z`, shown in a corner readout); on release it sends one empty frame. `M` toggles the layer off (so the world's own GUI is clickable) and on again, from the host or from inside the world. The maths is in `mouse-math.mjs` (pure, unit-tested).
-- `worlds/<name>/`: one folder per world, each a standalone page that only listens for `frame` and `audio` postMessages. The `worlds-receive-only` fitness rule forbids sockets there. Adding a folder with an `index.html` adds a world to both launchers. The only world is `splat/` (WebGL2 Navier-Stokes fluid). It paints the hands, the feet and `stick` while held, and only while they move. Its gesture patterns key on roles, it has its own colour, and its keys are `P` (pause the fluid physics) and `G` (cycle backgrounds).
+- `worlds/<name>/`: one folder per world, each a standalone page that only listens for `frame` and `audio` postMessages. The `worlds-receive-only` fitness rule forbids sockets there. Adding a folder with an `index.html` adds a world to both launchers. There are two worlds:
+  - `splat/` (WebGL2 Navier-Stokes fluid). It paints the hands, the feet and `stick` while held, and only while they move. Its gesture patterns key on roles, it has its own colour, and its keys are `P` (pause the fluid physics) and `G` (cycle backgrounds).
+  - `glade/` (vegetation growing from one foot's energy field). The tracked body is the `foot_role` parameter (default `right_hand`, the mouse role; `left_foot` on site). Pure simulation in `sim/`, WebGL2 renderer in `render/`, parameters and validation in `params.mjs`, lil-gui panel in `panel.mjs`, wiring in `main.mjs`. Keys: `E` energy heatmap, `T` tuning panel (press `M` first so the panel is clickable), `D` dump the parameters as JSON to the console and clipboard, `R` reset. `BRIEF.md` is its design and `ROADMAP.md` its phases and decisions (roadmap ID `GL`).
 - Debug logging in the frontend is gated by `?debug` in the URL or `debug: true` in the YAML.
 
 ### Background shaders
@@ -133,7 +135,7 @@ start-audio-client                # capture, meter and emit to the hub by defaul
 
 - `start-audio-client` flags: `--no-emit` (meter only, no hub), `--device INDEX` (skip the device prompt), `--debug`. Beat detection follows `audio.beat_detection` in the YAML.
 - `start-optitrack-client [server_address [client_address [transport]]] [--simulate] [--url URL] [--log-level L]`. `--simulate` sends Motive IDs 0-2, which the shipped `tracking.roles` maps to `left_hand`, `right_hand`, `head`.
-- Mouse input needs no Python process: choose Mouse in the launcher (or `/host/?world=splat&source=mouse`), hold a button and move; the wheel sets z; `M` toggles the mouse layer. Run one source at a time: while the simulator or OptiTrack client is sending, the hub drops the mouse's frames (and vice versa).
+- Mouse input needs no Python process: choose Mouse in the launcher (or `/host/?world=splat&source=mouse`, `world=glade` for Glade), hold a button and move; the wheel sets z (in Glade, wheel up lifts the foot off the ground); `M` toggles the mouse layer. Run one source at a time: while the simulator or OptiTrack client is sending, the hub drops the mouse's frames (and vice versa).
 - Audio reaches the world without any motion source; frames arrive only while a source sends pose_frames.
 - Use `PORT=<port> npm run web` for a second hub; pass the matching `COBEART_SOCKETIO_URL` or `--url` to Python tools.
 
@@ -175,10 +177,10 @@ CI (`.github/workflows/ci.yml`) runs pytest, flake8, `npm test` and the fitness 
 
 1. `cd cobeart-app && PORT=3400 npm run web` (or `npm start`, port 3000).
 2. Pick an input:
-   - Mouse: open `http://127.0.0.1:3400/`, choose Splat and Mouse, then hold a button and move.
+   - Mouse: open `http://127.0.0.1:3400/`, choose Splat or Glade and Mouse, then hold a button and move.
    - Simulator: `COBEART_SOCKETIO_URL=http://127.0.0.1:3400 start-simulator --scenario orbit --audio beat` with Live.
    - Full Python pipeline: `start-optitrack-client --simulate` with Live.
-3. Add `?debug` to the page URL for the overlay and logs. Splat paints only moving hands, feet and a held `stick`.
+3. Add `?debug` to the page URL for the overlay and logs. Splat paints only moving hands, feet and a held `stick`; Glade grows plants where the `foot_role` body is near the floor, most where it holds still (`E` shows the ground energy).
 4. `curl http://127.0.0.1:3400/health` shows connected clients and the age of the last frame and audio.
 
 A real microphone can be checked live with `start-audio-client` against the same hub.

@@ -4,7 +4,7 @@ Living document for the Glade world. Update it as decisions are made; record eac
 
 ## Vision
 
-Vegetation grows around a performer's feet. A foot carries an energy field. Where that field touches the floor, the ground charges with energy, and plants sprout and feed on it. Walking leaves a short-lived trail of growth that withers once the ground is drained. Standing still saturates the ground, and the growth spreads outward in an ever-widening glade.
+Vegetation grows around a performer's feet. A foot carries an energy field. Where that field touches the floor, the ground charges with energy, and plants sprout and feed on it. Walking leaves a short-lived trail of growth that withers once the ground is drained. Standing still saturates the ground, and the growth blooms outward into a glade. With constant per-plant demand the glade is bounded: it settles at about `input_power * lift / r` plants (GL 4 grill G29).
 
 ## Scope
 
@@ -144,7 +144,7 @@ Spawning runs after the plant exchange, so a new plant is first fed on the next 
 ### Emergent behaviour (expected, to be verified by tuning)
 
 - A walking foot never saturates cells, so it leaves a trail and the glade does not expand.
-- A planted foot saturates the ground beneath it, and the spill pushes growth outward.
+- A planted foot saturates the ground beneath it, and the spill pushes growth outward. The bloom overshoots and then settles: every plant demands `r`, so the plant count tends to `input_power * (1 - z²/R²)³ / r` (measured in the GL 4 grill: at `input_power` 100, `lambda_max` 20 and z = 100 mm, a radius of about 630 mm at 20 s settling to about 215 plants within about 280 mm). A lower `lambda_max` lets spill carry energy further before plants eat it, giving a wider bloom.
 - Spill reaching the reflecting edge backs up along it and fills inward, giving asymmetric growth near walls and corners.
 - After the foot leaves, plants survive for roughly `ground energy / (plants drawing on it * r)`, then wither over `1/r`. Dense patches run dry sooner than sparse ones and thin out youngest first.
 - How quickly plants die after a foot lifts is set by `E_cap` and `r`.
@@ -226,25 +226,25 @@ All values are starting guesses, tuned live through the panel (see Runtime).
 | `foot_role` | the tracked body (`left_foot` for live testing) | `right_hand` |
 | `h` | cell size (mm) | 50 |
 | `R` | foot field sphere radius (mm) | 300 |
-| `input_power` | total power of a foot at z = 0 (E/s, plants' worth per second) | TBD |
+| `input_power` | total power of a foot at z = 0 (E/s, plants' worth per second) | 100 |
 | `foot_timeout_ms` | sighting age after which the foot is absent | 200 |
 | `E_cap` | soft ground cap (E/m², plants per m²) | 400 |
 | `D` | background diffusion (mm²/s) | 2,500 |
 | `D_spill` | excess (spill) diffusion (mm²/s) | 100,000 |
-| `r` | per-plant demand in every stage (E/s); growth and wither time `1/r` | TBD |
+| `r` | per-plant demand in every stage (E/s); growth and wither time `1/r` | 1/3 |
 | `plant_max` | plant full energy (the unit, fixed) | 1 |
 | `seed_energy` | energy a new plant takes from the ground (E) | 0.02 |
 | `N_frames` | animation frames per sprite set (open: depends on how many will be drawn) | 30 |
 | `delta` | frame hysteresis margin (fraction of a frame band) | 0.25 |
 | `E_spawn_min` | spawn threshold (E/m²) | 40 |
-| `lambda_max` | spawn rate at `E_cap` (spawns per m² per second) | TBD |
+| `lambda_max` | spawn rate at `E_cap` (spawns per m² per second) | 20 |
 | `min_spacing_mm` | minimum distance between plants (mm) | 15 |
 | `sprite_size_mm` | plant sprite size on the floor (mm) | 60 |
 | `size_jitter` | per-plant size variation (fraction) | 0.2 |
 | `brightness_jitter` | per-plant brightness variation (fraction) | 0.15 |
-| `shadow_strength` | halo opacity | TBD |
-| `shadow_scale` | halo size relative to the sprite | TBD |
-| `shadow_blur` | halo softness (mipmap bias) | TBD |
+| `shadow_strength` | halo opacity | 0.5 |
+| `shadow_scale` | halo size relative to the sprite | 1.3 |
+| `shadow_blur` | halo softness (mipmap bias) | 2 |
 | `shadow_offset_mm` | halo offset for a directional look | 0 |
 | `dt` | simulation step (s) | 1/60 |
 | `max_steps_per_frame` | catch-up limit before time is dropped | 4 |
@@ -303,6 +303,7 @@ All sessions are done. Next: an implementation plan.
 - Final `N_frames`, once the drawing budget is known.
 - Target plant count and frame time on the show machine (left to tuning).
 - Ellipsoid foot field, if lift-off and footprint size need separate tuning.
+- A sustained widening glade, if the bounded bloom (G29) is not enough on the floor: for example a lower maintenance demand for full plants than for growing ones (rewrites section 3).
 - Ground half-life, if the "primed floor" effect shows up (see section 2).
 - Later extensions: both feet, more species with their own demand and `decline_rate`, wind, audio.
 
@@ -322,3 +323,4 @@ All sessions are done. Next: an implementation plan.
 - Session 4 (spawning): `lambda` as a density with a linear ramp from `E_spawn_min` to `E_cap`, at most one spawn per cell per step, uniform position in the cell, `min_spacing_mm` rejection (energy sets real density), `seed_energy` paid by the spawning cell or no spawn (changed from bilinear in the GL 2 grill, so fringe cells next to empty ground can still spawn).
 - Session 5 (rendering): stretch-to-fill mapping (D18), top-down art at random rotation, Canvas 2D generated colour atlas (`N_frames` = 30 for now), birth and death handled by frame 0 of the art, per-seed size, rotation and brightness, order-preserving compaction with the oldest on top, black premultiplied depth halos visible only on overlap, `E` toggles the heatmap, the wilt colour jump accepted for the MVP.
 - Session 6 (runtime and tooling): fixed-step accumulator with `max_steps_per_frame` = 4 and a logged drop beyond it, no render interpolation, foot sighting on the receipt clock, parameter metadata driving defaults, validation and a vendored lil-gui panel, live versus structural parameters, keys `E` `T` `D` `R`, `seed` = 1, `foot_role` = `right_hand` for home testing with shipped mouse z 100 mm and 20 mm steps, `node --test` on `sim/` plus a Playwright browser check.
+- GL 4 grill: the glade is bounded by `input_power / r` for the MVP (a model change is deferred to after live tuning); starting values `input_power` 100, `r` 1/3, `lambda_max` 20, halos 0.5 / 1.3 / 2; `validateParams` caps each diffusion operator at 2,000,000 cell updates per step; Glade's keys are ignored while the focus is in a panel field.

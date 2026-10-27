@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-26):** Phases 0 to 3 merged to `main`. **Next phase:** 4. **Phase 4 base:** the tip of `main` (the `[GL 3]` status commit).
+**Status (2026-10-27):** Phases 0 to 3 merged to `main`; Phase 4 running on `gl-4-runtime`.
 
 ## Project facts
 
@@ -254,7 +254,27 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 
 ## Phase 4: Runtime (1 WP)
 
-**Open for the phase grill:**
+**Baseline (verified 2026-10-27):** `main` = `origin/main` = `24ea299`; `npm test` 125 pass, fitness 0 violations, `fitness.test.mjs` 16 pass. Host facts for WP 4.1: `host/keys.js` re-dispatches host keydowns into the world as untrusted `KeyboardEvent`s; `sources/mouse.js` toggles its layer on `M` from the host and from trusted keydowns inside the world; the bridge posts `{ type: 'frame', frame }` with `frame.bodies` keyed by role (contract `frame.schema.json`).
+
+**Measured** (orchestrator script, real `step`, foot at the centre, z = 100 mm, 60 s): the plant count tends to `input_power * 0.70 / r` whatever `lambda_max` is, so a planted foot blooms and then settles; it never keeps widening.
+
+| Set | Saturates at | Plants at 10 / 20 / 60 s | 90% plant radius at 10 / 20 / 60 s |
+|---|---|---|---|
+| `input_power` 50, `lambda_max` 200 (old) | 1.2 s | 168 / 102 / 105 | 261 / 192 / 198 mm |
+| `input_power` 100, `lambda_max` 20 (new) | 0.5 s | 124 / 341 / 215 | 514 / 633 / 283 mm |
+| `input_power` 200, `lambda_max` 20 | 0.3 s | 242 / 670 / 429 | 710 / 847 / 403 mm |
+
+Walking at 1.2 m/s peaks at 100 / 200 / 400 E/m² respectively (`E_cap` 400).
+
+**Grill decisions (2026-10-27):**
+- **G29 Bounded glade.** Constant demand bounds the glade at about `input_power * lift / r` plants. Accepted for the MVP; a model change (e.g. lower maintenance demand for full plants) is deferred until after live tuning. Brief Vision and Emergent sections updated.
+- **G30 Substep budget.** `validateParams` rejects `substeps(D_x, dt, h) * nx * ny > MAX_CELL_SUBSTEPS` (2,000,000, exported) for `D` and `D_spill`, naming the operator, `h`, `dt` and the largest `D_x` that fits. Allows h >= 20 at the defaults. Orchestrator commit.
+- **G31 Starting values:** `input_power` 100, `lambda_max` 20, `r` 1/3, `shadow_strength` 0.5, `shadow_scale` 1.3, `shadow_blur` 2; the "provisional" notes are gone. Same orchestrator commit. Live tuning at close-out sets the real values.
+- **G32 Key guard.** Glade ignores `E`, `T`, `D`, `R` while the focus is in an `<input>`, `<select>` or `<textarea>` (lil-gui number boxes accept `1e5`; a focused dropdown type-aheads on letters). The same leak for `M` in host `mouse.js` goes to `TODO.md`.
+- **G33 Rejected live edit snaps back:** the control returns to the last valid value; the error shows in the panel and in `console.error`.
+- **G34 `D` dump:** the JSON always goes to the console; a refused clipboard write logs a `console.error` naming the reason (no silent fallback).
+
+**Previously open for the phase grill** (settled by G29 to G31):
 - **Substep budget** (GL 2 review): diffusion/spill cost scales with `substeps * nx * ny`, i.e. `1/h⁴`; at `h` = 10, `D_spill` = 1e6, `dt` = 1/15 (all in range) one step needs ~2,200 substeps over 360k cells and freezes the page from a slider. Spill now relaxes only the above-cap bounding box, which fixes small hot spots but not a wide saturated area. Decide a `validateParams` budget (e.g. `substeps(D_spill, dt, h) <= 32` and the same for `D`) with an error naming `D_spill`, `h` and `dt`; that is a `params.mjs` change for WP 4.1 or an orchestrator commit.
 - At the current defaults a planted foot does not grow an expanding glade (Phase 3 measurement above); the tuning decides whether that changes.
 - Starting values for the parameters still marked TBD (`input_power`, `r`, `lambda_max`, `shadow_strength`, `shadow_scale`, `shadow_blur`). The orchestrator proposes values derived from target behaviours, for example "a planted foot saturates its footprint in about 2 s" and "a plant grows in about 3 s", and the user picks.
@@ -271,6 +291,7 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
   - **Atlas size:** pick `cellPx = min(desired, maxCellPx(N_frames))` from `render/atlas.mjs` before a structural `N_frames` edit regenerates the atlas, since `N_frames` up to 64 is valid but a fixed cellPx is not.
   - lil-gui snaps edited values to `step`, so `dt` (1/60) and `r` (1/3) change slightly once touched in the panel; acceptable, but the D dump then differs from the defaults.
   - Grill-decided defaults are written into `params.mjs` **only through the orchestrator** (a one-line follow-up commit), not by this WP.
+  - G32 key guard, G33 snap-back, G34 clipboard handling.
 - **Carry-over from Phase 3 (API as built and traps from the gate review):**
   - Loop per step: `const stats = step(a, b, resolveFoot(sighting, performance.now(), params), params, scratch); [a, b] = [b, a];` then `renderer.render(a, params, { heatmap })`. Log capacity growth (G9) by comparing `a.capacity` before and after a step.
   - `R` and an `h` edit: replace `{ a, b, scratch }` with `resetState(params, arena)` (it validates first). The renderer rebuilds its density texture when `nx`/`ny` change, and throws if the state's grid does not cover its arena.
@@ -302,6 +323,7 @@ Uses the Phase 1 state layout. Both WPs are pure modules with tests; neither tou
 - Wilt colour bridging, the final `N_frames`, hand-drawn atlas loading, wind.
 - Both feet, more species, audio.
 - Ellipsoid foot field, ground half-life.
+- A sustained widening glade (G29), if the bounded bloom is not enough on the floor.
 - Target plant count and performance budget, once tuned on the show machine.
 
 ## Outcomes

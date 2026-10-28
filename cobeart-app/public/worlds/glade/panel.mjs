@@ -14,12 +14,17 @@ const MAX_SLIDER_SPAN = 1e6;
  * @property {(next: Readonly<import('./params.mjs').GladeParams>, key: string) => void} apply commits `next`
  *   (already validated); throws to reject it, e.g. when a structural rebuild fails
  * @property {import('./params.mjs').Arena} arena
+ * @property {readonly import('./params.mjs').PresetName[]} presetNames options of the preset dropdown, in key order
+ * @property {import('./params.mjs').PresetName} initialPreset the preset active at start
+ * @property {(name: import('./params.mjs').PresetName) => void} onPreset switches to the named preset; throws to reject it
  */
 
 /**
  * @typedef {object} Panel
  * @property {(visible: boolean) => void} show
  * @property {() => boolean} visible
+ * @property {(presetName: import('./params.mjs').PresetName) => void} reload re-reads every control from the committed params and shows the
+ *   preset name, discarding unapplied candidate values and any shown error
  */
 
 /**
@@ -27,7 +32,7 @@ const MAX_SLIDER_SPAN = 1e6;
  * @param {PanelDeps} deps
  * @returns {Panel}
  */
-export function createPanel({ getParams, apply, arena }) {
+export function createPanel({ getParams, apply, arena, presetNames, initialPreset, onPreset }) {
   const gui = new GUI({ title: 'Glade' });
   const errorBox = document.createElement('div');
   errorBox.style.cssText = 'color:#f88;padding:4px 8px;white-space:pre-wrap;font:11px monospace;';
@@ -73,6 +78,26 @@ export function createPanel({ getParams, apply, arena }) {
     controller.updateDisplay();
   };
 
+  // Not a PARAMS entry: the dropdown is bound to its own object, so it never reaches the candidate.
+  const presetState = { preset: initialPreset };
+  const presetController = gui.add(presetState, 'preset', [...presetNames]).name('preset');
+  presetController.domElement.title = 'Switches the whole parameter set without resetting the glade; each preset keeps its edits until reload';
+  let committedPreset = initialPreset;
+  presetController.onChange(() => {
+    const picked = presetState.preset;
+    try {
+      const name = presetNames.find((n) => n === picked);
+      if (!name) throw new Error(`unknown preset "${picked}"; use one of ${presetNames.join(', ')}`);
+      onPreset(name);
+      committedPreset = name;
+    } catch (err) {
+      console.error(`glade panel: rejected preset ${picked}: ${err instanceof Error ? err.message : String(err)}`);
+      showError(err);
+      presetState.preset = committedPreset;
+      presetController.updateDisplay();
+    }
+  });
+
   for (const spec of PARAMS) {
     const structural = spec.kind === 'structural';
     let controller;
@@ -110,5 +135,12 @@ export function createPanel({ getParams, apply, arena }) {
       gui.show(visible);
     },
     visible() { return shown; },
+    reload(presetName) {
+      Object.assign(candidate, getParams());
+      committedPreset = presetName;
+      presetState.preset = presetName;
+      for (const controller of gui.controllersRecursive()) controller.updateDisplay();
+      clearError();
+    },
   };
 }

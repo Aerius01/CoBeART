@@ -178,3 +178,18 @@ test('both presets are complete, frozen, valid and share every structural value'
     assert.equal(PRESETS.standing[spec.key], PRESETS.walking[spec.key], spec.key);
   }
 });
+
+test('switchedParams carries foot_role, seed and every structural value from the current set', async () => {
+  const { PARAMS, PRESETS, switchedParams } = await loadParams();
+  const current = Object.freeze({ ...PRESETS.walking, foot_role: 'left_foot', seed: 7, h: 200, N_frames: 20, input_power: 333 });
+  const result = switchedParams(PRESETS.standing, current);
+  const carried = ['foot_role', 'seed', ...PARAMS.filter((s) => s.kind === 'structural').map((s) => s.key)];
+  assert.ok(carried.includes('h') && carried.includes('N_frames'));
+  for (const spec of PARAMS) {
+    const from = carried.includes(spec.key) ? current : PRESETS.standing;
+    assert.equal(result[spec.key], from[spec.key], spec.key);
+  }
+  assert.ok(Object.isFrozen(result));
+  assert.notEqual(result, PRESETS.standing);
+  assert.equal(current.input_power, 333);
+});

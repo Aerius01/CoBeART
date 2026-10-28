@@ -1,6 +1,6 @@
 // Glade world wiring (BRIEF.md "Runtime"): frame messages, the fixed-step loop, rendering, the panel and keys.
 // Simulation and rendering live in sim/ and render/; this file only connects them.
-import { defaultParams } from './params.mjs';
+import { PRESETS, defaultParams, switchedParams, validateParams } from './params.mjs';
 import { resetState, resolveFoot, step } from './sim/step.mjs';
 import { generateAtlas, maxCellPx } from './render/atlas.mjs';
 import { createRenderer } from './render/renderer.mjs';
@@ -66,8 +66,19 @@ function start() {
     sighting = body ? { x: body.x, y: body.y, z: body.z, receivedMs: performance.now() } : null;
   });
 
+  /** @type {readonly import('./params.mjs').PresetName[]} the one ordered list behind keys 1, 2 and the dropdown */
+  const presetNames = /** @type {import('./params.mjs').PresetName[]} */ (Object.keys(PRESETS));
+  /** Name of the active preset (panel edits change the set, not the name); the start params are defaultParams(). */
+  let presetName = /** @type {import('./params.mjs').PresetName} */ (presetNames.find((n) => PRESETS[n] === params));
+  /** Each preset's set for this session; the active preset's entry is stale until a switch stores `params`. */
+  const storedPresets = { ...PRESETS };
+  console.info(`glade: preset ${presetName}`);
+
   const panel = createPanel({
     arena,
+    presetNames,
+    initialPreset: presetName,
+    onPreset: (name) => switchPreset(name),
     getParams: () => params,
     apply(next, key) {
       if (key === 'N_frames') {
@@ -85,6 +96,35 @@ function start() {
       params = next;
     },
   });
+
+  /**
+   * Commits a preset as the live params without a reset: the active set is stored under its name, then the target's
+   * stored set is loaded with the tracked body, seed and structural values kept (G46).
+   * Throws when the set is invalid, leaving everything as it was.
+   * @param {import('./params.mjs').PresetName} name
+   */
+  function switchPreset(name) {
+    const next = switchedParams(name === presetName ? params : storedPresets[name], params);
+    validateParams(next, arena);
+    storedPresets[presetName] = params;
+    params = next;
+    presetName = name;
+    panel.reload(name);
+    console.info(`glade: preset ${name}`);
+  }
+
+  /** @param {import('./params.mjs').PresetName} name key path: logs a rejected switch instead of throwing */
+  const switchPresetByKey = (name) => {
+    try {
+      switchPreset(name);
+    } catch (err) {
+      console.error(`glade: preset ${name} rejected: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  /** @returns {string} JSON of both presets as they would be live: the active set as edited, the other as stored */
+  const presetsJson = () => JSON.stringify(Object.fromEntries(presetNames.map((n) =>
+    [n, n === presetName ? params : switchedParams(storedPresets[n], params)])), null, 2);
 
   /** @param {string} json */
   const copyToClipboard = (json) => {
@@ -104,9 +144,14 @@ function start() {
       case 'e': heatmap = !heatmap; break;
       case 't': panel.show(!panel.visible()); break;
       case 'r': commitReset(params); break;
+      case '1': case '2': {
+        const name = presetNames[Number(e.key) - 1];
+        if (name) switchPresetByKey(name);
+        break;
+      }
       case 'd': {
-        const json = JSON.stringify(params, null, 2);
-        console.log(`glade: parameters\n${json}`);
+        const json = presetsJson();
+        console.log(`glade: presets (active ${presetName})\n${json}`);
         copyToClipboard(json);
         break;
       }

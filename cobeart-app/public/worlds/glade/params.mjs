@@ -53,7 +53,7 @@ export const PARAMS = Object.freeze([
   param({ key: 'foot_timeout_ms', type: 'int', default: 200, min: 50, max: 2000, step: 10, unit: 'ms',
     kind: 'live', description: 'sighting age after which the foot is absent' }),
   param({ key: 'ground_half_life_s', type: 'number', default: 600, min: 1, max: 600, step: 1, unit: 's',
-    kind: 'live', description: 'half-life of ground energy, everywhere; 600 is in effect off' }),
+    kind: 'live', description: 'half-life of ground energy, everywhere; the maximum 600 is slow, about 7% per minute' }),
   param({ key: 'E_cap', type: 'number', default: 400, min: 40, max: 4000, step: 10, unit: 'E/m²',
     kind: 'live', description: 'soft ground cap, plants per m² of saturated ground' }),
   param({ key: 'D', type: 'number', default: 2500, min: 250, max: 25000, step: 50, unit: 'mm²/s',
@@ -136,6 +136,18 @@ export const PRESETS = Object.freeze({
 /** @returns {Readonly<GladeParams>} the walking preset, every parameter at its default */
 export function defaultParams() {
   return PRESETS.walking;
+}
+
+/**
+ * The set a preset switch commits: `target` with the tracked body, the seed and every structural value kept from
+ * `current`, so a switch never resets the glade or desyncs the grid and atlas from the params.
+ * @param {Readonly<GladeParams>} target the preset set to switch to
+ * @param {Readonly<GladeParams>} current the live params
+ * @returns {Readonly<GladeParams>} a frozen copy; neither input is modified
+ */
+export function switchedParams(target, current) {
+  const carried = ['foot_role', 'seed', ...PARAMS.filter((spec) => spec.kind === 'structural').map((spec) => spec.key)];
+  return Object.freeze({ ...target, ...Object.fromEntries(carried.map((key) => [key, current[key]])) });
 }
 
 /**

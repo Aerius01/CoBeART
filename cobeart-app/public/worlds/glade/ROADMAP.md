@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-27):** Phases 0 to 4 merged to `main`. **Next phase:** 5 (growth model, proposed; starts with its grill). **Phase 5 base:** the tip of `main` (the `[GL 4]` outcomes commit).
+**Status (2026-10-28):** Phases 0 to 4 merged to `main`; Phase 5 grilled (G35 to G41), not started. **Next phase:** 5. **Phase 5 base:** the tip of `main` (the `[GL 5]` plan commit).
 
 ## Project facts
 
@@ -318,26 +318,87 @@ Walking at 1.2 m/s peaks at 100 / 200 / 400 E/m² respectively (`E_cap` 400).
 - Update `CLAUDE.md`: Glade alongside Splat in the worlds list, its keys, and home testing with the mouse.
 - Human check: live tuning in the Electron window on port 3000 with the mouse source. This is where the TBD parameters get their real values.
 
-## Phase 5: Growth model (proposed after the Phase 4 live tuning)
+## Phase 5: Growth model and presets (2 parallel WPs)
 
-**Problem** (G29, confirmed by the user's live tuning, 2026-10-27): no parameter set makes a planted foot's glade stabilise and then widen slowly. Every plant draws `r` forever, so at equilibrium `N * r` equals the input and the glade settles at about `input_power * lift / r` plants. While the ground charges, energy outruns spawning; a wave of plants then overshoots and starves back to that size. `lambda_max`, `E_cap` and `D_spill` shape the overshoot; `input_power / r` fixes the end state.
+**Problem** (G29, confirmed by the user's live tuning, 2026-10-27): no parameter set makes a planted foot's glade stabilise and then widen slowly. Every plant draws `r` forever, so at equilibrium `N * r` equals the input and the glade settles at about `input_power * lift / r` plants. While the ground charges, energy outruns spawning; a wave of plants then overshoots and starves back to that size.
 
-**Starting proposal for the grill** (orchestrator, not yet decided):
-- **`r_maintain`:** the draw of a full plant, well below `r` (e.g. `r / 20`). Growth costs `r`, holding costs `r_maintain`, so the energy keeps paying for new plants at the edge: the glade widens at about `input / growth cost` until upkeep reaches `input / r_maintain` plants, much larger and reached slowly.
-- **`decline_rate`:** how fast an unfed plant loses energy, separate from `r` (the brief already names it for species), so cheap upkeep does not make the die-off slow.
+**Prototype** (orchestrator, 2026-10-27, scratch copy of `sim/`, not in the repo; a full plant draws `r_maintain`, an unfed one loses energy at `decline_rate`; foot still at the centre, z = 100 mm, for 120 s, then lifted). Plants / 90% radius:
 
-**Open for the phase grill:**
-- How `r_maintain` applies near full (switch at `PLANT_MAX`, or blend over the top frame band), and whether a declining plant that is fed again pays `r` or `r_maintain`.
-- Energy accounting: is the `decline_rate` loss counted as consumption (it leaves the system), and do the conservation tests change?
-- Whether to prototype first: run the proposal in a scratch copy of `sim/` at the tuned defaults and measure the glade radius over 60 s before writing the brief change.
-- Brief section 3, `sim/plants.mjs` and its tests change; `sim/step.mjs` should not. The G22 emergent test "the glade keeps widening" becomes a steady-state test.
+| Upkeep | Settings | 15 s | 60 s | 120 s | Empty after lifting |
+|---|---|---|---|---|---|
+| `r` (Phase 4 model) | Phase 4 defaults | 288 / 244 mm | 280 / 205 | 284 / 205 | 0.8 s |
+| `r` / 50 | `input_power` 100 | 575 / 372 | 1331 / 430 | 1549 / 435 | 3.7 s |
+| `r` / 20 | `input_power` 800 | 3750 / 903 | 5015 / 844 | 5220 / 820 | 26 s |
+| `r` / 50 | `input_power` 800 | 4511 / 1012 | 11524 / 1239 | 10285 / 1217 | > 30 s |
+
+Cheap upkeep gives the slow widening (row 2). It also showed two problems the decisions below address: die-off became slow and erratic (leftover ground energy feeds cheap plants), and counts swung in mass-death waves (a full plant that dipped below 1 jumped from `r_maintain` to `r` demand, a cliff).
+
+**Grill decisions (2026-10-27):**
+- **G35 Two modes as presets.** One model covers both; the modes are parameter sets, switched by the operator. A dwell-dependent automatic mode is out of scope.
+  - **walking:** a sudden bloom around footfalls, full growth within about 1 s, gone about 1 s after the lift.
+  - **standing:** a patch within about 1 s, then the glade widens at a few cm/s while the foot stays, slowing as it grows; the arena edge is the only hard limit.
+- **G36 Intake split.** Every plant has **upkeep** `r_maintain * dt` (consumed, leaves the system) and, while below full, **growth** up to `r * dt` (stored 1:1). With `r_maintain = r` the walking preset behaves like the Phase 4 model (a growing plant then takes `2r`, not `r`; tuned to the same feel).
+- **G37 Young and mature.** A pool field `mature: Uint8Array`, set the first time a plant reaches `PLANT_MAX`, never cleared; spawned plants start young. `direction` still follows the frame changes.
+  - **Young:** needs upkeep plus growth; any shortfall makes it decline by `decline_rate * dt * (missed / (upkeep + growth demand))`.
+  - **Mature:** needs only upkeep; an upkeep shortfall makes it decline by `decline_rate * dt * (missed upkeep / upkeep demand)`. Growth is a bonus: spare ground lets a declined mature plant regrow, otherwise it holds. No demand cliff, and revival still works.
+  - Removal at `energy <= 0`, by order-preserving compaction as before. Energy lost to decline counts as consumed.
+- **G38 Two passes, survival before growth.** Pass 1 serves all upkeep oldest first; pass 2 serves all growth oldest first; decline is applied once per plant after both passes. Accepts about +3 ms per step at 100k plants (Phase 2 measured `feed` at 3.5 ms).
+- **G39 Ground half-life.** `ground_half_life_s` in [1, 600] s: `density *= 2^(-dt / T)` every step, everywhere, including under the foot. Decayed energy leaves the system and is reported. Walking sets 600 (in effect off), standing tens of seconds; it is the handle for how long a standing glade lingers.
+- **G40 Presets in `params.mjs`.** `PRESETS = { walking, standing }`, each a complete, valid parameter set; `defaultParams()` returns `walking`. Both must share every structural value (`h`, `N_frames`), enforced by a test, so a switch never resets. Switching applies live without a reset and keeps the current `foot_role` (a site setting) and `seed`. Panel edits change the active set only; a switch discards unsaved edits (press `D` first). `D` dumps the active set labelled with its preset name, for pasting back into `PRESETS`. The world starts in `walking`.
+- **G41 Starting values.** walking: the Phase 4 tuned values plus `r_maintain` 2 (= `r`), `decline_rate` 2, `ground_half_life_s` 600. standing: measured by the orchestrator with the G36 to G38 structure before spawning, starting near `input_power` 100, `r_maintain = r / 50`, `ground_half_life_s` 30, `decline_rate` 1. The user tunes both live at the end of the phase.
+
+**Base commit (orchestrator, before spawning):**
+- `params.mjs`: entries `r_maintain` (E/s), `decline_rate` (E/s) and `ground_half_life_s` (s), live, with ranges per G8; `PRESETS`; `defaultParams()` returns `PRESETS.walking`; `glade-params.test.js` covers both presets validating and sharing structural values. Decide whether `r_maintain <= r` is a cross rule.
+- The standing values (G41), measured with a scratch implementation of G36 to G38.
+- `BRIEF.md`: section 3 (demand, young and mature, decline, allocation), the half-life in section 2, the presets and keys in "Runtime", the parameter table, Decisions; remove the half-life and the widening glade from Open questions.
+- Remove "ground half-life" and "A sustained widening glade" from Deferred.
+
+### WP 5.1: Growth model
+
+- **Model:** Opus (allocation and accounting semantics).
+- **Owns:**
+  - `glade/sim/state.mjs`, `glade/sim/plants.mjs`, `glade/sim/field.mjs`, `glade/sim/step.mjs`
+  - `cobeart-app/test/glade-state.test.js`, `glade-plants.test.js`, `glade-field.test.js`, `glade-step.test.js`
+- **Scope:** G36 to G39.
+  - **`state.mjs`:** the `mature` pool field, copied by `cloneInto`, grown by `ensureCapacity`.
+  - **`plants.mjs`:** two-pass `feed` per G37 and G38; compaction carries `mature`; spawned plants start young.
+  - **`field.mjs`:** `decay(grid, params) -> E decayed`.
+  - **`step.mjs`:** order deposit, diffuse, spill, decay, feed, spawn, frames; `StepStats` gains `decayed` (amends G21).
+- **Must pass:**
+  - `npm test` green, covering:
+    - the books close: ground plus plants equals initial plus deposit minus consumed minus decayed
+    - a young plant short of growth declines; a mature plant with upkeep met but no growth holds
+    - no demand cliff: a mature plant just below full under an upkeep shortage declines at `decline_rate` scale, not faster
+    - under shortage, older plants' upkeep is served before any growth
+    - decay halves the ground in `ground_half_life_s`
+    - the same seed gives identical states
+    - emergent, pinned values (G22): walking is full within about 1 s and empty within about 1 s of the lift; standing keeps widening (90% radius strictly growing from 30 s to 120 s, averaged over seeds) and empties after the lift within a time set by the half-life
+  - `node scripts/fitness.mjs` clean.
+
+### WP 5.2: Preset switching
+
+- **Model:** Sonnet (fully specified by G40).
+- **Owns:** `glade/main.mjs`, `glade/panel.mjs`.
+- **Scope:** G40.
+  - Keys `1` (walking) and `2` (standing), guarded like `E`/`T`/`D`/`R` (G32), plus a preset dropdown at the top of the panel.
+  - A switch builds the new params from `PRESETS[name]` with the current `foot_role` and `seed`, validates them, commits them live (no reset) and refreshes every panel control from the new values.
+  - `D` prints `glade: preset <name>` and the JSON; the clipboard gets the JSON only.
+  - Log the preset at start and on every switch.
+- **Carry-over from Phase 4:** the panel is bound to a candidate copy (`panel.mjs`); it needs a way to reload the candidate and call `updateDisplay()` on every controller after a switch. `commitReset` in `main.mjs` is the only reset path and must not be used by a switch.
+- **Must pass:**
+  - With a hub on port 3502, Playwright on `/host/?world=glade&source=mouse`: `2` changes the panel values to the standing set without clearing the glade; `1` returns; a changed `foot_role` survives a switch; typing `2` into a panel number box does not switch; `D` logs the preset name and JSON that passes `validateParams`; the console is clean apart from the seed, preset and capacity lines.
+  - `npm test` green; `node scripts/fitness.mjs` clean.
+
+**Phase 5 gate:** the gate commands.
+
+**Phase 5 close-out:** the user tunes both presets live in the Electron window (port 3000, Mouse); their `D` dumps go into `PRESETS`. Update `CLAUDE.md` (keys `1`/`2`, the presets).
 
 ## Deferred (from the brief, not in this roadmap)
 
 - Wilt colour bridging, the final `N_frames`, hand-drawn atlas loading, wind.
 - Both feet, more species, audio.
-- Ellipsoid foot field, ground half-life.
-- A sustained widening glade (G29), if the bounded bloom is not enough on the floor.
+- Ellipsoid foot field.
+- A dwell-dependent automatic switch between walking and standing (G35).
 - Target plant count and performance budget, once tuned on the show machine.
 
 ## Outcomes

@@ -367,6 +367,11 @@ Walking (Phase 4 values, `r_maintain` 2, `decline_rate` 2, half-life 600): 84 pl
 - **G44 Presets from the defaults:** `PRESETS.walking` is built from the `PARAMS` defaults; `PRESETS.standing` is `{ ...walking, <overrides> }`. A walking `D` dump goes into the `default`s, a standing one into the override list.
 - **G45 No `r_maintain <= r` rule:** it protects no invariant and would snap back slider moves during tuning.
 
+**Gate-review decisions (2026-10-28):**
+- **G46 Per-preset session edits** (amends G40): each preset keeps its panel edits until the page reloads. A switch stores the active set under its name and loads the other's stored set (its `PRESETS` values if never edited), then applies the current `foot_role`, `seed` and structural values (`h`, `N_frames`), so a switch never resets and never desyncs the grid or atlas.
+- **G47 `D` dumps both presets** as one JSON object `{ walking, standing }` (the active set as edited, the other as stored), with the active name in the console line; the clipboard gets the JSON only. At close-out the orchestrator writes the dump into `params.mjs`: walking into the `PARAMS` defaults, standing as the keys that differ from the final walking.
+- **G48 Pass 2 stays oldest first for all plants:** a declined mature plant's regrowth is served before a younger plant's growth. Recorded as intended in BRIEF section 3; revisit only if a drying glade's fringe dies back too hard in tuning.
+
 **Base commit (orchestrator, done):** `params.mjs` gains `r_maintain` [0.001, 5], `decline_rate` [0.05, 10] and `ground_half_life_s` [1, 600], all live, plus `PRESETS` (`defaultParams()` returns `PRESETS.walking`); `glade-params.test.js` checks both presets; `BRIEF.md` sections 2 and 3, Emergent, Runtime, the parameter table, Open questions and Decisions are updated. The sim still ignores the three new parameters until WP 5.1.
 
 ### WP 5.1: Growth model

@@ -79,11 +79,12 @@ Per step, in order:
 3. **Spill:** "pressure" diffusion of the excess `max(0, E - E_cap)`, with a fast coefficient `D_spill` much larger than `D`.
    - Excess flows through saturated cells down its own gradient until it reaches cells with room, where it fills them. The saturated region therefore expands at a rate set by input power, with no iteration loop.
    - The cap is soft: cells under a feeding foot sit slightly above it, in proportion to how strongly the foot feeds. This also keeps the saturated core a gradient.
-4. **Plant exchange:** see below.
+4. **Decay:** the ground half-life, below.
+5. **Plant exchange:** see section 3.
 
 **Boundary:** reflecting (no flux). Neither diffusion nor spill crosses the arena edge, so energy reaching the edge stays in the grid and backs up along it.
 
-**Ground half-life** (G39): every step, every cell's density is multiplied by `2^(-dt / ground_half_life_s)`, including under the foot. The decayed energy leaves the system and is reported with the step's accounting. Walking sets 600 s (in effect off); standing sets tens of seconds, which bounds how long a standing glade lingers after the foot leaves and keeps the floor from being "primed" just under `E_spawn_min`.
+**Ground half-life** (G39): every step, every cell's density is multiplied by `2^(-dt / ground_half_life_s)`, including under the foot. The decayed energy leaves the system and is reported with the step's accounting. Walking sets the maximum, 600 s (slow: about 7% per minute); standing sets tens of seconds, which bounds how long a standing glade lingers after the foot leaves and keeps the floor from being "primed" just under `E_spawn_min`.
 
 ### 3. Plants
 
@@ -112,7 +113,7 @@ The simulation state is `energy` and `mature`. Growing or declining is a visual 
 
 What the rates mean: a fed seed grows to full in about `1/r` seconds; a grown plant costs `r_maintain` per second; on empty ground a plant withers from full to dead in about `1/decline_rate` seconds. With `r_maintain = r` (walking) the plant count settles at about `input_power * lift / r`; cheap upkeep (standing) lets the glade keep widening, because grown plants leave energy for spill to carry outward.
 
-**Allocation** (G38): two passes over the pool, oldest first (ascending `id`). Pass 1 serves every plant's upkeep, pass 2 every plant's growth; decline is applied once per plant after both. Survival comes before growth, so a drying patch thins out from the young fringe while an older, sparser stand holds on. The result is deterministic and independent of update order.
+**Allocation** (G38): two passes over the pool, oldest first (ascending `id`). Pass 1 serves every plant's upkeep, pass 2 every plant's growth; decline is applied once per plant after both. Survival comes before growth, so a drying patch thins out from the young fringe while an older, sparser stand holds on. Pass 2 serves a declined mature plant's regrowth before a younger plant's growth, even though the young plant declines without it; this is intended (G48), revisit only if a drying glade's fringe dies back too hard. The result is deterministic and independent of update order.
 
 **Birth and death:**
 - A plant spawns with `seed_energy`, taken from the ground at its position (section 4), so spawning is an energy transaction too.
@@ -197,7 +198,7 @@ Spawning runs after the plant exchange, so a new plant is first fed on the next 
 **Parameters:**
 - `params.mjs` holds one metadata definition per parameter: type, range, unit, and whether it is live or structural.
 - From it come the frozen defaults and `validateParams(p)`, which throws an error naming the parameter and the fix (for example, `seed_energy` larger than `E_spawn_min` ground can pay at the current `h`).
-- **Presets** (G40): `PRESETS = { walking, standing }`, each a complete parameter set; walking is the defaults, standing overrides only what differs, and both share every structural value. The world starts in walking. A switch applies live without a reset and keeps the current `foot_role` (a site setting) and `seed`. Panel edits change the active set only; a switch discards them (press `D` first).
+- **Presets** (G40): `PRESETS = { walking, standing }`, each a complete parameter set; walking is the defaults, standing overrides only what differs, and both share every structural value. The world starts in walking. A switch applies live without a reset and keeps the current `foot_role` (a site setting), `seed` and structural values (`h`, `N_frames`: the live grid and atlas). Each preset remembers its panel edits until the page reloads (G46): a switch stores the active set under its name and loads the other preset's stored set, or its code values if it was never edited.
 - **Live** parameters apply on the next step (rates, coefficients, thresholds, jitter, halos). **Structural** ones rebuild state and therefore reset the glade (`h` reshapes the grid, `N_frames` regenerates the atlas).
 
 **Tuning panel:** lil-gui, vendored as a single ES module in `vendor/`, built by looping over the parameter metadata (a dropdown for `foot_role`). Structural parameters are marked. The panel is HTML over the canvas: it edits the `params` object, the simulation reads it each step, and the renderer passes visual values to the shaders as uniforms each frame.
@@ -208,7 +209,7 @@ Spawning runs after the plant exchange, so a new plant is first fed on the next 
 |---|---|
 | `E` | toggle the energy heatmap |
 | `T` | toggle the tuning panel |
-| `D` | dump the active preset's name and parameters as JSON to the console (the clipboard gets the JSON only); paste into `PRESETS` in `params.mjs` to keep them |
+| `D` | dump both presets as one JSON object `{ walking, standing }` (the active one as edited, the other as stored) with the active name to the console; the clipboard gets the JSON only. To keep them, the walking set goes into the `PARAMS` defaults and standing into its override list, as the keys that differ from the final walking (G47) |
 | `R` | reset: clear the ground and plants, keep the parameters, reseed the RNG from `seed` |
 | `1` / `2` | switch to the walking / standing preset (no reset) |
 
@@ -227,7 +228,7 @@ All values are starting guesses, tuned live through the panel (see Runtime). The
 | `R` | foot field sphere radius (mm) | 300 |
 | `input_power` | total power of a foot at z = 0 (E/s, plants' worth per second) | 800 |
 | `foot_timeout_ms` | sighting age after which the foot is absent | 200 |
-| `ground_half_life_s` | half-life of ground energy, everywhere (s); 600 is in effect off | 600 |
+| `ground_half_life_s` | half-life of ground energy, everywhere (s); the maximum 600 is slow, about 7% per minute | 600 |
 | `E_cap` | soft ground cap (E/m², plants per m²) | 400 |
 | `D` | background diffusion (mm²/s) | 2,500 |
 | `D_spill` | excess (spill) diffusion (mm²/s) | 100,000 |
@@ -270,7 +271,7 @@ test/glade-sim.test.js   node --test on the pure simulation
 ```
 
 Tests cover:
-- energy conservation (deposit and plant consumption aside)
+- energy conservation (deposit, plant consumption and decay aside)
 - no flux across the reflecting boundary
 - stability under automatic substepping (no negative energy at large `D`)
 - the same result after changing `h`
@@ -327,4 +328,4 @@ All sessions are done. Next: an implementation plan.
 - Session 6 (runtime and tooling): fixed-step accumulator with `max_steps_per_frame` = 4 and a logged drop beyond it, no render interpolation, foot sighting on the receipt clock, parameter metadata driving defaults, validation and a vendored lil-gui panel, live versus structural parameters, keys `E` `T` `D` `R`, `seed` = 1, `foot_role` = `right_hand` for home testing with shipped mouse z 100 mm and 20 mm steps, `node --test` on `sim/` plus a Playwright browser check.
 - GL 4 grill: the glade is bounded by `input_power / r` for the MVP (a model change is deferred to after live tuning); starting values `input_power` 100, `r` 1/3, `lambda_max` 20, halos 0.5 / 1.3 / 2; `validateParams` caps each diffusion operator at 2,000,000 cell updates per step; Glade's keys are ignored while the focus is in a panel field.
 - GL 4 live tuning: `input_power` 800, `r` 2, `lambda_max` 200. No setting gives a slowly widening glade (G29); a growth-model change is proposed as GL Phase 5.
-- GL 5 grill: upkeep `r_maintain` and growth `r` split; young and mature plants with `decline_rate`, two allocation passes (upkeep before growth); ground half-life; `walking` and `standing` presets switched with `1`/`2` and the panel, no reset; standing starts at `input_power` 200, `r_maintain` 0.01, `decline_rate` 1, `ground_half_life_s` 15; no `r_maintain <= r` rule.
+- GL 5 grill: upkeep `r_maintain` and growth `r` split; young and mature plants with `decline_rate`, two allocation passes (upkeep before growth); ground half-life; `walking` and `standing` presets switched with `1`/`2` and the panel, no reset, each preset remembering its edits for the session; `D` dumps both; standing starts at `input_power` 200, `r_maintain` 0.01, `decline_rate` 1, `ground_half_life_s` 15; no `r_maintain <= r` rule.

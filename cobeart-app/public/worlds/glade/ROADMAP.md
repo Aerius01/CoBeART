@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-28):** Phases 0 to 4 merged to `main`; Phase 5 grilled (G35 to G41), not started. **Next phase:** 5. **Phase 5 base:** the tip of `main` (the `[GL 5]` plan commit).
+**Status (2026-10-28):** Phases 0 to 4 merged to `main`; Phase 5 in progress on `gl-5-growth-presets` (grill G35 to G45, base commit done). **Next phase:** 5. **Phase 5 base:** the `[GL 5]` base commit on `gl-5-growth-presets`.
 
 ## Project facts
 
@@ -347,11 +347,27 @@ Cheap upkeep gives the slow widening (row 2). It also showed two problems the de
 - **G40 Presets in `params.mjs`.** `PRESETS = { walking, standing }`, each a complete, valid parameter set; `defaultParams()` returns `walking`. Both must share every structural value (`h`, `N_frames`), enforced by a test, so a switch never resets. Switching applies live without a reset and keeps the current `foot_role` (a site setting) and `seed`. Panel edits change the active set only; a switch discards unsaved edits (press `D` first). `D` dumps the active set labelled with its preset name, for pasting back into `PRESETS`. The world starts in `walking`.
 - **G41 Starting values.** walking: the Phase 4 tuned values plus `r_maintain` 2 (= `r`), `decline_rate` 2, `ground_half_life_s` 600. standing: measured by the orchestrator with the G36 to G38 structure before spawning, starting near `input_power` 100, `r_maintain = r / 50`, `ground_half_life_s` 30, `decline_rate` 1. The user tunes both live at the end of the phase.
 
-**Base commit (orchestrator, before spawning):**
-- `params.mjs`: entries `r_maintain` (E/s), `decline_rate` (E/s) and `ground_half_life_s` (s), live, with ranges per G8; `PRESETS`; `defaultParams()` returns `PRESETS.walking`; `glade-params.test.js` covers both presets validating and sharing structural values. Decide whether `r_maintain <= r` is a cross rule.
-- The standing values (G41), measured with a scratch implementation of G36 to G38.
-- `BRIEF.md`: section 3 (demand, young and mature, decline, allocation), the half-life in section 2, the presets and keys in "Runtime", the parameter table, Decisions; remove the half-life and the widening glade from Open questions.
-- Remove "ground half-life" and "A sustained widening glade" from Deferred.
+**Baseline (verified 2026-10-28):** `main` = `origin/main` = `3bae55a`; `npm test` 127 pass, fitness 0 violations, `fitness.test.mjs` 16 pass. `.claude/settings.local.json` still sets `worktree.baseRef: "head"`. The Deferred list already lacked the half-life and widening-glade items.
+
+**Measured** (orchestrator, scratch copy of `sim/` with G36 to G39 and growth capped per G43; 6 x 6 m arena, foot at the centre, z = 100 mm, 120 s, then lifted; `r` 2, `lambda_max` 200, `decline_rate` 1 unless noted). 90% radius in mm:
+
+| `input_power` | `r_maintain` | half-life | 1 s | 5 s | 15 s | 30 s | 60 s | 90 s | 120 s | plants at 120 s | empty after lift |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 100 | 0.04 (G41 start) | 30 | 208 | 291 | 379 | 416 | 440 | 439 | 439 | 1.5k | 16 s |
+| 100 | 0.01 | 15 | 184 | 307 | 394 | 465 | 541 | 586 | 607 | 2.9k | 33 s |
+| 200 | 0.02 | 15 | 252 | 414 | 523 | 610 | 683 | 713 | 725 | 4.4k | 20 s |
+| **200** | **0.01** | **15** | 252 | 418 | 535 | 635 | 746 | 806 | 841 | 5.8k | 36 s |
+| 200 | 0.01 | 30 | 223 | 426 | 555 | 666 | 797 | 873 | 918 | 6.9k | 55 s |
+
+Walking (Phase 4 values, `r_maintain` 2, `decline_rate` 2, half-life 600): 84 plants at 1 s, 29% full; half gone 0.98 s and empty 1.38 s after the lift. The books closed to about 1e-10 E in every run.
+
+**Grill decisions (2026-10-28, second round):**
+- **G42 Standing starting values:** `input_power` 200, `r_maintain` 0.01, `decline_rate` 1, `ground_half_life_s` 15 (the bold row). A per-cell plant cap was considered as an alternative to the upkeep split and rejected: it fixes where plants stand, not how many the input sustains, so the glade stays bounded at `input_power * lift / r`.
+- **G43 Growth demand** is `min(r * dt, PLANT_MAX - energy)`: a plant never draws what it cannot store and reaches exactly `PLANT_MAX` (and turns mature) when fully fed; the young decline fraction uses this capped demand.
+- **G44 Presets from the defaults:** `PRESETS.walking` is built from the `PARAMS` defaults; `PRESETS.standing` is `{ ...walking, <overrides> }`. A walking `D` dump goes into the `default`s, a standing one into the override list.
+- **G45 No `r_maintain <= r` rule:** it protects no invariant and would snap back slider moves during tuning.
+
+**Base commit (orchestrator, done):** `params.mjs` gains `r_maintain` [0.001, 5], `decline_rate` [0.05, 10] and `ground_half_life_s` [1, 600], all live, plus `PRESETS` (`defaultParams()` returns `PRESETS.walking`); `glade-params.test.js` checks both presets; `BRIEF.md` sections 2 and 3, Emergent, Runtime, the parameter table, Open questions and Decisions are updated. The sim still ignores the three new parameters until WP 5.1.
 
 ### WP 5.1: Growth model
 
@@ -361,7 +377,7 @@ Cheap upkeep gives the slow widening (row 2). It also showed two problems the de
   - `cobeart-app/test/glade-state.test.js`, `glade-plants.test.js`, `glade-field.test.js`, `glade-step.test.js`
 - **Scope:** G36 to G39.
   - **`state.mjs`:** the `mature` pool field, copied by `cloneInto`, grown by `ensureCapacity`.
-  - **`plants.mjs`:** two-pass `feed` per G37 and G38; compaction carries `mature`; spawned plants start young.
+  - **`plants.mjs`:** two-pass `feed` per G37, G38 and G43 (the per-plant missed upkeep and growth between the passes live in `PlantScratch`, grown with the pool, not allocated per step); compaction carries `mature`; spawned plants start young.
   - **`field.mjs`:** `decay(grid, params) -> E decayed`.
   - **`step.mjs`:** order deposit, diffuse, spill, decay, feed, spawn, frames; `StepStats` gains `decayed` (amends G21).
 - **Must pass:**
@@ -374,6 +390,7 @@ Cheap upkeep gives the slow widening (row 2). It also showed two problems the de
     - the same seed gives identical states
     - emergent, pinned values (G22): walking is full within about 1 s and empty within about 1 s of the lift; standing keeps widening (90% radius strictly growing from 30 s to 120 s, averaged over seeds) and empties after the lift within a time set by the half-life
   - `node scripts/fitness.mjs` clean.
+- **Carry-over:** existing tests that pin values (e.g. `PINNED` in `glade-step.test.js`, `r` 1/3) now inherit `r_maintain` 2, `decline_rate` 2 and `ground_half_life_s` 600 from the defaults; re-pin what each test depends on (G22) rather than loosening assertions. The emergent tests should run on a smaller arena where the behaviour allows (the Phase 3 tests use 3 x 3 m) to keep `npm test` fast; report the runtime of the new tests.
 
 ### WP 5.2: Preset switching
 

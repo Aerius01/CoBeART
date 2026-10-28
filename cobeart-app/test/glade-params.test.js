@@ -33,7 +33,8 @@ test('foot_role options match the contract role enum', async () => {
 test('PARAMS covers the brief table without plant_max; only h and N_frames are structural', async () => {
   const { PARAMS, PLANT_MAX } = await loadParams();
   assert.deepEqual(PARAMS.map((s) => s.key), [
-    'foot_role', 'h', 'R', 'input_power', 'foot_timeout_ms', 'E_cap', 'D', 'D_spill', 'r', 'seed_energy',
+    'foot_role', 'h', 'R', 'input_power', 'foot_timeout_ms', 'ground_half_life_s', 'E_cap', 'D', 'D_spill', 'r',
+    'r_maintain', 'decline_rate', 'seed_energy',
     'N_frames', 'delta', 'E_spawn_min', 'lambda_max', 'min_spacing_mm', 'sprite_size_mm', 'size_jitter',
     'brightness_jitter', 'shadow_strength', 'shadow_scale', 'shadow_blur', 'shadow_offset_mm', 'dt',
     'max_steps_per_frame', 'seed',
@@ -162,4 +163,18 @@ test('the substep budget never suggests a value below the parameter minimum', as
   const p = await withDefaults({ h: 10, E_spawn_min: 200, min_spacing_mm: 10 });
   assert.throws(() => validateParams(p, ARENA), (err) => err instanceof GladeParamError && err.param === 'D_spill' &&
     !err.message.includes('at most') && err.message.includes('raise h or lower dt'));
+});
+
+test('both presets are complete, frozen, valid and share every structural value', async () => {
+  const { PARAMS, PRESETS, defaultParams, validateParams } = await loadParams();
+  assert.deepEqual(Object.keys(PRESETS), ['walking', 'standing']);
+  assert.equal(defaultParams(), PRESETS.walking);
+  for (const [name, preset] of Object.entries(PRESETS)) {
+    assert.ok(Object.isFrozen(preset), name);
+    assert.deepEqual(Object.keys(preset), PARAMS.map((s) => s.key), name);
+    validateParams(preset, ARENA);
+  }
+  for (const spec of PARAMS.filter((s) => s.kind === 'structural')) {
+    assert.equal(PRESETS.standing[spec.key], PRESETS.walking[spec.key], spec.key);
+  }
 });

@@ -25,7 +25,8 @@ export const PLANT_MAX = 1;
  * @typedef {'left_hand' | 'right_hand' | 'head' | 'chest_front' | 'chest_back' | 'left_foot' | 'right_foot' | 'stick'} Role
  * @typedef {{
  *   foot_role: Role, h: number, R: number, input_power: number, foot_timeout_ms: number, E_cap: number,
- *   D: number, D_spill: number, r: number, seed_energy: number, N_frames: number, delta: number,
+ *   ground_half_life_s: number, D: number, D_spill: number, r: number, r_maintain: number, decline_rate: number,
+ *   seed_energy: number, N_frames: number, delta: number,
  *   E_spawn_min: number, lambda_max: number, min_spacing_mm: number, sprite_size_mm: number,
  *   size_jitter: number, brightness_jitter: number, shadow_strength: number, shadow_scale: number,
  *   shadow_blur: number, shadow_offset_mm: number, dt: number, max_steps_per_frame: number, seed: number
@@ -51,6 +52,8 @@ export const PARAMS = Object.freeze([
     kind: 'live', description: "total power of a foot at z = 0, plants' worth per second" }),
   param({ key: 'foot_timeout_ms', type: 'int', default: 200, min: 50, max: 2000, step: 10, unit: 'ms',
     kind: 'live', description: 'sighting age after which the foot is absent' }),
+  param({ key: 'ground_half_life_s', type: 'number', default: 600, min: 1, max: 600, step: 1, unit: 's',
+    kind: 'live', description: 'half-life of ground energy, everywhere; 600 is in effect off' }),
   param({ key: 'E_cap', type: 'number', default: 400, min: 40, max: 4000, step: 10, unit: 'E/m²',
     kind: 'live', description: 'soft ground cap, plants per m² of saturated ground' }),
   param({ key: 'D', type: 'number', default: 2500, min: 250, max: 25000, step: 50, unit: 'mm²/s',
@@ -58,7 +61,11 @@ export const PARAMS = Object.freeze([
   param({ key: 'D_spill', type: 'number', default: 100000, min: 10000, max: 1000000, step: 1000, unit: 'mm²/s',
     kind: 'live', description: 'spill (excess above E_cap) diffusion coefficient' }),
   param({ key: 'r', type: 'number', default: 2, min: 0.02, max: 5, step: 0.01, unit: 'E/s',
-    kind: 'live', description: 'per-plant demand in every stage; growth and wither time 1/r' }),
+    kind: 'live', description: 'growth rate of a plant below full, stored 1:1; growth time 1/r' }),
+  param({ key: 'r_maintain', type: 'number', default: 2, min: 0.001, max: 5, step: 0.001, unit: 'E/s',
+    kind: 'live', description: 'upkeep every plant consumes, served before any growth' }),
+  param({ key: 'decline_rate', type: 'number', default: 2, min: 0.05, max: 10, step: 0.01, unit: 'E/s',
+    kind: 'live', description: 'energy loss of a plant whose needs go entirely unmet; wither time 1/decline_rate' }),
   param({ key: 'seed_energy', type: 'number', default: 0.02, min: 0.001, max: 0.5, step: 0.001, unit: 'E',
     kind: 'live', description: 'energy a new plant takes from the ground' }),
   param({ key: 'N_frames', type: 'int', default: 30, min: 2, max: 64, step: 1, unit: 'frames',
@@ -112,9 +119,23 @@ export class GladeParamError extends Error {
   }
 }
 
-/** @returns {Readonly<GladeParams>} a frozen object holding every parameter's default */
+/** @typedef {'walking' | 'standing'} PresetName */
+
+const WALKING = Object.freeze(/** @type {GladeParams} */ (Object.fromEntries(PARAMS.map((spec) => [spec.key, spec.default]))));
+
+/**
+ * Operator-switched parameter sets (GL grill G40, G44): walking is the PARAMS defaults, standing overrides only what
+ * differs. Both share every structural value, so a switch never resets the glade.
+ * @type {Readonly<Record<PresetName, Readonly<GladeParams>>>}
+ */
+export const PRESETS = Object.freeze({
+  walking: WALKING,
+  standing: Object.freeze({ ...WALKING, input_power: 200, r_maintain: 0.01, decline_rate: 1, ground_half_life_s: 15 }),
+});
+
+/** @returns {Readonly<GladeParams>} the walking preset, every parameter at its default */
 export function defaultParams() {
-  return Object.freeze(/** @type {GladeParams} */ (Object.fromEntries(PARAMS.map((spec) => [spec.key, spec.default]))));
+  return PRESETS.walking;
 }
 
 /**

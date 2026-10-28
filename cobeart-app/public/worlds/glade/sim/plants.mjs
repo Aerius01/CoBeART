@@ -1,15 +1,16 @@
-// Glade plants: bilinear feeding, removal, frame hysteresis and spawning (BRIEF.md sections 3 and 4).
+// Glade plants: upkeep and growth feeding, decline, removal, frame hysteresis and spawning (BRIEF.md sections 3, 4).
 // Operators mutate only the state they are handed, which the step has already filled with cloneInto (GL grill G11).
 import { PLANT_MAX } from '../params.mjs';
 import { nextFloat, nextU32 } from './rng.mjs';
 import { DIRECTION, bilinear, cellOf, createBilinear, ensureCapacity } from './state.mjs';
 
-/** Relative tolerance under which a bilinear draw counts as the full demand (weights sum to 1 only to rounding). */
+/** Relative tolerance under which a bilinear draw counts as the full ask (weights sum to 1 only to rounding). */
 const FULL_DEMAND_TOLERANCE = 1e-9;
 
 /**
  * Per-module scratch (G13), not double-buffered. The bucket index lists the pool slots per cell (counting sort of
  * the stored Float32 positions); `spawned` holds the slot of the plant a cell spawned this step, or -1.
+ * `missedUpkeep` carries each plant's unmet upkeep from feed's first pass to its second.
  * @typedef {object} PlantScratch
  * @property {number} nx grid shape the scratch was built for
  * @property {number} ny
@@ -18,6 +19,7 @@ const FULL_DEMAND_TOLERANCE = 1e-9;
  * @property {Int32Array} cellItems pool slots grouped by cell, length >= the pool capacity
  * @property {Int32Array} plantCell cell of each pool slot while building the index, same length as cellItems
  * @property {Int32Array} spawned per cell: the pool slot spawned there this step, or -1
+ * @property {Float64Array} missedUpkeep per pool slot: E of upkeep the ground could not serve this step
  */
 
 /**
@@ -38,6 +40,7 @@ export function createPlantScratch(grid, capacity) {
     cellItems: new Int32Array(capacity),
     plantCell: new Int32Array(capacity),
     spawned: new Int32Array(cells),
+    missedUpkeep: new Float64Array(capacity),
   };
 }
 
@@ -77,28 +80,49 @@ export function drawAt(grid, x, y, amount, bil) {
 }
 
 /**
- * Feeds every plant oldest first (pool order) with demand r * dt drawn bilinearly, then removes plants at energy 0
- * by order-preserving compaction. Full demand is stored up to PLANT_MAX; a short plant pays the shortfall from itself
- * (G18). Writes `state` (density, pool, count).
+ * Feeding (G36 to G38, G43). Pass 1 serves every plant's upkeep `r_maintain * dt` oldest first (pool order), consumed;
+ * pass 2 serves every plant's growth `min(r * dt, PLANT_MAX - energy)` oldest first, stored 1:1. Then each plant
+ * declines by `decline_rate * dt` times its missed fraction: of upkeep and growth while young, of upkeep only once
+ * mature, so a mature plant short of growth holds. A plant reaching PLANT_MAX turns mature for good. Plants at energy 0
+ * are removed by order-preserving compaction. Writes `state` (density, pool, count) and `scratch.missedUpkeep`.
  * @param {import('./state.mjs').GladeState} state
  * @param {import('../params.mjs').GladeParams} params
  * @param {PlantScratch} scratch
- * @returns {number} E that left the system (consumed), from the stored Float32 energies
+ * @returns {number} E that left the system (upkeep plus decline), from the stored Float32 energies
  */
 export function feed(state, params, scratch) {
   const { grid, plants } = state;
-  const { x, y, energy, id, seed, frame, direction } = plants;
-  const demand = params.r * params.dt;
-  const fullThreshold = demand * (1 - FULL_DEMAND_TOLERANCE);
+  const { x, y, energy, id, seed, frame, direction, mature } = plants;
+  const count = state.count;
+  if (scratch.missedUpkeep.length < state.capacity) scratch.missedUpkeep = new Float64Array(state.capacity);
+  const { missedUpkeep, bil } = scratch;
+  const upkeep = params.r_maintain * params.dt;
+  const growthRate = params.r * params.dt;
+  const declineStep = params.decline_rate * params.dt;
   let consumed = 0;
+
+  for (let i = 0; i < count; i++) {
+    const taken = drawAt(grid, x[i], y[i], upkeep, bil);
+    consumed += taken;
+    const missed = upkeep - taken;
+    missedUpkeep[i] = missed > upkeep * FULL_DEMAND_TOLERANCE ? missed : 0;
+  }
+
+  // Decline touches no ground, so applying it right after a plant's growth draw equals applying it after the pass.
   let write = 0;
-  for (let i = 0; i < state.count; i++) {
+  for (let i = 0; i < count; i++) {
     const before = energy[i];
-    const taken = drawAt(grid, x[i], y[i], demand, scratch.bil);
-    const target = taken >= fullThreshold
-      ? Math.min(PLANT_MAX, before + demand)
-      : Math.max(0, before - (demand - taken));
-    const stored = Math.fround(target);
+    const growth = Math.min(growthRate, PLANT_MAX - before);
+    let taken = 0;
+    let missedGrowth = 0;
+    if (growth > 0) {
+      taken = drawAt(grid, x[i], y[i], growth, bil);
+      if (growth - taken > growth * FULL_DEMAND_TOLERANCE) missedGrowth = growth - taken;
+    }
+    const missedFraction = mature[i] === 1
+      ? missedUpkeep[i] / upkeep
+      : (missedUpkeep[i] + missedGrowth) / (upkeep + growth);
+    const stored = Math.fround(Math.min(PLANT_MAX, Math.max(0, before + taken - declineStep * missedFraction)));
     consumed += taken - (stored - before);
     if (stored <= 0) continue;
     if (write !== i) {
@@ -109,6 +133,7 @@ export function feed(state, params, scratch) {
       frame[write] = frame[i];
       direction[write] = direction[i];
     }
+    mature[write] = stored >= PLANT_MAX ? 1 : mature[i];
     energy[write] = stored;
     write++;
   }
@@ -268,6 +293,7 @@ export function spawn(state, params, scratch) {
     plants.seed[i] = nextU32(rng, rng);
     plants.frame[i] = 0;
     plants.direction[i] = DIRECTION.UP;
+    plants.mature[i] = 0;
     state.nextId++;
     state.count = i + 1;
     scratch.spawned[c] = i;

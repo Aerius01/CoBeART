@@ -1,6 +1,6 @@
 // Glade simulation step: one fixed tick of the field and plant operators on the double buffer (GL grill G21).
 // Pure module: no DOM, window or WebGL, so node --test can import it.
-import { createFieldScratch, deposit, diffuse, spill } from './field.mjs';
+import { createFieldScratch, decay, deposit, diffuse, spill } from './field.mjs';
 import { createPlantScratch, feed, spawn, updateFrames } from './plants.mjs';
 import { cloneInto, createState } from './state.mjs';
 
@@ -15,7 +15,8 @@ import { cloneInto, createState } from './state.mjs';
  * Energy accounting of one step, in E.
  * @typedef {object} StepStats
  * @property {number} deposited energy the foot added to the ground
- * @property {number} consumed energy that left the system through plant demand
+ * @property {number} consumed energy that left the system through plants (upkeep and decline)
+ * @property {number} decayed energy that left the ground through its half-life
  * @property {number} spawned plants appended this step
  */
 
@@ -42,7 +43,7 @@ export function createStepScratch(grid, capacity) {
 }
 
 /**
- * One step: copies `prev` into `next`, then runs deposit, diffuse, spill, feed, spawn and frames on `next`.
+ * One step: copies `prev` into `next`, then runs deposit, diffuse, spill, decay, feed, spawn and frames on `next`.
  * `prev` is never modified.
  * @param {import('./state.mjs').GladeState} prev
  * @param {import('./state.mjs').GladeState} next overwritten
@@ -59,10 +60,11 @@ export function step(prev, next, foot, params, scratch) {
   const deposited = deposit(next.grid, foot, params, scratch.field);
   diffuse(next.grid, params, scratch.field);
   spill(next.grid, params, scratch.field);
+  const decayed = decay(next.grid, params);
   const consumed = feed(next, params, scratch.plants);
   const spawned = spawn(next, params, scratch.plants);
   updateFrames(next, params);
-  return { deposited, consumed, spawned };
+  return { deposited, consumed, spawned, decayed };
 }
 
 /**

@@ -1,4 +1,4 @@
-// Glade plants (public/worlds/glade/sim/plants.mjs, an ES module): feeding, removal, frames and spawning.
+// Glade plants (public/worlds/glade/sim/plants.mjs, an ES module): upkeep, growth, decline, frames and spawning.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -20,13 +20,19 @@ const setup = async (overrides = {}, arena = SMALL) => {
 };
 
 /** Appends a plant at (x, y) mm with `energy` (test helper, writes `state`). */
-const addPlant = (state, x, y, energy, frame = 0, direction = 0) => {
+const addPlant = (state, x, y, energy, frame = 0, direction = 0, mature = 0) => {
   const i = state.count++;
   const p = state.plants;
   p.x[i] = x; p.y[i] = y; p.energy[i] = energy; p.id[i] = state.nextId++; p.seed[i] = i;
-  p.frame[i] = frame; p.direction[i] = direction;
+  p.frame[i] = frame; p.direction[i] = direction; p.mature[i] = mature;
   return i;
 };
+
+/**
+ * Feeding rates pinned for the feeding tests (G22), all different so a test catches one rate used for another:
+ * growth 1/r = 0.5 s, upkeep 0.5 E/s, wither 1/decline_rate = 1 s.
+ */
+const RATES = { r: 2, r_maintain: 0.5, decline_rate: 1 };
 
 const AREA = 0.05 * 0.05;
 const groundEnergy = (state) => state.grid.density.reduce((sum, d) => sum + d, 0) * (state.grid.h ** 2 / 1e6);
@@ -51,31 +57,36 @@ test('drawAt takes the weighted shares; a short cell is not made up by the other
   assert.equal(g.density[1], 0);
 });
 
-test('a fed plant reaches 1 in about 1/r and then holds, consuming the full demand', async () => {
+test('a fed plant reaches 1 in about 1/r, turns mature and then holds, consuming only its upkeep', async () => {
   const { feed } = await loadPlants();
-  const { params, state, scratch } = await setup();
+  const { params, state, scratch } = await setup(RATES);
   state.grid.density.fill(1e6);
   addPlant(state, 25, 25, Math.fround(params.seed_energy));
-  const demand = params.r * params.dt;
-  const expected = Math.ceil((1 - Math.fround(params.seed_energy)) / demand);
+  const growth = params.r * params.dt;
+  const upkeep = params.r_maintain * params.dt;
+  const expected = Math.ceil((1 - Math.fround(params.seed_energy)) / growth);
   let steps = 0;
   while (state.plants.energy[0] < 1 && steps < 1000) {
-    feed(state, params, scratch);
+    assert.equal(state.plants.mature[0], 0, 'young until full');
+    const before = state.plants.energy[0];
+    const consumed = feed(state, params, scratch);
+    assert.ok(Math.abs(consumed - upkeep) < 1e-7, `consumed ${consumed} while growing ${before} -> upkeep only`);
     steps++;
   }
   assert.ok(Math.abs(steps - expected) <= 1, `full after ${steps} steps, expected ${expected}`);
+  assert.equal(state.plants.mature[0], 1);
   for (let k = 0; k < 100; k++) {
     const consumed = feed(state, params, scratch);
     assert.equal(state.plants.energy[0], 1);
-    assert.ok(Math.abs(consumed - demand) < 1e-12);
+    assert.ok(Math.abs(consumed - upkeep) < 1e-12);
   }
 });
 
-test('on empty ground a full plant withers to removal in about 1/r', async () => {
+test('on empty ground a full plant withers to removal in about 1/decline_rate', async () => {
   const { feed } = await loadPlants();
-  const { params, state, scratch } = await setup();
-  addPlant(state, 25, 25, 1);
-  const expected = Math.round(1 / (params.r * params.dt));
+  const { params, state, scratch } = await setup(RATES);
+  addPlant(state, 25, 25, 1, 0, 0, 1);
+  const expected = Math.round(1 / (params.decline_rate * params.dt));
   let steps = 0;
   let consumed = 0;
   while (state.count > 0 && steps < 1000) {
@@ -86,20 +97,139 @@ test('on empty ground a full plant withers to removal in about 1/r', async () =>
   assert.ok(Math.abs(consumed - 1) < 1e-6, `consumed ${consumed}`);
 });
 
-test('under shortage the oldest plants are fed first and removal keeps pool order', async () => {
+test('a young plant short of growth declines; a mature plant with upkeep met but no growth holds', async () => {
   const { feed } = await loadPlants();
-  const { params, state, scratch } = await setup();
-  const demand = params.r * params.dt;
-  for (let k = 0; k < 5; k++) addPlant(state, 25, 25, 0.5);
-  addPlant(state, 25, 25, Math.fround(0.1 * demand)); // youngest, dies this step
-  state.grid.density[0] = 3 * demand / AREA;
-  feed(state, params, scratch);
-  const e = Array.from(state.plants.energy.subarray(0, state.count));
-  assert.equal(state.count, 5);
-  for (let k = 0; k < 3; k++) assert.equal(e[k], Math.fround(0.5 + demand), `plant ${k} fed`);
-  for (let k = 3; k < 5; k++) assert.equal(e[k], Math.fround(0.5 - demand), `plant ${k} short`);
-  assert.deepEqual(Array.from(state.plants.id.subarray(0, 5)), [0, 1, 2, 3, 4]);
+  const { params, state, scratch } = await setup(RATES);
+  const upkeep = params.r_maintain * params.dt;
+  const growth = params.r * params.dt;
+  const young = addPlant(state, 25, 25, 0.8);
+  const mature = addPlant(state, 25, 25, 0.8, 0, 0, 1);
+  // Exactly both upkeeps on the four cells around (25, 25): all weight sits on cell 0 at the corner.
+  state.grid.density[0] = 2 * upkeep / AREA;
+  const consumed = feed(state, params, scratch);
   assert.equal(state.grid.density[0], 0);
+  const decline = params.decline_rate * params.dt * growth / (upkeep + growth);
+  assert.equal(state.plants.energy[young], Math.fround(0.8 - decline));
+  assert.equal(state.plants.energy[mature], Math.fround(0.8));
+  assert.equal(state.plants.mature[young], 0);
+  const stored = (Math.fround(0.8 - decline) - Math.fround(0.8));
+  assert.ok(Math.abs(consumed - (2 * upkeep - stored)) < 1e-9, `consumed ${consumed}`);
+});
+
+test('feed regrows its scratch when the pool has outgrown it and serves plants beyond the old capacity', async () => {
+  const { feed } = await loadPlants();
+  const { ensureCapacity, INITIAL_CAPACITY } = await loadState();
+  const { params, state, scratch } = await setup(RATES);
+  const upkeep = params.r_maintain * params.dt;
+  const growth = params.r * params.dt;
+  const declineStep = params.decline_rate * params.dt;
+  assert.equal(scratch.missedUpkeep.length, INITIAL_CAPACITY);
+  ensureCapacity(state, 5000, 0);
+  assert.ok(state.capacity > INITIAL_CAPACITY);
+
+  // 4996 young plants on rich ground at (25, 25), then four at the centre of the last cell (475, 475), whose ground
+  // holds exactly two upkeeps: the older two are served upkeep, the younger two are not (oldest first), and no
+  // growth is left for any of them.
+  state.grid.density.fill(1e6);
+  for (let k = 0; k < 4996; k++) addPlant(state, 25, 25, 0.5);
+  const lastCell = state.grid.nx * state.grid.ny - 1;
+  state.grid.density[lastCell] = 2 * upkeep / AREA;
+  const servedYoung = addPlant(state, 475, 475, 0.8);
+  const servedMature = addPlant(state, 475, 475, 0.8, 0, 0, 1);
+  const starvedMature = addPlant(state, 475, 475, 0.8, 0, 0, 1);
+  const starvedYoung = addPlant(state, 475, 475, 0.8);
+  assert.equal(state.count, 5000);
+
+  feed(state, params, scratch);
+
+  assert.equal(scratch.missedUpkeep.length, state.capacity, 'the scratch must follow the pool capacity');
+  assert.equal(state.count, 5000);
+  const e = state.plants.energy;
+  // Fed plants, including the ones past slot 4096, grow by exactly one step of r * dt.
+  for (const i of [0, 4095, 4096, 4500, 4995]) {
+    assert.ok(Math.abs(e[i] - (0.5 + growth)) < 1e-6, `slot ${i}: ${e[i]}, expected ${0.5 + growth}`);
+  }
+  assert.equal(state.grid.density[lastCell], 0);
+  // Upkeep met, growth missed: a young plant declines by the missed share of its demand, a mature plant holds.
+  assert.ok(Math.abs(e[servedYoung] - (0.8 - declineStep * growth / (upkeep + growth))) < 1e-6);
+  assert.equal(e[servedMature], Math.fround(0.8));
+  // Nothing served: a young plant misses all of its demand, a mature plant all of its upkeep; both lose a full step.
+  assert.ok(Math.abs(e[starvedYoung] - (0.8 - declineStep)) < 1e-6, `starved young ${e[starvedYoung]}`);
+  assert.ok(Math.abs(e[starvedMature] - (0.8 - declineStep)) < 1e-6, `starved mature ${e[starvedMature]}`);
+  assert.equal(state.plants.id[servedYoung], servedYoung);
+});
+
+test('a declined mature plant regrows on spare ground and stays mature', async () => {
+  const { feed } = await loadPlants();
+  const { params, state, scratch } = await setup(RATES);
+  addPlant(state, 25, 25, 0.5, 0, 0, 1);
+  state.grid.density.fill(1e6);
+  feed(state, params, scratch);
+  assert.equal(state.plants.energy[0], Math.fround(0.5 + params.r * params.dt));
+  assert.equal(state.plants.mature[0], 1);
+});
+
+test('no demand cliff: a mature plant just below full declines at decline_rate scale like a full one', async () => {
+  const { feed } = await loadPlants();
+  const { params, state, scratch } = await setup(RATES);
+  const upkeep = params.r_maintain * params.dt;
+  const full = addPlant(state, 25, 25, 1, 0, 0, 1);
+  const nearlyFull = addPlant(state, 475, 475, Math.fround(0.999), 0, 0, 1);
+  // Each plant's corner cell holds half its upkeep, so each misses half: decline_rate * dt / 2, no growth left.
+  state.grid.density[0] = 0.5 * upkeep / AREA;
+  state.grid.density[99] = 0.5 * upkeep / AREA;
+  feed(state, params, scratch);
+  const drop = params.decline_rate * params.dt * 0.5;
+  assert.equal(state.plants.energy[full], Math.fround(1 - drop));
+  assert.equal(state.plants.energy[nearlyFull], Math.fround(Math.fround(0.999) - drop));
+  assert.ok(drop <= params.decline_rate * params.dt);
+});
+
+test('under shortage older plants are served their upkeep before any plant grows; removal keeps pool order', async () => {
+  const { feed } = await loadPlants();
+  /** Five young plants at 0.5 plus a nearly dead youngest one, all on cell 0, which holds `ground` E. */
+  const shortage = async (ground) => {
+    const { params, state, scratch } = await setup(RATES);
+    for (let k = 0; k < 5; k++) addPlant(state, 25, 25, 0.5);
+    addPlant(state, 25, 25, Math.fround(0.1 * params.decline_rate * params.dt));
+    state.grid.density[0] = ground(params) / AREA;
+    feed(state, params, scratch);
+    assert.equal(state.count, 5, 'the youngest dies, the rest survive');
+    assert.deepEqual(Array.from(state.plants.id.subarray(0, 5)), [0, 1, 2, 3, 4]);
+    assert.equal(state.grid.density[0], 0);
+    return { params, e: Array.from(state.plants.energy.subarray(0, 5)) };
+  };
+  const rates = (params) => ({
+    upkeep: params.r_maintain * params.dt, growth: params.r * params.dt, declineStep: params.decline_rate * params.dt,
+  });
+
+  // Every upkeep plus one growth share: the growth goes to the oldest plant only.
+  const fed = await shortage((p) => 6 * rates(p).upkeep + rates(p).growth);
+  const a = rates(fed.params);
+  assert.equal(fed.e[0], Math.fround(0.5 + a.growth), 'plant 0: upkeep and growth');
+  for (let k = 1; k < 5; k++) {
+    assert.equal(fed.e[k], Math.fround(0.5 - a.declineStep * a.growth / (a.upkeep + a.growth)), `plant ${k}: upkeep`);
+  }
+
+  // Upkeep for three plants: the three oldest keep it, the others get nothing, nobody grows.
+  const short = await shortage((p) => 3 * rates(p).upkeep);
+  const b = rates(short.params);
+  for (let k = 0; k < 3; k++) {
+    assert.equal(short.e[k], Math.fround(0.5 - b.declineStep * b.growth / (b.upkeep + b.growth)), `plant ${k}: upkeep`);
+  }
+  for (let k = 3; k < 5; k++) assert.equal(short.e[k], Math.fround(0.5 - b.declineStep), `plant ${k}: nothing`);
+});
+
+test('compaction carries the mature flag with its plant', async () => {
+  const { feed } = await loadPlants();
+  const { params, state, scratch } = await setup(RATES);
+  addPlant(state, 25, 25, 1e-6); // dies at once on empty ground
+  addPlant(state, 25, 25, 0.9, 0, 0, 1);
+  addPlant(state, 25, 25, 0.9);
+  feed(state, params, scratch);
+  assert.equal(state.count, 2);
+  assert.deepEqual(Array.from(state.plants.id.subarray(0, 2)), [1, 2]);
+  assert.deepEqual(Array.from(state.plants.mature.subarray(0, 2)), [1, 0]);
 });
 
 test('frames do not flicker for energy oscillating within delta of a boundary', async () => {
@@ -216,6 +346,7 @@ test('spacing is never violated, including between plants spawned in the same st
   same.state.grid.density.fill(1e6);
   same.params.lambda_max = 1e6; // past validation: every cell hits in one step, so only same-step spawns can clash
   assert.ok(spawn(same.state, same.params, same.scratch) > 10);
+  for (let i = 0; i < same.state.count; i++) assert.equal(same.state.plants.mature[i], 0, 'spawned plants start young');
   assertSpacing(same.state, 50);
 
   const { params, state, scratch } = await setup({ lambda_max: 5000 });

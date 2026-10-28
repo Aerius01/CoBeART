@@ -29,6 +29,7 @@ export const DIRECTION = Object.freeze({ UP: 0, DOWN: 1 });
  * @property {Uint32Array} seed per-plant randomness
  * @property {Uint16Array} frame displayed frame, 0..N_frames-1
  * @property {Uint8Array} direction DIRECTION.UP or DIRECTION.DOWN
+ * @property {Uint8Array} mature 1 once energy has reached PLANT_MAX, never cleared; 0 for a young plant
  */
 
 /**
@@ -50,7 +51,7 @@ export const DIRECTION = Object.freeze({ UP: 0, DOWN: 1 });
 
 /** Keys of the PlantPool arrays. */
 const POOL_KEYS = /** @type {readonly (keyof PlantPool)[]} */ (
-  Object.freeze(['x', 'y', 'energy', 'id', 'seed', 'frame', 'direction']));
+  Object.freeze(['x', 'y', 'energy', 'id', 'seed', 'frame', 'direction', 'mature']));
 
 /** @param {number} capacity @returns {PlantPool} */
 function allocatePool(capacity) {
@@ -62,6 +63,7 @@ function allocatePool(capacity) {
     seed: new Uint32Array(capacity),
     frame: new Uint16Array(capacity),
     direction: new Uint8Array(capacity),
+    mature: new Uint8Array(capacity),
   };
 }
 

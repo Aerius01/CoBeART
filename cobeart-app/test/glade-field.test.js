@@ -364,6 +364,21 @@ test('diffusion of a point source spreads isotropically with variance 2·D·t pe
   assert.ok(Math.abs(relErr(mo.m4Diag, mo.m4Axis)) < 1e-6, `fourth moments axis ${mo.m4Axis} vs diagonal ${mo.m4Diag}`);
 });
 
+test('decay halves the ground in ground_half_life_s and returns exactly the energy it removed', async () => {
+  const { decay, totalEnergy, defaultParams } = await load();
+  const p = paramsWith(defaultParams, { ground_half_life_s: 2, dt: 1 / 60 });
+  const grid = makeGrid(20, 20, 50);
+  fillNoise(grid.density, 500);
+  const initial = totalEnergy(grid);
+  const before = Array.from(grid.density);
+  let decayed = 0;
+  for (let s = 0; s < 120; s++) decayed += decay(grid, p);
+  assert.ok(relErr(totalEnergy(grid), initial / 2) < 1e-12, `${totalEnergy(grid)} after 2 s, expected ${initial / 2}`);
+  assert.ok(relErr(decayed, initial / 2) < 1e-12, `decayed ${decayed}, expected ${initial / 2}`);
+  // Uniform in space: every cell, under the foot or not, keeps the same fraction.
+  for (let i = 0; i < before.length; i++) assert.ok(relErr(grid.density[i], before[i] / 2) < 1e-12, `cell ${i}`);
+});
+
 test('operators reject scratch built for another grid', async () => {
   const { createFieldScratch, diffuse, spill, deposit, defaultParams } = await load();
   const p = paramsWith(defaultParams);

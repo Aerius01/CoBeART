@@ -1,4 +1,4 @@
-// Glade ground field: foot deposition, diffusion and spill on the density grid (BRIEF.md sections 1 and 2).
+// Glade ground field: foot deposition, diffusion, spill and decay on the density grid (BRIEF.md sections 1 and 2).
 // Every operator mutates the grid it is handed, which is always the `next` buffer (GL grill G11).
 // Pure module: no DOM, window or WebGL, so node --test can import it.
 
@@ -256,4 +256,23 @@ export function spill(grid, params, scratch) {
     relax(density, excess, scratch.delta, nx, k,
       Math.max(0, minX - 1), Math.min(nx - 1, maxX + 1), Math.max(0, minY - 1), Math.min(ny - 1, maxY + 1));
   }
+}
+
+/**
+ * Ground half-life (GL grill G39): every cell's density is multiplied by 2^(-dt / ground_half_life_s), under the
+ * foot too. The decayed energy leaves the system.
+ * @param {import('./state.mjs').Grid} grid mutated
+ * @param {import('../params.mjs').GladeParams} params
+ * @returns {number} E decayed this step
+ */
+export function decay(grid, params) {
+  const keep = 2 ** (-params.dt / params.ground_half_life_s);
+  const { density } = grid;
+  let lost = 0;
+  for (let i = 0; i < density.length; i++) {
+    const kept = density[i] * keep;
+    lost += density[i] - kept;
+    density[i] = kept;
+  }
+  return lost * (grid.h * grid.h) / MM2_PER_M2;
 }

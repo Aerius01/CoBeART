@@ -20,7 +20,7 @@ const addPlants = (state, n) => {
   for (let k = 0; k < n; k++) {
     const i = state.count++;
     p.x[i] = i; p.y[i] = -i; p.energy[i] = 0.5; p.id[i] = state.nextId++; p.seed[i] = 7 * i;
-    p.frame[i] = i % 30; p.direction[i] = i % 2;
+    p.frame[i] = i % 30; p.direction[i] = i % 2; p.mature[i] = i % 3 === 0 ? 1 : 0;
   }
 };
 
@@ -66,6 +66,8 @@ test('createState builds an empty 120 x 120 grid and pool, seeded from params.se
   assert.equal(s.capacity, INITIAL_CAPACITY);
   assert.equal(s.count, 0);
   assert.equal(s.nextId, 0);
+  assert.deepEqual(Object.keys(s.plants), ['x', 'y', 'energy', 'id', 'seed', 'frame', 'direction', 'mature']);
+  assert.ok(s.plants.mature instanceof Uint8Array);
   for (const arr of Object.values(s.plants)) assert.equal(arr.length, INITIAL_CAPACITY);
   assert.deepEqual([...s.rng], [...seedRng(1)]);
 });
@@ -157,6 +159,7 @@ test('ensureCapacity doubles, keeps the live prefix in id order and the state ob
   assert.deepEqual([...s.plants.id.subarray(0, 10)], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   assert.deepEqual([...s.plants.seed.subarray(0, 10)], [0, 7, 14, 21, 28, 35, 42, 49, 56, 63]);
   assert.deepEqual([...s.plants.direction.subarray(0, 4)], [0, 1, 0, 1]);
+  assert.deepEqual([...s.plants.mature.subarray(0, 4)], [1, 0, 0, 1]);
   assert.equal(s.count, 10);
 });
 

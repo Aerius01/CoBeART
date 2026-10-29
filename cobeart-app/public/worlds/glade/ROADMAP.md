@@ -458,7 +458,7 @@ Deferred items went to the Phase 2 and Phase 3 grill lists and the WP 4.1 scope.
 - flake8: clean.
 - pytest: 243 pass on 3 consecutive full runs.
 
-**Known flake (pre-existing, not this phase):** `tests/e2e/test_motion_pipeline.py::test_body_that_stops_reaches_zero_norm_velocity` failed in 2 of 7 full pytest runs, once while reviewers loaded the machine. It passes in isolation, and nothing on its path reads the changed mouse config. Tracked in the repo-root `TODO.md`.
+**Known flake (pre-existing, not this phase):** `tests/e2e/test_motion_pipeline.py::test_body_that_stops_reaches_zero_norm_velocity` failed in 2 of 7 full pytest runs, once while reviewers loaded the machine. It passes in isolation, and nothing on its path reads the changed mouse config. Tracked in `implementation/TODO.md`.
 
 **Notes:**
 - The vendored lil-gui 0.21.0 matches the npm registry integrity (sha512); `dist/lil-gui.esm.min.js` sha256 is `609142ae...a954d`. The package's licence file is `LICENSE.md`, copied as `vendor/LICENSE`.

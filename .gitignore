@@ -219,3 +219,6 @@ madmom/
 
 # Playwright MCP logs and screenshots
 .playwright-mcp/
+
+# Local implementation notes
+/implementation/

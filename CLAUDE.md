@@ -8,7 +8,7 @@ CoBeART is an audio-visual art project using Spatial Augmented Reality. Three in
 
 ## Status
 
-The original refactor (Phases 0-4) and the foundation phases (5-7: module separation, contract v2, swappable sources, Splat only) are done. `ROADMAP.md` is the backlog (the "Deferred" section) and the decision log (D1-D22 and the per-phase decisions); `ARCHITECTURE_REVIEW.md` is the historical review it came from. Read the relevant decision before reversing a design choice.
+The original refactor (Phases 0-4) and the foundation phases (5-7: module separation, contract v2, swappable sources, Splat only) are done. `implementation/glade/archive/ROADMAP.md` is the backlog (the "Deferred" section) and the decision log (D1-D22 and the per-phase decisions); `implementation/glade/archive/ARCHITECTURE_REVIEW.md` is the historical review it came from. Read the relevant decision before reversing a design choice. `implementation/` is local and gitignored; `implementation/TODO.md` collects findings outside the current roadmap.
 
 Source of truth when prose disagrees: the code, `contract/` (message schemas) and `config/cobeart.yaml` (settings).
 
@@ -191,7 +191,7 @@ A real microphone can be checked live with `start-audio-client` against the same
 2. `start-optitrack-client` should print the connection info; `start-audio-client` should show audio metrics.
 3. `npm start` from `cobeart-app/`, choose Splat and Live in the launcher.
 4. Bodies paint as splats; the debug overlay (`debug: true` or `?debug`) lists them by role with position and velocity.
-5. Tuning checklist (details in `ROADMAP.md`, Deferred):
+5. Tuning checklist (details in `implementation/glade/archive/ROADMAP.md`, Deferred):
    - Create each rigid body in Motive aligned to the global axes, with the performer facing OptiTrack +Z (D5 orientation and lean sign).
    - Map the Motive streaming IDs to roles in `tracking.roles`; Motive IDs are often 1-based.
    - Head-tilt lean clamp in `worlds/splat/script.js`.

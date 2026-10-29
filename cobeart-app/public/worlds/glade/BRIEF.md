@@ -143,7 +143,7 @@ Spawning runs after the plant exchange, so a new plant is first fed on the next 
 ### Emergent behaviour (expected, to be verified by tuning)
 
 - A walking foot never saturates cells, so it leaves a trail and the glade does not expand.
-- A planted foot saturates the ground beneath it, and the spill pushes growth outward. With walking values (`r_maintain = r`) the plant count tends to `input_power * (1 - z²/R²)³ / r_maintain` and the glade settles. With standing values (cheap upkeep, a ground half-life) it keeps widening, slowing as it grows (measured in the GL 5 grill at `input_power` 200, `r_maintain` 0.01, `ground_half_life_s` 15, z = 100 mm: 90% radius 252 mm at 1 s, 635 mm at 30 s, 841 mm at 120 s; empty 36 s after the lift). A lower `lambda_max` lets spill carry energy further before plants eat it, giving a wider bloom.
+- A planted foot saturates the ground beneath it, and the spill pushes growth outward. With walking values (`r_maintain = r`) the plant count tends to `input_power * (1 - z²/R²)³ / r_maintain` and the glade settles. With standing values (cheap upkeep, a ground half-life) it keeps widening, slowing as it grows (measured at the live-tuned standing values, `input_power` 3000, `r_maintain` 0.05, `ground_half_life_s` 15, z = 100 mm on the 6 x 6 m arena: 90% radius 610 mm at 1 s, 1,587 mm at 15 s, 1,794 mm at 30 s, about 1.85 m from 60 s with about 29,000 plants; empty 13 s after the lift. The grill's slower start point, `input_power` 200 and `r_maintain` 0.01, still widened at 120 s: 841 mm, empty 36 s after the lift). A lower `lambda_max` lets spill carry energy further before plants eat it, giving a wider bloom.
 - Spill reaching the reflecting edge backs up along it and fills inward, giving asymmetric growth near walls and corners.
 - After the foot leaves, plants live on the leftover ground, which upkeep and the half-life drain, then wither over `1/decline_rate`. Dense patches run dry sooner than sparse ones and thin out youngest first.
 
@@ -219,7 +219,7 @@ Spawning runs after the plant exchange, so a new plant is first fed on the next 
 
 ## Parameters
 
-All values are starting guesses, tuned live through the panel (see Runtime). The Start column is the walking preset; standing overrides `input_power` 200, `r_maintain` 0.01, `decline_rate` 1, `ground_half_life_s` 15.
+All values are starting guesses, tuned live through the panel (see Runtime). The Start column is the walking preset; standing overrides `input_power` 3000, `r_maintain` 0.05, `decline_rate` 1, `ground_half_life_s` 15 (GL 5 live tuning).
 
 | Parameter | Role | Start |
 |---|---|---|
@@ -329,3 +329,4 @@ All sessions are done. Next: an implementation plan.
 - GL 4 grill: the glade is bounded by `input_power / r` for the MVP (a model change is deferred to after live tuning); starting values `input_power` 100, `r` 1/3, `lambda_max` 20, halos 0.5 / 1.3 / 2; `validateParams` caps each diffusion operator at 2,000,000 cell updates per step; Glade's keys are ignored while the focus is in a panel field.
 - GL 4 live tuning: `input_power` 800, `r` 2, `lambda_max` 200. No setting gives a slowly widening glade (G29); a growth-model change is proposed as GL Phase 5.
 - GL 5 grill: upkeep `r_maintain` and growth `r` split; young and mature plants with `decline_rate`, two allocation passes (upkeep before growth); ground half-life; `walking` and `standing` presets switched with `1`/`2` and the panel, no reset, each preset remembering its edits for the session; `D` dumps both; standing starts at `input_power` 200, `r_maintain` 0.01, `decline_rate` 1, `ground_half_life_s` 15; no `r_maintain <= r` rule.
+- GL 5 live tuning: walking unchanged; standing `input_power` 3000, `r_maintain` 0.05 (with `decline_rate` 1, `ground_half_life_s` 15).

@@ -130,7 +130,7 @@ const WALKING = Object.freeze(/** @type {GladeParams} */ (Object.fromEntries(PAR
  */
 export const PRESETS = Object.freeze({
   walking: WALKING,
-  standing: Object.freeze({ ...WALKING, input_power: 200, r_maintain: 0.01, decline_rate: 1, ground_half_life_s: 15 }),
+  standing: Object.freeze({ ...WALKING, input_power: 3000, r_maintain: 0.05, decline_rate: 1, ground_half_life_s: 15 }),
 });
 
 /** @returns {Readonly<GladeParams>} the walking preset, every parameter at its default */

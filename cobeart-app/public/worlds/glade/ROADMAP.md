@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GL`. Design source: `BRIEF.md` in this folder (sessions 1 to 6, all done). The brief is the source of truth for behaviour; this file holds the phases, work packages, decisions and outcomes. When they disagree, fix the brief first.
 
-**Status (2026-10-28):** Phases 0 to 4 merged to `main`; Phase 5 in progress on `gl-5-growth-presets` (grill G35 to G45, base commit done). **Next phase:** 5. **Phase 5 base:** the `[GL 5]` base commit on `gl-5-growth-presets`.
+**Status (2026-10-29):** Phases 0 to 5 merged to `main`. No further phase is planned; the Deferred list is the backlog, and a new phase starts with a roadmap update from it. **Next phase base:** the tip of `main` (the `[GL 5]` outcomes commit).
 
 ## Project facts
 
@@ -413,7 +413,7 @@ Walking (Phase 4 values, `r_maintain` 2, `decline_rate` 2, half-life 600): 84 pl
 
 **Phase 5 gate:** the gate commands.
 
-**Phase 5 close-out:** the user tunes both presets live in the Electron window (port 3000, Mouse); their `D` dumps go into `PRESETS`. Update `CLAUDE.md` (keys `1`/`2`, the presets).
+**Phase 5 close-out (done):** the user tuned both presets live in the Electron window (port 3000, Mouse); the `D` dump went into `PRESETS`, and `CLAUDE.md` lists the presets and keys `1`/`2`.
 
 ## Deferred (from the brief, not in this roadmap)
 
@@ -421,7 +421,8 @@ Walking (Phase 4 values, `r_maintain` 2, `decline_rate` 2, half-life 600): 84 pl
 - Both feet, more species, audio.
 - Ellipsoid foot field.
 - A dwell-dependent automatic switch between walking and standing (G35).
-- Target plant count and performance budget, once tuned on the show machine.
+- Target plant count and performance budget, once tuned on the show machine (the tuned standing preset reaches about 29,000 plants at 3.3 ms per step on the dev machine).
+- Walking die-off after a short stand or a walk takes about 2.5 s, not the 1 s of G35 (charged ground outlives the plants at `ground_half_life_s` 600); left as tuned, revisit on site with a shorter half-life or lower `input_power`.
 
 ## Outcomes
 
@@ -588,3 +589,45 @@ Dropped: panel visibility duplicating lil-gui's private state, finite checks on 
 - A browser-driven worker can stall for many minutes between steps; ask workers to batch browser checks into scripted calls and read state through a debug handle instead of watching in real time.
 - A grill measurement that contradicts the brief's vision (G29) is worth stating plainly before tuning: the user confirmed it by hand, and it is now the next phase.
 - The Playwright MCP writes to the main checkout's `.playwright-mcp/`, not the worktree's; look there when checking a worker's progress.
+
+### Phase 5
+
+**Commits** on `gl-5-growth-presets` (from `main` at `3bae55a`):
+- `e2280cf`: the three new parameters, `PRESETS`, grill G42 to G45, the brief update (the WP base).
+- `f629944`: GL 5.1 (with its gate-review fixup squashed in).
+- `70c1cab`: GL 5.2 (with its gate-review fixup squashed in).
+- `b294bee`: gate-review decisions G46 to G48 and brief fixes.
+- Then the `[GL 5]` outcomes commit: the live-tuned standing values, `CLAUDE.md`, this text.
+
+**Grill decisions:** G35 to G41 (previous session), G42 to G45 (this session, before spawning), G46 to G48 (gate review).
+
+**API as built:**
+- `params.mjs`: `r_maintain`, `decline_rate`, `ground_half_life_s`; `PRESETS = { walking, standing }` (walking is the `PARAMS` defaults, standing `{ ...walking, overrides }`); `defaultParams()` returns `PRESETS.walking` itself (frozen); `switchedParams(target, current)` keeps `foot_role`, `seed` and every structural key from `current`.
+- `sim/state.mjs`: pool field `mature: Uint8Array`.
+- `sim/field.mjs`: `decay(grid, params) -> E decayed`.
+- `sim/plants.mjs`: two-pass `feed`, decline folded into pass 2 (it touches no ground); `PlantScratch.missedUpkeep` grows inside `feed`, like the bucket arrays inside `spawn`.
+- `sim/step.mjs`: order deposit, diffuse, spill, decay, feed, spawn, frames; `StepStats.decayed`.
+- `main.mjs`: `switchPreset(name)` with a per-session `storedPresets`; `D` logs `glade: presets (active <name>)` and the `{ walking, standing }` JSON. `panel.mjs`: `createPanel` takes `presetNames`, `initialPreset`, `onPreset` and returns `reload(name)`.
+
+**Gate review** (code-optimizer-reviewer and system-architect on `3bae55a..b167ab5`): no sim defects. Fixed as fixups of the owning WP:
+- GL 5.2: a switch overwrote live `h`/`N_frames` edits, so after an `N_frames` edit the renderer threw and the loop stopped (now `switchedParams`); a rejected dropdown pick stayed displayed; preset names typed as `PresetName` from one list; plus G46 and G47.
+- GL 5.1: a test for `missedUpkeep` growth past 4,096 plants; the half-life comparison now runs the seeds 1 to 3 its comment claimed (ratios 1.32 to 1.51 over seeds 1 to 5, margin 1.2).
+- Orchestrator: brief step order (decay), the "600 is in effect off" wording (about 7% per minute), the `D` paste destination.
+Dropped: caching bilinear weights across passes, folding decay into another loop, moving the scratch growth out of `feed`.
+
+**Measured** (6 x 6 m arena, foot at the centre, z = 100 mm):
+- Walking: 84 plants at 1 s, empty 1.4 s after a 3 s stand (about 2.5 s after a 1 s stand or a walk, per WP 5.1; see Deferred).
+- Standing, tuned (`input_power` 3000, `r_maintain` 0.05): 90% radius 610 / 1,166 / 1,587 / 1,794 / 1,887 / 1,851 mm at 1 / 5 / 15 / 30 / 60 / 120 s, about 29,000 plants; empty 13 s after the lift; 3.3 ms per step. It no longer widens after about 60 s; the user chose this over the slower start values.
+- `feed` at 100k plants: 3.7 ms all mature, 6.1 ms all young (G38 accepted about +3 ms).
+- Electron 37 (offscreen, 60 fps) at the pre-tuning values: walking empty 1.5 s after a 3 s stand; standing 237 to 687 mm from 1 to 40 s; switching back kept all plants; console clean apart from the designed clipboard refusal in an unfocused window.
+
+**Gate results:**
+- `npm test`: 137 pass.
+- Fitness: 0 violations, and `fitness.test.mjs` 16 pass.
+- No Python or config changed, so pytest was not run.
+
+**Lessons:**
+- When the user proposes a simpler knob (here a per-cell plant cap instead of the upkeep split), an energy-balance bound settles it quickly: interior consumption grows with area, so only a cheaper interior lets the glade widen.
+- A test that the presets agree with each other said nothing about live edits; the crash was in combining a preset with live structural state. Test invariants against the live state the code meets, not only the static data.
+- The scratchpad does not survive between sessions; the prototype measurements survived only because they were copied into the roadmap. Copy any number a later step needs into the roadmap as soon as it is measured.
+- Fixups from fresh workers plus `git rebase -i --autosquash` (with `GIT_SEQUENCE_EDITOR=:`) keep one commit per WP after a gate review, even when the original worktrees are gone.

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glade wind demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 14px monospace; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 8px; top: 8px; background: rgba(0, 0, 0, 0.6); padding: 4px 8px; pointer-events: none; }
+  #error { position: fixed; inset: 0; color: #f66; padding: 1em; white-space: pre-wrap; background: #000; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud"></div>
+<div id="error" hidden></div>
+<script type="module">
+// Wind MVP: a field of the reference grass plant (assets/grass_plant.glb) under a global wind with travelling noise
+// gusts. Each plant leans on a damped spring; leaves sway, flutter and flip in the vertex shader. Tune in the panel.
+// window.__gladeWind exposes the params and field for checks.
+import GUI from '../vendor/lil-gui.esm.min.js';
+import { loadGlb } from './wind/glb.mjs';
+import { INSTANCE_FLOATS, createWindRenderer, obliqueMatrix, topDownMatrix } from './wind/renderer.mjs';
+import { createPlants, stepPlants } from './wind/wind.mjs';
+
+const PLANT_SEED = 7;
+const MAX_DT_S = 1 / 30;
+const DEG = Math.PI / 180;
+
+/** @param {unknown} err */
+function showError(err) {
+  console.error(err);
+  const box = /** @type {HTMLElement} */ (document.getElementById('error'));
+  box.hidden = false;
+  box.textContent = String(/** @type {Error} */ (err)?.stack ?? err);
+}
+
+async function start() {
+  const arena = window.__COBEART_CONFIG__?.arena;
+  if (!arena) throw new Error('window.__COBEART_CONFIG__.arena is missing; open this page through the hub (npm run web)');
+  const mesh = await loadGlb(new URL('./assets/grass_plant.glb', import.meta.url).href);
+  const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('view'));
+  const renderer = createWindRenderer(canvas, mesh);
+  const hud = /** @type {HTMLElement} */ (document.getElementById('hud'));
+
+  const params = {
+    // wind field
+    speed_mps: 2,
+    direction_deg: 30,
+    gust_mps: 4,
+    gust_scale_mm: 1500,
+    gust_travel_mps: 3,
+    // plant response
+    max_lean_deg: 60,
+    speed_ref_mps: 8,
+    spring_hz: 0.9,
+    damping: 0.25,
+    leaf_bend_deg: 35,
+    leaf_sway_hz: 1.3,
+    flutter_deg: 12,
+    flutter_hz: 3,
+    flip_start_mps: 7,
+    flip_end_mps: 12,
+    // plants and view
+    count: 2000,
+    mm_per_model_m: 1000,
+    size_jitter: 0.25,
+    view: 'top',
+    zoom: 3,
+  };
+
+  let field = createPlants(params.count, arena, params.size_jitter, PLANT_SEED);
+  let instances = new Float32Array(params.count * INSTANCE_FLOATS);
+  const rebuild = () => {
+    field = createPlants(params.count, arena, params.size_jitter, PLANT_SEED);
+    instances = new Float32Array(params.count * INSTANCE_FLOATS);
+  };
+
+  const gui = new GUI({ title: 'Wind' });
+  const wind = gui.addFolder('Wind field');
+  wind.add(params, 'speed_mps', 0, 20, 0.1).name('speed (m/s)');
+  wind.add(params, 'direction_deg', 0, 360, 1).name('direction (deg)');
+  wind.add(params, 'gust_mps', 0, 30, 0.1).name('gust peak (m/s)');
+  wind.add(params, 'gust_scale_mm', 200, 6000, 50).name('gust size (mm)');
+  wind.add(params, 'gust_travel_mps', 0, 15, 0.1).name('gust travel (m/s)');
+  const resp = gui.addFolder('Plant response');
+  resp.add(params, 'max_lean_deg', 0, 85, 1).name('max lean (deg)');
+  resp.add(params, 'speed_ref_mps', 1, 30, 0.5).name('speed ref (m/s)');
+  resp.add(params, 'spring_hz', 0.2, 4, 0.05).name('sway freq (Hz)');
+  resp.add(params, 'damping', 0.05, 1.5, 0.01).name('damping ratio');
+  resp.add(params, 'leaf_bend_deg', 0, 90, 1).name('leaf bend (deg)');
+  resp.add(params, 'leaf_sway_hz', 0.1, 5, 0.05).name('leaf sway (Hz)');
+  resp.add(params, 'flutter_deg', 0, 60, 1).name('flutter (deg)');
+  resp.add(params, 'flutter_hz', 0.5, 10, 0.1).name('flutter (Hz)');
+  resp.add(params, 'flip_start_mps', 0, 30, 0.5).name('flip start (m/s)');
+  resp.add(params, 'flip_end_mps', 0.5, 40, 0.5).name('flip full (m/s)');
+  const plants = gui.addFolder('Plants and view');
+  plants.add(params, 'count', 1, 50000, 1).name('plants').onFinishChange(rebuild);
+  plants.add(params, 'mm_per_model_m', 100, 5000, 10).name('size (mm per model m)');
+  plants.add(params, 'size_jitter', 0, 0.6, 0.01).name('size jitter').onFinishChange(rebuild);
+  plants.add(params, 'view', ['top', 'oblique']);
+  plants.add(params, 'zoom', 1, 20, 0.1);
+
+  const resize = () => renderer.resize();
+  window.addEventListener('resize', resize);
+  resize();
+
+  let last = performance.now();
+  let time = 0;
+  let fps = 60;
+  const frame = (now) => {
+    const dt = Math.min((now - last) / 1000, MAX_DT_S);
+    fps += ((1000 / Math.max(now - last, 1e-3)) - fps) * 0.05;
+    last = now;
+    time += dt;
+    if (params.flip_end_mps <= params.flip_start_mps) params.flip_end_mps = params.flip_start_mps + 0.5;
+
+    stepPlants(field, params, time, dt);
+    for (let i = 0; i < field.count; i++) {
+      const o = i * INSTANCE_FLOATS;
+      instances[o] = field.x[i];
+      instances[o + 1] = field.y[i];
+      instances[o + 2] = field.rotation[i];
+      instances[o + 3] = params.mm_per_model_m * field.scale[i];
+      instances[o + 4] = field.leanX[i];
+      instances[o + 5] = field.leanY[i];
+      instances[o + 6] = field.windX[i];
+      instances[o + 7] = field.windY[i];
+    }
+    const viewProj = params.view === 'top'
+      ? topDownMatrix(arena, params.zoom, 3 * params.mm_per_model_m)
+      : obliqueMatrix(arena, params.zoom, canvas.width / canvas.height);
+    renderer.draw(instances, field.count, {
+      viewProj, time, speedRef: params.speed_ref_mps, leafBend: params.leaf_bend_deg * DEG,
+      leafSwayHz: params.leaf_sway_hz, flutter: params.flutter_deg * DEG, flutterHz: params.flutter_hz,
+      flip: [params.flip_start_mps, params.flip_end_mps],
+    });
+    hud.textContent = `${field.count} plants · ${mesh.vertexCount * field.count / 1e6 >= 0.1
+      ? (mesh.vertexCount * field.count / 1e6).toFixed(1) + 'M' : mesh.vertexCount * field.count} vertices · ` +
+      `${fps.toFixed(0)} fps`;
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+  window.__gladeWind = { params, get field() { return field; }, mesh };
+}
+
+start().catch(showError);
+</script>
+</body>
+</html>

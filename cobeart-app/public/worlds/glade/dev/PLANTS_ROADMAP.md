@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GP`. Scope: the growth chain for Glade's first 3D plant, a bushy vegetative grass (no heading, no flowering), from an L-Py model to a growth slider on a dev page. Design input: the grill of 2026-11-01 (decisions P1 to P8 below) and the reference plant in `dev/assets/build_grass_plant.py`. The wind MVP (`dev/wind-demo.html`, `dev/wind/`) is a sibling prototype and not part of this roadmap; Phase 5 reuses its renderer.
 
-**Status (2026-11-01):** roadmap written, no phase started. **Next phase base:** the tip of `main` (`2fa5d1c`); Phase 0 adds the roadmap commit on top.
+**Status (2026-11-02):** Phase 0 done; Phase 1 in progress on `gp-1-lpy-model`, base `a315c36` (`[GP 0] Add the Glade plants roadmap.`).
 
 ## Project facts
 
@@ -63,26 +63,37 @@ This file is untracked until committed, and untracked files do not exist in work
 
 Builds the grass L-system through seedling growth, tillering and leaf turnover (P3 steps one and two), and the exporter that samples it into organ tables. Decline is Phase 2. The orchestrator creates the `lpy` env (Project facts) before spawning; agents never create or modify conda envs.
 
-The two WPs meet at the **module interface** and the **organ-table format** below. The grill may change either, but must settle both before spawning, because WP 1.2 is written against them while WP 1.1 is still being built.
+The two WPs meet at the **module interface** and the **organ-table format** below, settled in the grill before spawning: WP 1.2 is written against them while WP 1.1 is still being built.
 
-**Draft module interface** (L-Py modules and their parameters):
-- `Apex(tiller, rank, t_next)`: a tiller's growing point; emits a new phytomer when `t_next` is reached.
-- `Phytomer(tiller, rank)` followed by `Leaf(id, tiller, rank, age, state)`: one leaf with its sheath; `state` in `growing | mature | senescent | dead`.
-- `Bud(tiller, rank, age)`: an axillary bud; becomes a first-order tiller (`Apex` with a new tiller id) after the tiller delay, while fewer than the tiller cap exist (P1, P7).
-- Tiller placement: a tiller's base sits on the crown at its parent leaf's azimuth, splayed outward by a parameter angle.
+**Verified L-Py API (2026-11-02, `openalea.lpy` in env `lpy`):**
+- `Lsystem(path, {"NAME": value})` overrides only names declared with `extern(NAME=default)` in the `.lpy`; plain globals ignore the dict. `l.context().globals()["__externs__"]` is the set of extern names, and `globals()[name]` their values.
+- `derivation length:` accepts an expression of externs, e.g. `int(round(T_END / DT))`.
+- `l.derive(tree, start_step, n_steps)` returns an `AxialTree`; iterating it gives modules with `.name` and positional parameters (`m[0]`, `list(m)`), which may be Python strings and dicts.
+- Same seed, same L-string (checked with `str(tree)`).
 
-**Draft organ-table format** (one JSON file per export, units per Constraints):
-- Header: `schema_version`, `seed`, all model parameters, `dt`, and the sample times.
-- Per sample time, a list of organs, each with a stable `id` that is the same in every sample (P6 needs it) and: `kind` (`leaf` or `tiller`), `tiller`, `rank`, `birth_time`, `age`, `state`, the attachment point and initial direction, azimuth, angle from vertical, sheath length, blade length and width, unroll fraction (0 rolled, 1 open), arch (bend), and senescence fraction (0 green, 1 dead).
-- A dead leaf stays in the table with `state: dead` and zero size from its death time, so the lifetime organ list is the union of all samples.
+**Module interface (settled, G1):** L-Py computes every organ-table field each step and stores it in the module; the exporter only copies values and never reads turtle frames.
+- `Apex(tiller, rank, t_next)`: a tiller's growing point; emits a new phytomer each phyllochron.
+- `Leaf(id, tiller, rank, age, state, o)`: one leaf with its sheath. `state` is `"growing" | "mature" | "senescent" | "dead"`. `o` is a dict whose keys are exactly the leaf fields of the organ table below, recomputed every step.
+- `Tiller(tiller, parent_rank, birth_time, o)`: one per tiller including the main shoot (`tiller` 0, `parent_rank` 0); `o` holds the tiller fields below.
+- `Bud(tiller, rank, age)`: an axillary bud on the main shoot; becomes `Tiller` plus `Apex` per the tillering rule.
+- Leaf ids are `"L<tiller>.<rank>"`, tiller ids `"T<tiller>"`; both are fixed at birth.
+- All tunables are `extern(...)` in one block at the top, including `SEED`, `DT`, `T_END`. One `random.Random(SEED)` per model; each organ's random draws are made once at its birth, so the draw order is fixed.
 
-**Open for the phase grill** (settle before spawning, record outcomes here):
-1. **Verify first:** how a script reads module parameters from a derived L-string (`openalea.lpy.Lsystem`, `derive`, `AxialTree` iteration), and whether turtle frames (positions and headings) can be read per module. Under P2 every node sits at the crown, so the exporter may compute attachment points itself from parameters; decide which.
-2. **Growth functions:** the shape of blade elongation over age (logistic, or linear to a cap), when the collar appears, how unroll fraction follows age, and how long senescence takes before death.
-3. **Rank progressions:** how sheath length, blade length, blade width and angle from vertical change with leaf rank, mapped from the reference's `LeafSpec` list (lower leaves spread about 48 degrees, upper about 20; lengths 17 to 21 cm), with seeded jitter.
-4. **Tillering rule:** the axil-to-emergence delay (recommendation: the tiller in leaf n's axil emerges with leaf n+3 on the parent), which axils may tiller, the splay angle, and a tiller's own leaf timing.
-5. **End of Phase 1 time span:** how long the model runs (until all 4 tillers carry 3 live leaves, then a few phyllochrons of steady turnover) and the sample count and spacing.
-6. **Skeleton preview:** what the viewer draws (sheaths as cylinders, blades as flat tapered strips, senescence as colour) and file layout under `dev/lpy/`.
+**Organ-table format (settled, G2):** one JSON file per export.
+- Header: `schema_version` (1), `model` (file name), `seed`, `params` (every extern name to value), `dt`, `t_end`, `sample_times`.
+- `samples`: a list of `{time, organs}`. An organ appears from its birth onward and stays in every later sample with the same `id`; the lifetime organ list is the union of all samples.
+- Every organ: `id`, `kind` (`leaf` or `tiller`), `tiller`, `rank` (for a tiller its `parent_rank`), `birth_time`, `age`, `state` (tillers are always `growing` in Phase 1).
+- Leaf fields in `o`: `attach` [x, y, z] (the collar: tiller base plus the tiller axis times the current sheath length), `direction` [x, y, z] (unit, initial blade direction), `azimuth_rad`, `angle_from_vertical_rad`, `sheath_length_m`, `blade_length_m`, `blade_width_m`, `unroll` (0 rolled, 1 open), `arch_rad`, `senescence` (0 green, 1 dead).
+- Tiller fields in `o`: `base` [x, y, z], `direction` [x, y, z] (unit tiller axis), `azimuth_rad`, `splay_rad`.
+- A dead leaf has zero `sheath_length_m`, `blade_length_m` and `blade_width_m`, `senescence` 1, and `attach` at its tiller base.
+
+**Grill outcomes (2026-11-02):**
+- **G1, G2:** the interface and format above. Attachment points come from parameters (P2 puts every node at the crown), so no turtle frames are read.
+- **G3 Growth functions:** sheath and blade lengths and blade width follow `smoothstep(age / 2)` to full size; the leaf turns `mature` at age 2 (collar). `unroll = smoothstep((age - 0.6) / 1.2)`. A leaf is live while `growing` or `mature`; when a new leaf would make a tiller exceed `LIVE_LEAVES` (3), its oldest live leaf turns `senescent`. Senescence takes 2 P (`senescence` 0 to 1), then `dead`. Over the last 30% of senescence the leaf shrivels and droops: all sizes scale to zero, arch and angle from vertical grow. The user may later prefer a shrivelled blade that persists (more vertices, no pop at all); that is a parameter-level change for a later phase.
+- **G4 Rank progressions:** sheath 2 cm at rank 1 rising linearly to 8 cm at rank 5, flat after, ±15% jitter; blade length 6 to 20 cm, ±10%; blade width 4 to 13 mm, ±8%. Angle from vertical follows age, not rank: about 8 deg young and rolled, 20 deg mature, easing toward 48 deg as it ages, more while senescent; ±5 deg jitter per leaf. Arch 0.4 rad rising to 0.9 rad with age. Azimuth alternates by pi within a tiller, ±0.45 rad jitter. Tillers use the same progressions from their own rank 1, scaled by `TILLER_SIZE_SCALE` 0.9.
+- **G5 Tillering:** the bud in the axil of main-shoot leaf n becomes a tiller when main-shoot leaf n + 3 appears (`TILLER_DELAY` 3). Axils of main-shoot leaves 1 to 4 can tiller (`MAX_TILLERS` 4), so tillers emerge at t of about 3, 4, 5, 6. A tiller's base sits on the crown `CROWN_RADIUS_M` 4 mm from the centre at the parent leaf's azimuth, splayed outward 12 deg ± 4 deg. Tillers keep the main shoot's phyllochron, first leaf at emergence; buds on tillers never activate (P1).
+- **G6 Time span:** `DT` 0.05, `T_END` 12 (the last tiller has 3 live leaves by about t = 8, then about 4 P of steady turnover). Exporter default `--samples 25`: evenly spaced over [0, T_END], snapped to the step grid. VAT stage spacing stays a Phase 4 decision.
+- **G7 Preview and layout:** the viewer draws sheaths as cylinders and each blade as an 8-segment curved strip following its arch, tapering in width and narrower while rolled, coloured green to brown by `senescence` through the `.lpy` material list. Files live in `dev/lpy/` (`grass.lpy`, `export_organs.py`, `organ_table.schema.json`, `tests/`). Generated JSON is not committed in Phase 1.
 
 ### WP 1.1: Grass L-system
 

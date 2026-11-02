@@ -1,12 +1,24 @@
-"""Glade grass: a bushy vegetative grass clump (GP roadmap, Phase 1).
+"""Glade grass: a bushy vegetative grass clump (GP roadmap, Phases 1 and 2).
 
 Structure and timing only (P5): which leaves and tillers exist, where they attach, and their age, size, angles
 and state. Each Leaf and Tiller module carries `o`, a dict with exactly the organ-table fields of the roadmap's
-format (G2), recomputed every step; the exporter (export_organs.py) copies them. The viewer draws a skeleton.
+format (G2, G15), recomputed every step; the exporter (export_organs.py) copies them. The viewer draws a skeleton.
+
+The track is the healthy plant (G15): a leaf's sizes, angle and arch are its healthy baseline at its age, while
+senescence (turnover), fade (removal after a turnover death) and decline_draw carry the rest. Decline is a second
+axis, the plant's vitality v (1 healthy, 0 gone), applied on top by decline.py (G10 to G14); the track never
+contains it. A turnover leaf is senescent for SENESCENCE_DURATION, then dead, then fades over FADE_DURATION and is
+collapsed at fade 1 (zero sizes, attach at its tiller base).
 
 Open in the L-Py GUI:  ~/miniconda3/envs/lpy/bin/lpy cobeart-app/public/worlds/glade/dev/lpy/grass.lpy
 then Run (whole derivation) or Animate (step by step); Rewind restarts from the seed. Parameters can be edited
 in the block below (or in the GUI's parameter panel, since they are externs).
+
+Decline preview (G17): the derivation runs to T_END + PREVIEW_DECLINE. After T_END the productions freeze (every
+module is reproduced unchanged) and the viewer draws the frozen plant at v = 1 - (t - T_END) / PREVIEW_DECLINE:
+leaves brown, droop and shrivel by their health, tillers lean outward, and everything fades once v < V_DEAD. Lower
+T_END to preview decline from a younger plant; set PREVIEW_DECLINE to 0 to turn the preview off. The exporter
+samples only up to T_END.
 
 Units: metres and radians, Z up. Time is in phyllochrons (P, the interval between two leaves on one shoot);
 one derivation step advances time by DT. A leaf of rank r on the main shoot is born at t = r - 1.
@@ -16,12 +28,12 @@ direction and the frame is the minimal rotation taking +Z onto it (identity for 
 rotation applied to those angles, in world space, and is the authoritative field.
 
 Use one Lsystem instance, derived forward only; birth draws live in module globals reset by Start(). Everything
-that changes after birth (age, state, senescence) is carried in the modules.
+that changes after birth (age, state, senescence, fade) is carried in the modules.
 
 Parameters (all externs, overridable with Lsystem(path, {"NAME": value})):
-  SEED                     seed of the single random stream; every organ draws once, at its birth
+  SEED                     seed of the random streams; every organ draws once, at its birth
   DT                       time step in P
-  T_END                    end time in P; derivation length is T_END / DT
+  T_END                    end time in P of the growth track (what the exporter samples)
   LIVE_LEAVES              live (growing or mature) leaves per tiller before the oldest senesces (P7)
   MAX_TILLERS              first-order tillers, from the axils of main-shoot leaves 1..MAX_TILLERS (P1, P7)
   TILLER_DELAY             the bud in main-shoot leaf n's axil emerges when leaf n + TILLER_DELAY appears
@@ -48,16 +60,32 @@ Parameters (all externs, overridable with Lsystem(path, {"NAME": value})):
                                                          maturity, and eased toward after maturity
   ANGLE_SPREAD_DURATION    time after maturity over which the angle eases to ANGLE_OLD_DEG
   ANGLE_JITTER_DEG         per-leaf jitter on the angle from the tiller axis
-  ANGLE_SENESCENT_DEG      extra angle reached at full senescence
   ARCH_YOUNG_RAD, ARCH_OLD_RAD, ARCH_AGE   arch (bend) rises from young to old over ARCH_AGE
-  SENESCENCE_DURATION      time from turning senescent to dead
-  SHRIVEL_FRACTION         final fraction of senescence over which the leaf shrivels to zero size and droops
+  SENESCENCE_DURATION      time from turning senescent to dead (turnover)
+  FADE_DURATION            time from a turnover leaf's death to its full fade (then it is collapsed)
+  PREVIEW_DECLINE          length (P) of the decline preview after T_END; 0 turns it off
+  Look and decline (applied through decline.py, whose DeclineParams uses these names):
+  ANGLE_SENESCENT_DEG      extra angle from the tiller axis at health 0
+  SHRIVEL_FRACTION         final fraction of health over which a leaf shrivels to DECLINE_RESIDUAL and droops
   SHRIVEL_ANGLE_DEG, SHRIVEL_ARCH_RAD      extra angle and arch reached at the end of the shrivel
+  DECLINE_RESIDUAL         size of a dead leaf relative to its healthy size
+  V_DEAD                   vitality at which every leaf is dead; below it the plant fades and cannot revive
+  DECLINE_AGE_SPREAD, DECLINE_AGE_REF      older leaves die earlier in v, by up to the spread at age AGE_REF
+  DECLINE_JITTER           per-leaf uniform jitter on the death point (decline_draw), drawn at birth
+  DECLINE_SPLAY_DEG        outward lean of every tiller but the main shoot, reached at V_DEAD
 """
 import math
+import os
 import random
+import sys
 
 from openalea.plantgl.all import Index3, TriangleSet, Vector3
+
+# L-Py does not put the model's folder on the import path; __file__ is the .lpy path L-Py sets.
+_MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+if _MODEL_DIR not in sys.path:
+    sys.path.insert(0, _MODEL_DIR)
+import decline  # noqa: E402
 
 extern(
     SEED = 1,
@@ -101,11 +129,20 @@ extern(
     SHRIVEL_FRACTION = 0.3,
     SHRIVEL_ANGLE_DEG = 25.0,
     SHRIVEL_ARCH_RAD = 0.8,
+    FADE_DURATION = 0.5,
+    PREVIEW_DECLINE = 4.0,
+    DECLINE_RESIDUAL = 0.5,
+    V_DEAD = 0.15,
+    DECLINE_AGE_SPREAD = 0.4,
+    DECLINE_AGE_REF = 3.0,
+    DECLINE_JITTER = 0.1,
+    DECLINE_SPLAY_DEG = 25.0,
 )
 
 PHYLLOCHRON = 1.0  # time is measured in phyllochrons, so the interval between two leaves is 1 by definition
 UP = (0.0, 0.0, 1.0)
 EPS = 1e-9
+DECLINE = decline.DeclineParams.from_mapping(globals())
 
 
 def smoothstep(x):
@@ -136,11 +173,13 @@ RNG = random.Random(SEED)
 TILLER_O = {}     # tiller id -> its organ fields (fixed at birth)
 LEAF_DRAWS = {}   # leaf id -> random draws made at birth
 NEWEST_RANK = {}  # tiller id -> rank of its newest leaf once this step's emissions are done (see EndEach)
+STATE_TIME = 0.0  # time of the current L-string, read by the decline preview (set in EndEach)
 
 
 def reset():
-    global RNG
+    global RNG, STATE_TIME
     RNG = random.Random(SEED)
+    STATE_TIME = 0.0
     TILLER_O.clear()
     LEAF_DRAWS.clear()
     NEWEST_RANK.clear()
@@ -161,11 +200,13 @@ def emits(t_next):
 
 
 def EndEach(lstring):
-    """Record, per tiller, the newest leaf rank after the next step's emissions.
+    """Record the time of the new L-string and, per tiller, the newest leaf rank after the next step's emissions.
 
-    Leaves and buds read it in the next step, so a leaf turns senescent in the same step as the leaf that would
-    make its tiller exceed LIVE_LEAVES, and a bud activates in the same step as its triggering leaf.
+    Leaves and buds read the ranks in the next step, so a leaf turns senescent in the same step as the leaf that
+    would make its tiller exceed LIVE_LEAVES, and a bud activates in the same step as its triggering leaf.
     """
+    global STATE_TIME
+    STATE_TIME = (getIterationNb() + 1) * DT  # getIterationNb() is the index of the step just done
     NEWEST_RANK.clear()
     for m in lstring:
         if m.name == "Apex":
@@ -176,6 +217,18 @@ def EndEach(lstring):
 def now():
     """Time of the state the current production step reads."""
     return getIterationNb() * DT
+
+
+def frozen():
+    """Whether the current step lies in the decline preview after T_END, where every module stays unchanged."""
+    return now() >= T_END - DT / 2
+
+
+def preview_vitality():
+    """Vitality v of the current L-string in the decline preview (1 up to T_END)."""
+    if PREVIEW_DECLINE <= 0:
+        return 1.0
+    return min(max(1.0 - (STATE_TIME - T_END) / PREVIEW_DECLINE, 0.0), 1.0)
 
 
 def leaf_id(tiller, rank):
@@ -220,8 +273,10 @@ def new_leaf(tiller, rank):
         "sheath_m": rank_value(rank, SHEATH_RANK1_M, SHEATH_PLATEAU_M) * scale * jitter(SHEATH_JITTER),
         "blade_m": rank_value(rank, BLADE_RANK1_M, BLADE_PLATEAU_M) * scale * jitter(BLADE_JITTER),
         "width_m": rank_value(rank, WIDTH_RANK1_M, WIDTH_PLATEAU_M) * scale * jitter(WIDTH_JITTER),
+        # Own stream per leaf, seeded from SEED and the id, so adding it left every draw of RNG unchanged.
+        "decline_draw": random.Random("decline:%d:%s" % (SEED, lid)).uniform(-DECLINE_JITTER, DECLINE_JITTER),
     }
-    return lid, now(), DT, "growing", leaf_o(lid, tiller, DT, "growing", 0.0)
+    return lid, now(), DT, "growing", leaf_o(lid, tiller, DT, "growing", 0.0, 0.0)
 
 
 def new_tiller(tiller, parent_rank):
@@ -237,16 +292,14 @@ def new_tiller(tiller, parent_rank):
     return o
 
 
-def leaf_o(lid, tiller, age, state, sen):
-    """Organ-table leaf fields at this age, state and senescence (pure given the leaf's birth draws)."""
+def leaf_o(lid, tiller, age, state, sen, fade):
+    """Organ-table leaf fields: the healthy baseline at this age plus senescence and fade (pure given the draws)."""
     d = LEAF_DRAWS[lid]
     t = TILLER_O[tiller]
-    shrivel = smoothstep((sen - (1.0 - SHRIVEL_FRACTION)) / SHRIVEL_FRACTION)
-    size = 0.0 if state == "dead" else smoothstep(age / ELONGATION_AGE) * (1.0 - shrivel)
+    size = 0.0 if fade >= 1.0 else smoothstep(age / ELONGATION_AGE)
     angle_deg = (ANGLE_YOUNG_DEG
                  + (ANGLE_MATURE_DEG - ANGLE_YOUNG_DEG) * smoothstep(age / MATURE_AGE)
-                 + (ANGLE_OLD_DEG - ANGLE_MATURE_DEG) * smoothstep((age - MATURE_AGE) / ANGLE_SPREAD_DURATION)
-                 + ANGLE_SENESCENT_DEG * sen + SHRIVEL_ANGLE_DEG * shrivel)
+                 + (ANGLE_OLD_DEG - ANGLE_MATURE_DEG) * smoothstep((age - MATURE_AGE) / ANGLE_SPREAD_DURATION))
     angle = max(math.radians(angle_deg) + d["angle_jitter_rad"], 0.0)
     sheath = d["sheath_m"] * size
     base, axis = t["base"], t["direction"]
@@ -259,38 +312,80 @@ def leaf_o(lid, tiller, age, state, sen):
         "blade_length_m": d["blade_m"] * size,
         "blade_width_m": d["width_m"] * size,
         "unroll": smoothstep((age - UNROLL_START_AGE) / UNROLL_DURATION),
-        "arch_rad": lerp(ARCH_YOUNG_RAD, ARCH_OLD_RAD, smoothstep(age / ARCH_AGE)) + SHRIVEL_ARCH_RAD * shrivel,
+        "arch_rad": lerp(ARCH_YOUNG_RAD, ARCH_OLD_RAD, smoothstep(age / ARCH_AGE)),
         "senescence": sen,
+        "fade": fade,
+        "decline_draw": d["decline_draw"],
     }
 
 
-def next_state(tiller, rank, age, state, sen):
-    """Leaf life cycle growing -> mature -> senescent (turnover) -> dead; returns the new state and senescence."""
-    rate = DT / SENESCENCE_DURATION
+def next_state(tiller, rank, age, state, sen, fade):
+    """Leaf life cycle growing -> mature -> senescent (turnover) -> dead -> faded; returns state, senescence, fade."""
     if state in ("growing", "mature"):
         if NEWEST_RANK.get(tiller, rank) - rank >= LIVE_LEAVES:
-            return "senescent", rate
-        return ("mature" if age >= MATURE_AGE - EPS else "growing"), 0.0
+            return "senescent", DT / SENESCENCE_DURATION, 0.0
+        return ("mature" if age >= MATURE_AGE - EPS else "growing"), 0.0, 0.0
     if state == "senescent":
-        sen = min(sen + rate, 1.0)
-        return ("dead" if sen >= 1.0 - EPS else "senescent"), sen
-    return state, 1.0
+        sen = min(sen + DT / SENESCENCE_DURATION, 1.0)
+        return ("dead", 1.0, 0.0) if sen >= 1.0 - EPS else ("senescent", sen, 0.0)
+    fade = min(fade + DT / FADE_DURATION, 1.0)
+    return "dead", 1.0, (1.0 if fade >= 1.0 - EPS else fade)
 
 
 # Skeleton preview: world-space triangle meshes inserted with @g while the turtle stays unrotated at the origin.
-N_COLOURS = 12
+# Materials form a grid of opacity levels (N_OPACITY) by colours (N_COLOURS browning steps plus the sheath green),
+# so fades show as transparency.
+N_COLOURS, N_OPACITY = 12, 6
 GREEN, BROWN, SHEATH_GREEN = (40, 120, 20), (140, 100, 45), (90, 120, 40)
 COLOUR_BASE = 10
-for _i in range(N_COLOURS):
-    _f = _i / (N_COLOURS - 1)
-    context().turtle.setMaterial(COLOUR_BASE + _i, Material(tuple(int(lerp(g, b, _f)) for g, b in zip(GREEN, BROWN))))
-context().turtle.setMaterial(COLOUR_BASE + N_COLOURS, Material(SHEATH_GREEN))
+SHEATH_COLOUR = N_COLOURS
+for _o in range(N_OPACITY):
+    for _i in range(N_COLOURS + 1):
+        _rgb = SHEATH_GREEN if _i == SHEATH_COLOUR else tuple(
+            int(lerp(g, b, _i / (N_COLOURS - 1))) for g, b in zip(GREEN, BROWN))
+        context().turtle.setMaterial(COLOUR_BASE + _o * (N_COLOURS + 1) + _i,
+                                     Material(_rgb, transparency=1.0 - (_o + 1) / N_OPACITY))
 BLADE_SEGMENTS, TUBE_SIDES = 8, 6
 ROLLED_WIDTH = 0.25  # drawn width fraction of a fully rolled blade
+MIN_DRAWN_OPACITY = 0.5 / N_OPACITY  # below this a leaf is not drawn
 
 
-def colour_index(senescence):
-    return COLOUR_BASE + int(round(senescence * (N_COLOURS - 1)))
+def material_index(colour, alpha):
+    """Material of a colour slot (a browning step or SHEATH_COLOUR) at the nearest non-zero opacity level."""
+    level = min(max(int(math.ceil(alpha * N_OPACITY)) - 1, 0), N_OPACITY - 1)
+    return COLOUR_BASE + level * (N_COLOURS + 1) + colour
+
+
+def tiller_axis(tiller, v):
+    """Tiller axis at vitality v: tillers other than the main shoot lean outward about their own azimuth (G14)."""
+    t = TILLER_O[tiller]
+    if tiller == 0:
+        return t["direction"]
+    return dir_from(t["azimuth_rad"], t["splay_rad"] + decline.tiller_lean_rad(v, DECLINE))
+
+
+def drawn_leaf(o, age, tiller, v):
+    """The leaf as drawn at vitality v: healthy fields deformed by its health (G11) on the leaning tiller axis.
+
+    Returns the drawn fields, the tiller axis, the browning colour slot and the opacity.
+    """
+    h = decline.health(o["senescence"], v, age, o["decline_draw"], DECLINE)
+    lk = decline.look(h, DECLINE)
+    axis = tiller_axis(tiller, v)
+    sheath = o["sheath_length_m"] * lk.size_scale
+    base = TILLER_O[tiller]["base"]
+    drawn = dict(o)
+    drawn.update({
+        "attach": [base[i] + axis[i] * sheath for i in range(3)],
+        "direction": unit(to_tiller_frame(dir_from(o["azimuth_rad"], o["angle_from_axis_rad"] + lk.extra_angle_rad),
+                                          axis)),
+        "sheath_length_m": sheath,
+        "blade_length_m": o["blade_length_m"] * lk.size_scale,
+        "blade_width_m": o["blade_width_m"] * lk.size_scale,
+        "arch_rad": o["arch_rad"] + lk.extra_arch_rad,
+    })
+    colour = int(round(lk.browning * (N_COLOURS - 1)))
+    return drawn, axis, colour, decline.opacity(o["fade"], v, DECLINE)
 
 
 def sheath_mesh(base, axis, length, radius):
@@ -335,11 +430,13 @@ module Tiller(tiller, parent_rank, birth_time, o), Bud(tiller, rank, age)
 
 Axiom: Tiller(0, 0, 0.0, TILLER_O[0]) Apex(0, 1, 0.0)
 
-derivation length: int(round(T_END / DT))
+derivation length: int(round((T_END + PREVIEW_DECLINE) / DT))
 
 production:
 
 Apex(tiller, rank, t_next):
+    if frozen():
+        produce Apex(tiller, rank, t_next)
     if emits(t_next):
         lid, birth, age, state, o = new_leaf(tiller, rank)
         if tiller == 0 and rank <= MAX_TILLERS:
@@ -348,6 +445,8 @@ Apex(tiller, rank, t_next):
     produce Apex(tiller, rank, t_next - DT)
 
 Bud(tiller, rank, age):
+    if frozen():
+        produce Bud(tiller, rank, age)
     if NEWEST_RANK.get(0, 0) >= rank + TILLER_DELAY:
         o = new_tiller(rank, rank)
         lid, birth, leaf_age, state, leaf = new_leaf(rank, 1)
@@ -355,19 +454,21 @@ Bud(tiller, rank, age):
     produce Bud(tiller, rank, age + DT)
 
 Leaf(lid, tiller, rank, birth, age, state, o):
+    if frozen():
+        produce Leaf(lid, tiller, rank, birth, age, state, o)
     new_age = age + DT
-    new_state, sen = next_state(tiller, rank, new_age, state, o["senescence"])
-    produce Leaf(lid, tiller, rank, birth, new_age, new_state, leaf_o(lid, tiller, new_age, new_state, sen))
+    new_state, sen, fade = next_state(tiller, rank, new_age, state, o["senescence"], o["fade"])
+    produce Leaf(lid, tiller, rank, birth, new_age, new_state, leaf_o(lid, tiller, new_age, new_state, sen, fade))
 
 interpretation:
 
 Tiller(tiller, parent_rank, birth_time, o) --> @M(0, 0, 0)
 Leaf(lid, tiller, rank, birth, age, state, o):
-    if state == "dead":
+    drawn, axis, colour, alpha = drawn_leaf(o, age, tiller, preview_vitality())
+    if alpha < MIN_DRAWN_OPACITY:
         produce @M(0, 0, 0)
-    axis = TILLER_O[tiller]["direction"]
-    radius = 0.25 * o["blade_width_m"] + 0.0004
-    produce @M(0, 0, 0) ,(COLOUR_BASE + N_COLOURS) @g(sheath_mesh(TILLER_O[tiller]["base"], axis, o["sheath_length_m"], radius)) ,(colour_index(o["senescence"])) @g(blade_mesh(o, axis))
+    radius = 0.25 * drawn["blade_width_m"] + 0.0004
+    produce @M(0, 0, 0) ,(material_index(SHEATH_COLOUR, alpha)) @g(sheath_mesh(TILLER_O[tiller]["base"], axis, drawn["sheath_length_m"], radius)) ,(material_index(colour, alpha)) @g(blade_mesh(drawn, axis))
 Apex(tiller, rank, t_next) --> @M(0, 0, 0)
 Bud(tiller, rank, age) --> @M(0, 0, 0)
 

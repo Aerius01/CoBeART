@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Glade organ table",
+  "description": "Organs of an L-Py grass model sampled at several times. Lengths in metres, angles in radians, time in phyllochrons. Organs are sorted by (birth_time, id) within a sample; consumers must key organs by id, not by position.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "model", "seed", "params", "dt", "t_end", "sample_times", "samples"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "model": {"type": "string", "minLength": 1, "description": "File name of the L-Py model."},
+    "seed": {"type": "integer", "description": "Value of the SEED extern used for this export."},
+    "params": {
+      "type": "object",
+      "description": "Every extern of the model by name.",
+      "additionalProperties": {"type": ["number", "string", "boolean"]}
+    },
+    "dt": {"type": "number", "exclusiveMinimum": 0},
+    "t_end": {"type": "number", "exclusiveMinimum": 0},
+    "sample_times": {"type": "array", "minItems": 1, "items": {"type": "number", "minimum": 0}},
+    "samples": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["time", "organs"],
+        "properties": {
+          "time": {"type": "number", "minimum": 0},
+          "organs": {"type": "array", "items": {"$ref": "#/$defs/organ"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "vec3": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}},
+    "unitInterval": {"type": "number", "minimum": 0, "maximum": 1},
+    "nonNegative": {"type": "number", "minimum": 0},
+    "organ": {
+      "oneOf": [{"$ref": "#/$defs/leaf"}, {"$ref": "#/$defs/tiller"}]
+    },
+    "leaf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "kind", "tiller", "rank", "birth_time", "age", "state", "attach", "direction", "azimuth_rad",
+        "angle_from_axis_rad", "sheath_length_m", "blade_length_m", "blade_width_m", "unroll", "arch_rad",
+        "senescence"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^L[0-9]+\\.[0-9]+$"},
+        "kind": {"const": "leaf"},
+        "tiller": {"type": "integer", "minimum": 0},
+        "rank": {"type": "integer", "minimum": 1},
+        "birth_time": {"type": "number", "minimum": 0},
+        "age": {"$ref": "#/$defs/nonNegative"},
+        "state": {"enum": ["growing", "mature", "senescent", "dead"]},
+        "attach": {"$ref": "#/$defs/vec3", "description": "Collar position: tiller base plus tiller axis times sheath length."},
+        "direction": {"$ref": "#/$defs/vec3", "description": "Unit initial blade direction in world space; authoritative over azimuth_rad and angle_from_axis_rad."},
+        "azimuth_rad": {"type": "number"},
+        "angle_from_axis_rad": {"type": "number", "description": "Angle between the initial blade direction and the tiller axis; azimuth_rad is measured about the same tiller axis."},
+        "sheath_length_m": {"$ref": "#/$defs/nonNegative"},
+        "blade_length_m": {"$ref": "#/$defs/nonNegative"},
+        "blade_width_m": {"$ref": "#/$defs/nonNegative"},
+        "unroll": {"$ref": "#/$defs/unitInterval", "description": "0 rolled, 1 open."},
+        "arch_rad": {"type": "number"},
+        "senescence": {"$ref": "#/$defs/unitInterval", "description": "0 green, 1 dead."}
+      }
+    },
+    "tiller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "tiller", "rank", "birth_time", "age", "state", "base", "direction", "azimuth_rad", "splay_rad"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^T[0-9]+$"},
+        "kind": {"const": "tiller"},
+        "tiller": {"type": "integer", "minimum": 0},
+        "rank": {"type": "integer", "minimum": 0, "description": "Rank of the parent leaf (parent_rank)."},
+        "birth_time": {"type": "number", "minimum": 0},
+        "age": {"$ref": "#/$defs/nonNegative"},
+        "state": {"const": "growing"},
+        "base": {"$ref": "#/$defs/vec3"},
+        "direction": {"$ref": "#/$defs/vec3", "description": "Unit tiller axis."},
+        "azimuth_rad": {"type": "number"},
+        "splay_rad": {"type": "number"}
+      }
+    }
+  }
+}

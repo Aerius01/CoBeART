@@ -1,0 +1,89 @@
+"""Tiny deterministic model following the grass module interface, for exporter tests.
+
+Leaf(id, tiller, rank, birth_time, age, state, o): a leaf born in the step starting at time b first appears
+with age DT and birth_time b. The axiom leaf is born at time 0 with age 0. Apex needs the module declaration below to bind its parameters.
+"""
+import math
+import random
+
+extern(SEED=1)
+extern(DT=0.5)
+extern(T_END=12.0)
+extern(LIFE=4.0)
+
+rng = random.Random(SEED)
+jitter = {}
+
+
+def birth_jitter(leaf_id):
+    if leaf_id not in jitter:
+        jitter[leaf_id] = rng.uniform(-0.2, 0.2)
+    return jitter[leaf_id]
+
+
+def leaf_state(age):
+    if age < 1.0:
+        return "growing"
+    if age < LIFE - 1.0:
+        return "mature"
+    if age < LIFE:
+        return "senescent"
+    return "dead"
+
+
+def leaf_o(leaf_id, tiller, rank, age):
+    j = birth_jitter(leaf_id)
+    az = math.pi * (rank % 2) + j
+    size = 0.0 if age >= LIFE else min(1.0, age / 2.0)
+    sen = 1.0 if age >= LIFE else min(1.0, max(0.0, age - (LIFE - 1.0)))
+    sheath = 0.05 * size
+    return {
+        "attach": [0.004 * tiller, 0.0, sheath],
+        "direction": [math.sin(0.3) * math.cos(az), math.sin(0.3) * math.sin(az), math.cos(0.3)],
+        "azimuth_rad": az,
+        "angle_from_axis_rad": 0.3 + 0.1 * age,
+        "sheath_length_m": sheath,
+        "blade_length_m": 0.15 * size,
+        "blade_width_m": 0.01 * size,
+        "unroll": min(1.0, age / 2.0),
+        "arch_rad": 0.4,
+        "senescence": sen,
+    }
+
+
+def tiller_o(tiller):
+    return {
+        "base": [0.004 * tiller, 0.0, 0.0],
+        "direction": [0.0, 0.0, 1.0],
+        "azimuth_rad": 0.5 * tiller,
+        "splay_rad": 0.2 if tiller else 0.0,
+    }
+
+
+def leaf_id_of(tiller, rank):
+    return "L%d.%d" % (tiller, rank)
+
+
+module Apex, Leaf, Tiller
+
+derivation length: int(round(T_END / DT))
+
+Axiom: Tiller(0, 0, 0.0, tiller_o(0)) Leaf("L0.1", 0, 1, 0.0, 0.0, "growing", leaf_o("L0.1", 0, 1, 0.0)) Apex(0, 2, 1.0)
+
+production:
+
+Apex(t, r, tn) :
+    tn2 = tn - DT
+    if tn2 > 1e-9:
+        produce Apex(t, r, tn2)
+    else:
+        nproduce Leaf(leaf_id_of(t, r), t, r, (r - 1) * 1.0 + 2.0 * t - DT, DT, leaf_state(DT), leaf_o(leaf_id_of(t, r), t, r, DT))
+        nproduce Apex(t, r + 1, 1.0)
+        if t == 0 and r == 2:
+            nproduce Tiller(1, r, (r - 1) * 1.0 - DT, tiller_o(1)) Apex(1, 1, 1.0)
+
+Leaf(i, t, r, b, a, s, o) :
+    a2 = a + DT
+    produce Leaf(i, t, r, b, a2, leaf_state(a2), leaf_o(i, t, r, a2))
+
+endlsystem

@@ -8,12 +8,17 @@ import argparse
 import json
 import logging
 import math
-from dataclasses import asdict, dataclass
+import sys
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Iterable, Literal, Sequence
+from typing import Any, Iterable, Literal, Sequence, get_type_hints
 
 import jsonschema
 from openalea.lpy import Lsystem
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import decline  # noqa: E402
 
 LOG = logging.getLogger(__name__)
 
@@ -26,13 +31,6 @@ Vec3 = tuple[float, float, float]
 LeafState = Literal["growing", "mature", "senescent", "dead"]
 
 LEAF_STATES: frozenset[str] = frozenset({"growing", "mature", "senescent", "dead"})
-LEAF_VECTOR_KEYS = ("attach", "direction")
-LEAF_SCALAR_KEYS = (
-    "azimuth_rad", "angle_from_axis_rad", "sheath_length_m", "blade_length_m",
-    "blade_width_m", "unroll", "arch_rad", "senescence", "fade", "decline_draw",
-)
-TILLER_VECTOR_KEYS = ("base", "direction")
-TILLER_SCALAR_KEYS = ("azimuth_rad", "splay_rad")
 
 
 class OrganTableError(ValueError):
@@ -78,6 +76,20 @@ class TillerOrgan:
 
 
 Organ = LeafOrgan | TillerOrgan
+
+HEADER_FIELDS = frozenset({"id", "kind", "tiller", "rank", "birth_time", "age", "state"})
+
+
+def _field_names(cls: type, vector: bool) -> tuple[str, ...]:
+    """Non-header dataclass fields, the Vec3-typed ones when `vector` is true and the others otherwise."""
+    hints = get_type_hints(cls)
+    return tuple(f.name for f in fields(cls) if f.name not in HEADER_FIELDS and (hints[f.name] == Vec3) == vector)
+
+
+LEAF_VECTOR_KEYS = _field_names(LeafOrgan, vector=True)
+LEAF_SCALAR_KEYS = _field_names(LeafOrgan, vector=False)
+TILLER_VECTOR_KEYS = _field_names(TillerOrgan, vector=True)
+TILLER_SCALAR_KEYS = _field_names(TillerOrgan, vector=False)
 
 
 @dataclass(frozen=True)
@@ -366,6 +378,10 @@ def export_organs(
         raise OrganTableError(
             f"{model_path.name}: --seed {seed} was ignored, SEED must be declared with extern(SEED=...)"
         )
+    try:
+        decline.DeclineParams.from_mapping(info.params)
+    except ValueError as error:
+        raise OrganTableError(f"{model_path.name}: {error}") from error
     sampled = derive_samples(lsystem, info, samples)
     check_stable_ids(sampled)
     document = build_document(info, sampled)

@@ -13,9 +13,11 @@ import pytest
 LPY_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(LPY_DIR))
 
+import decline  # noqa: E402
 import export_organs as eo  # noqa: E402
 
 FIXTURE = Path(__file__).with_name("fixture_grass.lpy")
+DECLINE_NAMES = {f.name for f in dataclasses.fields(decline.DeclineParams)}
 
 
 def run_export(tmp_path: Path, name: str = "out.json", model: Path = FIXTURE, **kwargs: Any) -> dict[str, Any]:
@@ -34,7 +36,7 @@ def test_export_matches_schema_and_header(tmp_path: Path) -> None:
     assert doc["schema_version"] == 2
     assert doc["model"] == "fixture_grass.lpy"
     assert doc["seed"] == 1
-    assert set(doc["params"]) == {"SEED", "DT", "T_END", "LIFE", "FADE_DURATION", "PREVIEW_DECLINE"}
+    assert set(doc["params"]) == {"SEED", "DT", "T_END", "LIFE", "FADE_DURATION", "PREVIEW_DECLINE"} | DECLINE_NAMES
     assert doc["sample_times"] == [s["time"] for s in doc["samples"]]
     assert doc["sample_times"][0] == 0 and doc["sample_times"][-1] == doc["t_end"]
     assert len(doc["samples"]) == 7
@@ -250,3 +252,31 @@ def test_sampling_never_derives_beyond_t_end(tmp_path: Path) -> None:
     doc = run_export(tmp_path, "long.json", model=longer, samples=13)
     assert doc["samples"] == reference["samples"]
     assert doc["samples"][-1]["time"] == doc["t_end"]
+
+
+def test_missing_decline_extern_fails_at_export(tmp_path: Path) -> None:
+    model = tmp_path / "nodecline.lpy"
+    model.write_text(FIXTURE.read_text().replace("extern(V_DEAD=0.15)\n", ""), encoding="utf-8")
+    out = tmp_path / "out.json"
+    with pytest.raises(eo.OrganTableError, match=r"nodecline\.lpy.*V_DEAD"):
+        eo.export_organs(model, out)
+    assert not out.exists()
+
+
+def test_decline_draw_outside_unit_range_is_rejected(tmp_path: Path) -> None:
+    doc = run_export(tmp_path, samples=3)
+    leaf = next(o for o in doc["samples"][-1]["organs"] if o["kind"] == "leaf")
+    assert -1 <= leaf["decline_draw"] <= 1
+    leaf["decline_draw"] = 1.5
+    with pytest.raises(eo.OrganTableError):
+        eo.validate_document(doc)
+
+
+def test_schema_required_fields_match_dataclasses() -> None:
+    defs = json.loads(eo.SCHEMA_PATH.read_text(encoding="utf-8"))["$defs"]
+    assert set(defs["leaf"]["required"]) == {f.name for f in dataclasses.fields(eo.LeafOrgan)}
+    assert set(defs["tiller"]["required"]) == {f.name for f in dataclasses.fields(eo.TillerOrgan)}
+    assert set(defs["leaf"]["properties"]) == set(defs["leaf"]["required"])
+    assert set(defs["tiller"]["properties"]) == set(defs["tiller"]["required"])
+    assert eo.LEAF_VECTOR_KEYS == ("attach", "direction")
+    assert eo.TILLER_VECTOR_KEYS == ("base", "direction")

@@ -65,7 +65,7 @@
         "arch_rad": {"type": "number", "description": "Healthy baseline at the leaf age; senescence and decline are applied by consumers."},
         "senescence": {"$ref": "#/$defs/unitInterval", "description": "Turnover senescence: 0 green, 1 dead. Equals 1 if and only if state is dead."},
         "fade": {"$ref": "#/$defs/unitInterval", "description": "0 until the leaf dies, then rises to 1 (collapsed: zero sizes, attach at the tiller base). Positive only when dead, never decreases."},
-        "decline_draw": {"type": "number", "description": "Per-leaf random draw made at birth; input of the plant-decline rule in decline.py."}
+        "decline_draw": {"type": "number", "minimum": -1, "maximum": 1, "description": "Per-leaf unit draw in [-1, 1] made at birth; decline.py scales it by DECLINE_JITTER to shift the leaf's death point."}
       }
     },
     "tiller": {

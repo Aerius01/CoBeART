@@ -14,6 +14,7 @@ from openalea.lpy import Lsystem
 LPY_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(LPY_DIR))
 
+import decline  # noqa: E402
 import export_organs as eo  # noqa: E402
 
 GRASS = LPY_DIR / "grass.lpy"
@@ -166,5 +167,38 @@ def test_dead_leaves_reach_fade_one_within_fade_duration(tmp_path: Path) -> None
         for time, leaf in history:
             if first_dead is not None and time >= first_dead + fade_duration + dt / 2:
                 assert leaf["fade"] == 1, (leaf_id, time, leaf["fade"])
+                checked += 1
+    assert checked > 0
+
+
+def test_productions_freeze_after_t_end() -> None:
+    """With a decline preview the L-string at T_END is unchanged by deriving the preview steps."""
+    lsystem = Lsystem(str(GRASS), {"PREVIEW_DECLINE": 2.0})
+    names = lsystem.context().globals()
+    grown = round(names["T_END"] / names["DT"])
+    total = round((names["T_END"] + names["PREVIEW_DECLINE"]) / names["DT"])
+    assert total > grown
+    tree = lsystem.derive(lsystem.axiom, 0, grown)
+    at_t_end = str(tree)
+    assert str(lsystem.derive(tree, grown, total - grown)) == at_t_end
+
+
+DECLINE_VITALITIES = (0.0, 0.1, 0.5, 1.0)
+
+
+def test_export_params_build_the_model_decline_and_declined_leaf_runs(doc25: dict[str, Any]) -> None:
+    lsystem = Lsystem(str(GRASS))
+    assert decline.DeclineParams.from_mapping(doc25["params"]) == lsystem.context().globals()["DECLINE"]
+    params = decline.DeclineParams.from_mapping(doc25["params"])
+    checked = 0
+    for sample in doc25["samples"]:
+        tillers = {o["tiller"]: o for o in sample["organs"] if o["kind"] == "tiller"}
+        for leaf in (o for o in sample["organs"] if o["kind"] == "leaf"):
+            for v in DECLINE_VITALITIES:
+                drawn = decline.declined_leaf(leaf, tillers[leaf["tiller"]], v, params)
+                numbers = [*drawn.attach, *drawn.direction, *drawn.tiller_axis, drawn.sheath_length_m,
+                           drawn.blade_length_m, drawn.blade_width_m, drawn.arch_rad, drawn.browning]
+                assert all(math.isfinite(x) for x in numbers), (leaf["id"], sample["time"], v)
+                assert 0.0 <= drawn.opacity <= 1.0, (leaf["id"], sample["time"], v)
                 checked += 1
     assert checked > 0

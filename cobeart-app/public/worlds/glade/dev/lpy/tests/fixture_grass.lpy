@@ -2,7 +2,9 @@
 
 Leaf(id, tiller, rank, birth_time, age, state, o): a leaf born in the step starting at time b first appears
 with age DT and birth_time b. A dead leaf keeps its size while its fade rises to 1 over FADE_DURATION,
-then collapses (zero sizes, attach at the tiller base). PREVIEW_DECLINE is unused (parity with grass.lpy). The axiom leaf is born at time 0 with age 0. Apex needs the module declaration below to bind its parameters.
+then collapses (zero sizes, attach at the tiller base). PREVIEW_DECLINE is unused (parity with grass.lpy); the
+decline externs carry grass.lpy's defaults so the exporter accepts the model; decline_draw is a unit draw in [-1, 1].
+The axiom leaf is born at time 0 with age 0. Apex needs the module declaration below to bind its parameters.
 """
 import math
 import random
@@ -13,6 +15,16 @@ extern(T_END=12.0)
 extern(LIFE=4.0)
 extern(FADE_DURATION=1.0)
 extern(PREVIEW_DECLINE=0.0)
+extern(V_DEAD=0.15)
+extern(DECLINE_AGE_SPREAD=0.4)
+extern(DECLINE_AGE_REF=3.0)
+extern(DECLINE_JITTER=0.1)
+extern(DECLINE_RESIDUAL=0.5)
+extern(SHRIVEL_FRACTION=0.3)
+extern(ANGLE_SENESCENT_DEG=12.0)
+extern(SHRIVEL_ANGLE_DEG=25.0)
+extern(SHRIVEL_ARCH_RAD=0.8)
+extern(DECLINE_SPLAY_DEG=25.0)
 
 rng = random.Random(SEED)
 jitter = {}
@@ -21,7 +33,7 @@ draws = {}
 
 def decline_draw(leaf_id):
     if leaf_id not in draws:
-        draws[leaf_id] = rng.uniform(-0.1, 0.1)
+        draws[leaf_id] = rng.uniform(-1.0, 1.0)
     return draws[leaf_id]
 
 

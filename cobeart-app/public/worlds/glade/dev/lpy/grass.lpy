@@ -16,9 +16,10 @@ in the block below (or in the GUI's parameter panel, since they are externs).
 
 Decline preview (G17): the derivation runs to T_END + PREVIEW_DECLINE. After T_END the productions freeze (every
 module is reproduced unchanged) and the viewer draws the frozen plant at v = 1 - (t - T_END) / PREVIEW_DECLINE:
-leaves brown, droop and shrivel by their health, tillers lean outward, and everything fades once v < V_DEAD. Lower
-T_END to preview decline from a younger plant; set PREVIEW_DECLINE to 0 to turn the preview off. The exporter
-samples only up to T_END.
+leaves and sheaths brown, droop and shrivel by their health, tillers lean outward, and everything fades once
+v < V_DEAD. So Run with the defaults ends on an empty scene (fully faded at T_END + PREVIEW_DECLINE): use Animate
+to watch growth and decline, or set PREVIEW_DECLINE to 0 to Run to the grown plant. Lower T_END to preview decline
+from a younger plant. The exporter samples only up to T_END.
 
 Units: metres and radians, Z up. Time is in phyllochrons (P, the interval between two leaves on one shoot);
 one derivation step advances time by DT. A leaf of rank r on the main shoot is born at t = r - 1.
@@ -71,9 +72,10 @@ Parameters (all externs, overridable with Lsystem(path, {"NAME": value})):
   DECLINE_RESIDUAL         size of a dead leaf relative to its healthy size
   V_DEAD                   vitality at which every leaf is dead; below it the plant fades and cannot revive
   DECLINE_AGE_SPREAD, DECLINE_AGE_REF      older leaves die earlier in v, by up to the spread at age AGE_REF
-  DECLINE_JITTER           per-leaf uniform jitter on the death point (decline_draw), drawn at birth
+  DECLINE_JITTER           scale of a leaf's unit decline_draw (uniform in [-1, 1], drawn at birth) on its death point
   DECLINE_SPLAY_DEG        outward lean of every tiller but the main shoot, reached at V_DEAD
 """
+import importlib
 import math
 import os
 import random
@@ -86,6 +88,8 @@ _MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
 if _MODEL_DIR not in sys.path:
     sys.path.insert(0, _MODEL_DIR)
 import decline  # noqa: E402
+importlib.reload(decline)  # a GUI reload of the model picks up edits to decline.py
+from decline import cross, dir_from, rotate, to_tiller_frame, unit  # noqa: E402
 
 extern(
     SEED = 1,
@@ -142,6 +146,9 @@ extern(
 PHYLLOCHRON = 1.0  # time is measured in phyllochrons, so the interval between two leaves is 1 by definition
 UP = (0.0, 0.0, 1.0)
 EPS = 1e-9
+for _name in ("DT", "SENESCENCE_DURATION", "FADE_DURATION"):
+    if not globals()[_name] > 0:
+        raise ValueError("%s must be positive, got %r" % (_name, globals()[_name]))
 DECLINE = decline.DeclineParams.from_mapping(globals())
 
 
@@ -152,11 +159,6 @@ def smoothstep(x):
 
 def lerp(a, b, f):
     return a + (b - a) * f
-
-
-def dir_from(azimuth, from_vertical):
-    s = math.sin(from_vertical)
-    return [math.cos(azimuth) * s, math.sin(azimuth) * s, math.cos(from_vertical)]
 
 
 def rank_value(rank, at_rank1, at_plateau):
@@ -235,32 +237,6 @@ def leaf_id(tiller, rank):
     return "L%d.%d" % (tiller, rank)
 
 
-def unit(v):
-    n = math.sqrt(sum(c * c for c in v))
-    return [c / n for c in v] if n > EPS else [0.0, 0.0, 1.0]
-
-
-def cross(a, b):
-    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-
-
-def rotate(v, axis, angle):
-    """Rodrigues rotation of v about a unit axis."""
-    c, s = math.cos(angle), math.sin(angle)
-    k = cross(axis, v)
-    dot = sum(axis[i] * v[i] for i in range(3))
-    return [v[i] * c + k[i] * s + axis[i] * dot * (1 - c) for i in range(3)]
-
-
-def to_tiller_frame(v, tiller_axis):
-    """Apply the minimal rotation taking +Z onto the tiller axis (identity for a vertical axis)."""
-    k = cross(UP, tiller_axis)
-    s = math.sqrt(sum(c * c for c in k))
-    if s < EPS:
-        return list(v)
-    return rotate(v, [c / s for c in k], math.atan2(s, tiller_axis[2]))
-
-
 def new_leaf(tiller, rank):
     """Draw a new leaf's randomness and return its first Leaf parameters (age DT after this step)."""
     tiller_az = TILLER_O[tiller]["azimuth_rad"]
@@ -274,7 +250,7 @@ def new_leaf(tiller, rank):
         "blade_m": rank_value(rank, BLADE_RANK1_M, BLADE_PLATEAU_M) * scale * jitter(BLADE_JITTER),
         "width_m": rank_value(rank, WIDTH_RANK1_M, WIDTH_PLATEAU_M) * scale * jitter(WIDTH_JITTER),
         # Own stream per leaf, seeded from SEED and the id, so adding it left every draw of RNG unchanged.
-        "decline_draw": random.Random("decline:%d:%s" % (SEED, lid)).uniform(-DECLINE_JITTER, DECLINE_JITTER),
+        "decline_draw": random.Random("decline:%d:%s" % (SEED, lid)).uniform(-1.0, 1.0),
     }
     return lid, now(), DT, "growing", leaf_o(lid, tiller, DT, "growing", 0.0, 0.0)
 
@@ -321,11 +297,9 @@ def leaf_o(lid, tiller, age, state, sen, fade):
 
 def next_state(tiller, rank, age, state, sen, fade):
     """Leaf life cycle growing -> mature -> senescent (turnover) -> dead -> faded; returns state, senescence, fade."""
-    if state in ("growing", "mature"):
-        if NEWEST_RANK.get(tiller, rank) - rank >= LIVE_LEAVES:
-            return "senescent", DT / SENESCENCE_DURATION, 0.0
+    if state in ("growing", "mature") and NEWEST_RANK.get(tiller, rank) - rank < LIVE_LEAVES:
         return ("mature" if age >= MATURE_AGE - EPS else "growing"), 0.0, 0.0
-    if state == "senescent":
+    if state != "dead":  # turning senescent this step (sen is 0) or already senescent
         sen = min(sen + DT / SENESCENCE_DURATION, 1.0)
         return ("dead", 1.0, 0.0) if sen >= 1.0 - EPS else ("senescent", sen, 0.0)
     fade = min(fade + DT / FADE_DURATION, 1.0)
@@ -333,59 +307,35 @@ def next_state(tiller, rank, age, state, sen, fade):
 
 
 # Skeleton preview: world-space triangle meshes inserted with @g while the turtle stays unrotated at the origin.
-# Materials form a grid of opacity levels (N_OPACITY) by colours (N_COLOURS browning steps plus the sheath green),
-# so fades show as transparency.
+# Materials form a grid of opacity levels (N_OPACITY) by colour slots: N_COLOURS browning steps of the blade
+# (GREEN to BROWN), then N_COLOURS of the sheath (SHEATH_GREEN to BROWN), so the sheath browns with its leaf and
+# fades show as transparency.
 N_COLOURS, N_OPACITY = 12, 6
 GREEN, BROWN, SHEATH_GREEN = (40, 120, 20), (140, 100, 45), (90, 120, 40)
 COLOUR_BASE = 10
-SHEATH_COLOUR = N_COLOURS
+N_SLOTS = 2 * N_COLOURS
 for _o in range(N_OPACITY):
-    for _i in range(N_COLOURS + 1):
-        _rgb = SHEATH_GREEN if _i == SHEATH_COLOUR else tuple(
-            int(lerp(g, b, _i / (N_COLOURS - 1))) for g, b in zip(GREEN, BROWN))
-        context().turtle.setMaterial(COLOUR_BASE + _o * (N_COLOURS + 1) + _i,
-                                     Material(_rgb, transparency=1.0 - (_o + 1) / N_OPACITY))
+    for _i in range(N_SLOTS):
+        _green = GREEN if _i < N_COLOURS else SHEATH_GREEN
+        _f = (_i % N_COLOURS) / (N_COLOURS - 1)
+        context().turtle.setMaterial(COLOUR_BASE + _o * N_SLOTS + _i,
+                                     Material(tuple(int(lerp(g, b, _f)) for g, b in zip(_green, BROWN)),
+                                              transparency=1.0 - (_o + 1) / N_OPACITY))
 BLADE_SEGMENTS, TUBE_SIDES = 8, 6
 ROLLED_WIDTH = 0.25  # drawn width fraction of a fully rolled blade
 MIN_DRAWN_OPACITY = 0.5 / N_OPACITY  # below this a leaf is not drawn
 
 
-def material_index(colour, alpha):
-    """Material of a colour slot (a browning step or SHEATH_COLOUR) at the nearest non-zero opacity level."""
+def material_index(browning, alpha, sheath):
+    """Material of a blade or sheath at this browning, at the nearest non-zero opacity level."""
     level = min(max(int(math.ceil(alpha * N_OPACITY)) - 1, 0), N_OPACITY - 1)
-    return COLOUR_BASE + level * (N_COLOURS + 1) + colour
+    slot = int(round(browning * (N_COLOURS - 1))) + (N_COLOURS if sheath else 0)
+    return COLOUR_BASE + level * N_SLOTS + slot
 
 
-def tiller_axis(tiller, v):
-    """Tiller axis at vitality v: tillers other than the main shoot lean outward about their own azimuth (G14)."""
-    t = TILLER_O[tiller]
-    if tiller == 0:
-        return t["direction"]
-    return dir_from(t["azimuth_rad"], t["splay_rad"] + decline.tiller_lean_rad(v, DECLINE))
-
-
-def drawn_leaf(o, age, tiller, v):
-    """The leaf as drawn at vitality v: healthy fields deformed by its health (G11) on the leaning tiller axis.
-
-    Returns the drawn fields, the tiller axis, the browning colour slot and the opacity.
-    """
-    h = decline.health(o["senescence"], v, age, o["decline_draw"], DECLINE)
-    lk = decline.look(h, DECLINE)
-    axis = tiller_axis(tiller, v)
-    sheath = o["sheath_length_m"] * lk.size_scale
-    base = TILLER_O[tiller]["base"]
-    drawn = dict(o)
-    drawn.update({
-        "attach": [base[i] + axis[i] * sheath for i in range(3)],
-        "direction": unit(to_tiller_frame(dir_from(o["azimuth_rad"], o["angle_from_axis_rad"] + lk.extra_angle_rad),
-                                          axis)),
-        "sheath_length_m": sheath,
-        "blade_length_m": o["blade_length_m"] * lk.size_scale,
-        "blade_width_m": o["blade_width_m"] * lk.size_scale,
-        "arch_rad": o["arch_rad"] + lk.extra_arch_rad,
-    })
-    colour = int(round(lk.browning * (N_COLOURS - 1)))
-    return drawn, axis, colour, decline.opacity(o["fade"], v, DECLINE)
+def drawn_leaf(tiller, age, o, v):
+    """The leaf as drawn at vitality v (decline.declined_leaf on its track fields)."""
+    return decline.declined_leaf(dict(o, age=age, tiller=tiller), TILLER_O[tiller], v, DECLINE)
 
 
 def sheath_mesh(base, axis, length, radius):
@@ -404,19 +354,18 @@ def sheath_mesh(base, axis, length, radius):
     return TriangleSet(pts, idx)
 
 
-def blade_mesh(o, tiller_axis):
+def blade_mesh(dl, azimuth, unroll):
     """Flat tapered strip from the collar, bending away from the tiller axis by arch_rad, narrower while rolled."""
-    d = list(o["direction"])
-    az = o["azimuth_rad"]
-    side = to_tiller_frame([-math.sin(az), math.cos(az), 0.0], tiller_axis)  # normal of the axis-to-leaf plane
-    step = o["blade_length_m"] / BLADE_SEGMENTS
-    width = o["blade_width_m"] * lerp(ROLLED_WIDTH, 1.0, o["unroll"])
-    p, pts = list(o["attach"]), []
+    d = list(dl.direction)
+    side = to_tiller_frame([-math.sin(azimuth), math.cos(azimuth), 0.0], dl.tiller_axis)  # axis-to-leaf plane normal
+    step = dl.blade_length_m / BLADE_SEGMENTS
+    width = dl.blade_width_m * lerp(ROLLED_WIDTH, 1.0, unroll)
+    p, pts = list(dl.attach), []
     for i in range(BLADE_SEGMENTS + 1):
         s = i / BLADE_SEGMENTS
         half = 0.5 * width * min(1.0, 0.5 + 1.6 * s) * (1 - s) ** 0.6
         pts += [Vector3(*[p[k] - side[k] * half for k in range(3)]), Vector3(*[p[k] + side[k] * half for k in range(3)])]
-        bent = rotate(d, side, o["arch_rad"] * s * s)
+        bent = rotate(d, side, dl.arch_rad * s * s)
         p = [p[k] + bent[k] * step for k in range(3)]
     idx = []
     for i in range(BLADE_SEGMENTS):
@@ -464,11 +413,11 @@ interpretation:
 
 Tiller(tiller, parent_rank, birth_time, o) --> @M(0, 0, 0)
 Leaf(lid, tiller, rank, birth, age, state, o):
-    drawn, axis, colour, alpha = drawn_leaf(o, age, tiller, preview_vitality())
-    if alpha < MIN_DRAWN_OPACITY:
+    dl = drawn_leaf(tiller, age, o, preview_vitality())
+    if dl.opacity < MIN_DRAWN_OPACITY:
         produce @M(0, 0, 0)
-    radius = 0.25 * drawn["blade_width_m"] + 0.0004
-    produce @M(0, 0, 0) ,(material_index(SHEATH_COLOUR, alpha)) @g(sheath_mesh(TILLER_O[tiller]["base"], axis, drawn["sheath_length_m"], radius)) ,(material_index(colour, alpha)) @g(blade_mesh(drawn, axis))
+    radius = 0.25 * dl.blade_width_m + 0.0004
+    produce @M(0, 0, 0) ,(material_index(dl.browning, dl.opacity, True)) @g(sheath_mesh(TILLER_O[tiller]["base"], dl.tiller_axis, dl.sheath_length_m, radius)) ,(material_index(dl.browning, dl.opacity, False)) @g(blade_mesh(dl, o["azimuth_rad"], o["unroll"]))
 Apex(tiller, rank, t_next) --> @M(0, 0, 0)
 Bud(tiller, rank, age) --> @M(0, 0, 0)
 

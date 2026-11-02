@@ -14,11 +14,13 @@ sys.path.insert(0, str(LPY_DIR))
 import decline as dc  # noqa: E402
 
 P = dc.DeclineParams(
-    V_DEAD=0.15, DECLINE_AGE_SPREAD=0.4, DECLINE_AGE_REF=3.0, DECLINE_RESIDUAL=0.5, SHRIVEL_FRACTION=0.3,
+    V_DEAD=0.15, DECLINE_AGE_SPREAD=0.4, DECLINE_AGE_REF=3.0, DECLINE_JITTER=0.1, DECLINE_RESIDUAL=0.5,
+    SHRIVEL_FRACTION=0.3,
     ANGLE_SENESCENT_DEG=12.0, SHRIVEL_ANGLE_DEG=25.0, SHRIVEL_ARCH_RAD=0.8, DECLINE_SPLAY_DEG=25.0,
 )
 AGES = (0.0, 0.05, 0.5, 1.0, 2.0, 3.0, 5.0, 12.0)
-DRAWS = (-0.1, 0.0, 0.1)
+DRAWS = (-1.0, -0.3, 0.0, 0.5, 1.0)
+TOL = 1e-12
 VS = [i / 100 for i in range(101)]
 
 
@@ -120,11 +122,21 @@ def test_bad_age_and_draw_raise() -> None:
         dc.death_point(-1.0, 0.0, P)
     with pytest.raises(ValueError, match="decline_draw"):
         dc.death_point(1.0, math.nan, P)
+    with pytest.raises(ValueError, match="decline_draw must be in"):
+        dc.death_point(1.0, 1.5, P)
+
+
+def test_jitter_scales_the_unit_draw() -> None:
+    assert dc.death_point(1.0, 1.0, P) - dc.death_point(1.0, 0.0, P) == pytest.approx(
+        (1.0 - P.V_DEAD) * P.DECLINE_JITTER)
+    no_jitter = replace(P, DECLINE_JITTER=0.0)
+    assert dc.death_point(1.0, 1.0, no_jitter) == dc.death_point(1.0, -1.0, no_jitter)
 
 
 @pytest.mark.parametrize("field, value", [
     ("V_DEAD", 0.0), ("V_DEAD", 1.0), ("DECLINE_AGE_REF", 0.0), ("DECLINE_RESIDUAL", 1.5),
-    ("SHRIVEL_FRACTION", 0.0), ("SHRIVEL_ARCH_RAD", math.nan),
+    ("SHRIVEL_FRACTION", 0.0), ("SHRIVEL_ARCH_RAD", math.nan), ("DECLINE_AGE_SPREAD", -0.1),
+    ("DECLINE_JITTER", -0.1),
 ])
 def test_bad_params_raise(field: str, value: float) -> None:
     with pytest.raises(ValueError, match=field):
@@ -141,3 +153,85 @@ def test_from_mapping() -> None:
     names["V_DEAD"] = "0.15"
     with pytest.raises(ValueError, match="V_DEAD must be a number"):
         dc.DeclineParams.from_mapping(names)
+
+
+def tiller_fields(tiller: int) -> dict[str, object]:
+    if tiller == 0:
+        return {"base": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0], "azimuth_rad": 0.4, "splay_rad": 0.0}
+    az, splay = 1.0, math.radians(12.0)
+    return {"base": [0.004 * math.cos(az), 0.004 * math.sin(az), 0.0], "direction": list(dc.dir_from(az, splay)),
+            "azimuth_rad": az, "splay_rad": splay}
+
+
+def leaf_fields(tiller: int, senescence: float = 0.0, fade: float = 0.0) -> dict[str, object]:
+    """Healthy organ-table leaf fields built the way grass.lpy builds them, plus `age`."""
+    t = tiller_fields(tiller)
+    axis, base = t["direction"], t["base"]
+    assert isinstance(axis, list) and isinstance(base, list)
+    sheath, az, angle = 0.05, 2.0, 0.5
+    return {
+        "tiller": tiller, "age": 2.5, "attach": [base[i] + axis[i] * sheath for i in range(3)],
+        "direction": list(dc.unit(dc.to_tiller_frame(dc.dir_from(az, angle), axis))), "azimuth_rad": az,
+        "angle_from_axis_rad": angle, "sheath_length_m": sheath, "blade_length_m": 0.15, "blade_width_m": 0.01,
+        "unroll": 1.0, "arch_rad": 0.7, "senescence": senescence, "fade": fade, "decline_draw": 0.2,
+    }
+
+
+def close(a: object, b: object) -> bool:
+    assert isinstance(a, (list, tuple)) and isinstance(b, (list, tuple))
+    return all(abs(x - y) <= TOL for x, y in zip(a, b))
+
+
+@pytest.mark.parametrize("tiller", [0, 2])
+def test_declined_leaf_healthy_is_identity(tiller: int) -> None:
+    leaf = leaf_fields(tiller)
+    dl = dc.declined_leaf(leaf, tiller_fields(tiller), 1.0, P)
+    assert close(dl.attach, leaf["attach"]) and close(dl.direction, leaf["direction"])
+    assert close([dl.sheath_length_m, dl.blade_length_m, dl.blade_width_m, dl.arch_rad],
+                 [leaf["sheath_length_m"], leaf["blade_length_m"], leaf["blade_width_m"], leaf["arch_rad"]])
+    assert dl.opacity == 1.0 and dl.browning == 0.0
+
+
+def test_main_shoot_never_leans() -> None:
+    for v in VS:
+        assert dc.declined_leaf(leaf_fields(0), tiller_fields(0), v, P).tiller_axis == (0.0, 0.0, 1.0)
+
+
+def test_leaning_tiller_carries_its_leaf() -> None:
+    """The collar stays on the leaned axis, sheath * size_scale from the base; the axis splays outward."""
+    t = tiller_fields(2)
+    base, azimuth, splay = t["base"], t["azimuth_rad"], t["splay_rad"]
+    assert isinstance(base, list) and isinstance(azimuth, float) and isinstance(splay, float)
+    leaf = leaf_fields(2)
+    previous_tilt = -1.0
+    for v in VS[::-1]:
+        dl = dc.declined_leaf(leaf, t, v, P)
+        size_scale = dc.look(dc.health(0.0, v, 2.5, 0.2, P), P).size_scale
+        assert close([dl.attach[i] - base[i] for i in range(3)],
+                     [dl.tiller_axis[i] * 0.05 * size_scale for i in range(3)]), v
+        tilt = math.acos(dl.tiller_axis[2])
+        assert tilt >= previous_tilt - TOL
+        previous_tilt = tilt
+        assert math.atan2(dl.tiller_axis[1], dl.tiller_axis[0]) == pytest.approx(azimuth)
+    assert previous_tilt == pytest.approx(splay + math.radians(P.DECLINE_SPLAY_DEG))
+
+
+def test_declined_leaf_dead_and_faded() -> None:
+    dead = dc.declined_leaf(leaf_fields(1, senescence=1.0, fade=0.5), tiller_fields(1), 1.0, P)
+    assert dead.browning == 1.0 and dead.opacity == pytest.approx(0.5)
+    assert dead.blade_length_m == pytest.approx(0.15 * P.DECLINE_RESIDUAL)
+    gone = dc.declined_leaf(leaf_fields(1), tiller_fields(1), 0.0, P)
+    assert gone.opacity == 0.0 and gone.browning == 1.0
+
+
+def test_declined_leaf_bad_fields_raise() -> None:
+    leaf = leaf_fields(1)
+    del leaf["age"]
+    with pytest.raises(ValueError, match="'age' is missing"):
+        dc.declined_leaf(leaf, tiller_fields(1), 1.0, P)
+    with pytest.raises(ValueError, match="'tiller' must be an int"):
+        dc.declined_leaf(dict(leaf_fields(1), tiller=None), tiller_fields(1), 1.0, P)
+    with pytest.raises(ValueError, match="'base' must be 3 numbers"):
+        dc.declined_leaf(leaf_fields(1), dict(tiller_fields(1), base=[0.0, 0.0]), 1.0, P)
+    with pytest.raises(ValueError, match="'blade_width_m' must be a finite number"):
+        dc.declined_leaf(dict(leaf_fields(1), blade_width_m=math.nan), tiller_fields(1), 1.0, P)

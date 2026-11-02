@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GP`. Scope: the growth chain for Glade's first 3D plant, a bushy vegetative grass (no heading, no flowering), from an L-Py model to a growth slider on a dev page. Design input: the grill of 2026-11-01 (decisions P1 to P8 below) and the reference plant in `dev/assets/build_grass_plant.py`. The wind MVP (`dev/wind-demo.html`, `dev/wind/`) is a sibling prototype and not part of this roadmap; Phase 5 reuses its renderer.
 
-**Status (2026-11-02):** Phases 0 and 1 done and merged into `main`. **Next phase base:** the tip of `main` after the Phase 1 merge (the `[GP 1] Record the Phase 1 outcome` commit).
+**Status (2026-11-02):** Phases 0 and 1 done and merged into `main`; Phase 2 in progress on `gp-2-decline` from `86b8c17`.
 
 ## Project facts
 
@@ -118,21 +118,56 @@ The two WPs meet at the **module interface** and the **organ-table format** belo
   - `timeout 120 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/lpy/tests` passes, covering: schema validity, stable ids across samples, a dead leaf staying in later samples with zero size, and determinism for a fixed seed.
   - After merge, the orchestrator runs it on `grass.lpy` and the output validates.
 
-## Phase 2: Whole-plant decline (outline)
+## Phase 2: Whole-plant decline (2 parallel WPs)
 
-Base: the tip of `main` after the Phase 1 merge. Read the Phase 1 carry-over in Outcomes first. Adds P3 step three to `grass.lpy`: after a lifetime parameter the apexes stop making leaves, every leaf ages into senescence and dies, and the clump collapses (droop grows with senescence). Extends the exporter only if the format needs a new field. Judged in the L-Py viewer. Likely one WP. Open for its grill: what triggers decline (fixed lifetime, or an external growth value later driven by Glade's energy), how fast it runs relative to growth, and whether collapse is droop only or also leaf fall.
+Base: `86b8c17` (tip of `main` after the Phase 1 merge). Adds P3 step three. The grill turned decline from a section of the timeline into a second axis, so the exported growth track stays healthy and decline is an analytic function applied on top of it, at any growth stage.
+
+**Grill outcomes (2026-11-02):**
+- **G10 Decline is a per-organ second axis.** A plant has a growth value (the track time, later `g`) and a **vitality** `v` (1 healthy, 0 gone), independent of each other. Glade later drives both per instance: `v` falls while a plant is starved and rises again on revival; growth simply stops advancing while it declines (the "growth freezes at onset" choice is Glade's, the model does not bake it). Each organ's look is its healthy shape at its age, deformed by its own **health** `h` (1 healthy, 0 dead). This replaces baking decline tracks from several onsets.
+- **G11 One look for both causes of death.** `h = min(1 - senescence, h_decline(v))`, where `senescence` is the turnover senescence of the track (unchanged rule, G3). One function maps `h` to the look: colour (browning `1 - h`), extra angle from the tiller axis (`ANGLE_SENESCENT_DEG * (1 - h)` plus `SHRIVEL_ANGLE_DEG * shrivel`), extra arch (`SHRIVEL_ARCH_RAD * shrivel`) and size scale `lerp(1, DECLINE_RESIDUAL, shrivel)`, with `shrivel = smoothstep(1 - h / SHRIVEL_FRACTION)`. A dead organ is a dry blade at `DECLINE_RESIDUAL` (0.5) of its healthy size, not zero.
+- **G12 Plant-wide decline with variation.** Every organ starts declining as soon as `v < 1`. Organ k's death point is `v_k = V_DEAD + (1 - V_DEAD) * o_k` with `o_k = clamp(DECLINE_AGE_SPREAD * min(age / DECLINE_AGE_REF, 1) + decline_draw, 0, 0.95)` and `h_decline = clamp((v - v_k) / (1 - v_k), 0, 1)`. `decline_draw` is a per-leaf uniform draw in `±DECLINE_JITTER`, made at birth. Old leaves brown and fold first, the youngest centre leaf holds out until `V_DEAD`. Defaults: `V_DEAD` 0.15, `DECLINE_AGE_SPREAD` 0.4, `DECLINE_AGE_REF` 3 (about the age of the oldest live leaf), `DECLINE_JITTER` 0.1.
+- **G13 Fade and the point of no return.** A dead organ fades out once it is beyond saving. A turnover leaf is beyond saving when it dies: its `fade` rises 0 to 1 over `FADE_DURATION` (0.5 P) after death, in the track; at `fade` 1 it is collapsed (zero sizes, `attach` at its tiller base). In plant decline every organ is dead at `v = V_DEAD`; the plant fade is `clamp((V_DEAD - v) / V_DEAD, 0, 1)`, and Glade must refuse revival once `v <= V_DEAD`. Drawn opacity is `(1 - leaf fade) * (1 - plant fade)`.
+- **G14 Collapse is droop plus tiller lean.** Droop is G11. Each tiller other than the main shoot leans outward (its splay grows, about its own azimuth, pivoting at its base) by `DECLINE_SPLAY_DEG` (25) `* smoothstep((1 - v) / (1 - V_DEAD))`; its leaves follow rigidly. The main shoot stays upright. No leaf fall.
+- **G15 Track semantics change (schema v2).** In the exported track a leaf's sizes, `angle_from_axis_rad` and `arch_rad` are the **healthy baseline** at its age (no senescence or shrivel terms); `senescence` and two new fields, `fade` and `decline_draw`, carry the rest, and consumers apply G11 to G14. No tiller state and no `parent_tiller` (Phase 1 open items dropped: tillers do not die in the track).
+- **G16 Time span unchanged.** `T_END` 12 and `--samples` 25 stay; the track is growth only.
+- **G17 Preview.** New extern `PREVIEW_DECLINE` (4.0 P; 0 turns it off): the derivation runs to `T_END + PREVIEW_DECLINE`; after `T_END` the productions freeze (modules are reproduced unchanged), and the interpretation draws with `v = 1 - (t - T_END) / PREVIEW_DECLINE`. Lower `T_END` in the GUI to preview decline from a younger stage. The exporter already samples only up to `T_END`.
+- **G18 One Python home for the rule.** `dev/lpy/decline.py`, stdlib only, pure functions over a frozen `DeclineParams` dataclass whose field names are the extern names; `grass.lpy` imports it (verified: L-Py imports a module next to the `.lpy` regardless of the working directory), Phase 3's Blender script can too, and Phase 5's GLSL mirrors it. The decline externs live in `grass.lpy`'s parameter block and reach consumers through the export's `params`.
+
+**`decline.py` interface (settled):**
+- `DeclineParams` (frozen): `V_DEAD`, `DECLINE_AGE_SPREAD`, `DECLINE_AGE_REF`, `DECLINE_RESIDUAL`, `SHRIVEL_FRACTION`, `ANGLE_SENESCENT_DEG`, `SHRIVEL_ANGLE_DEG`, `SHRIVEL_ARCH_RAD`, `DECLINE_SPLAY_DEG`; `from_mapping(names)` builds it from a dict of externs (or export `params`), raising `ValueError` naming any missing name.
+- `death_point(age, decline_draw, p) -> float`, `decline_health(v, age, decline_draw, p) -> float`, `health(senescence, v, age, decline_draw, p) -> float`.
+- `Look` (frozen): `size_scale`, `extra_angle_rad`, `extra_arch_rad`, `browning`; `look(h, p) -> Look`.
+- `plant_fade(v, p) -> float`, `tiller_lean_rad(v, p) -> float`, `opacity(leaf_fade, v, p) -> float`.
+- Every function validates `v` and `h` in [0, 1] and raises `ValueError` naming the value.
+
+### WP 2.1: Decline rule and model
+
+- **Model:** Opus (fork; the decline semantics are the substance of the phase).
+- **Owns:** `dev/lpy/grass.lpy`, `dev/lpy/decline.py`, `dev/lpy/tests/test_decline.py`.
+- **Scope:** `decline.py` per the interface and G10 to G14. In `grass.lpy`: the new externs (`V_DEAD`, `DECLINE_AGE_SPREAD`, `DECLINE_AGE_REF`, `DECLINE_JITTER`, `DECLINE_RESIDUAL`, `DECLINE_SPLAY_DEG`, `FADE_DURATION`, `PREVIEW_DECLINE`), documented in the header; leaf `o` gains `fade` and `decline_draw` and drops the senescence terms from sizes, angle and arch (G15); a leaf is collapsed at `fade` 1; `decline_draw` drawn once at birth after the existing draws, so Phase 1 draws keep their values; the G17 preview (productions frozen after `T_END`, interpretation applying `decline.py` for health, look, tiller lean and opacity, with opacity shown through material transparency levels).
+- **Must pass:**
+  - `timeout 120 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/lpy/tests/test_decline.py`: at `v` 1 every organ has `h` 1 and the look is identity; `h` is monotonic in `v`; every organ is dead at `V_DEAD` and older leaves die at higher `v`; the plant fade is 0 above `V_DEAD` and 1 at 0; bad inputs raise.
+  - A script deriving `grass.lpy` to `T_END` still gives 5 tillers and at most 3 live leaves per tiller, and the same seed twice gives identical L-strings; deriving to `T_END + PREVIEW_DECLINE` leaves the L-string after `T_END` unchanged.
+  - The user steps the preview in the L-Py GUI and judges the decline (orchestrator hands over).
+
+### WP 2.2: Exporter and schema v2
+
+- **Model:** Sonnet (pinned down by G15 and the field list).
+- **Owns:** `dev/lpy/export_organs.py`, `dev/lpy/organ_table.schema.json`, `dev/lpy/tests/test_export_organs.py`, `dev/lpy/tests/fixture_grass.lpy`, `dev/lpy/tests/test_grass_model.py`.
+- **Scope:** `schema_version` 2; leaf fields gain `fade` (unit interval) and `decline_draw` (number) in the key lists, `LeafOrgan` and the schema; the leaf descriptions say sizes, angle and arch are the healthy baseline. The dead-leaf check becomes: senescence 1 if and only if `dead`; `fade > 0` only when `dead`; `fade` never decreases; at `fade` 1 the sizes are zero and `attach` equals the tiller base; once collapsed it stays collapsed. The fixture follows the new fields. `test_grass_model.py` checks the real model against the new invariants.
+- **Must pass:** `timeout 120 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/lpy/tests/test_export_organs.py` passes; after merge with WP 2.1 the whole `tests/` folder passes and the default export of `grass.lpy` validates.
 
 ## Phase 3: Geometry from the organ table (outline)
 
-Refactors `build_grass_plant.py` into a generator that reads an organ table and builds the plant mesh at one sample: pseudostem sheaths, curled blades from the reference profiles driven by each organ's length, width, unroll, arch and senescence, and the wind attributes per vertex (pivots at sheath tops). Runs in Blender; viewed at a few stages there. Open for its grill: how the reference's rolled top leaf maps onto the unroll fraction, how a young leaf hidden inside its parent sheath is drawn, vertex count across blades (2 to 3 may suffice from above), and per-vertex colour or a texture coordinate for senescence.
+Refactors `build_grass_plant.py` into a generator that reads an organ table and builds the plant mesh at one sample: pseudostem sheaths, curled blades from the reference profiles driven by each organ's healthy length, width, unroll and arch, and the wind attributes per vertex (pivots at sheath tops). Decline (G10 to G14) is applied on top through `decline.py`, so the generator also writes what the shader needs for it per vertex: senescence, fade, decline draw, birth time, and the tiller base and axis for the lean. Runs in Blender; viewed at a few stages there. Open for its grill: how the reference's rolled top leaf maps onto the unroll fraction, how a young leaf hidden inside its parent sheath is drawn, vertex count across blades (2 to 3 may suffice from above), and per-vertex colour or a texture coordinate for senescence.
 
 ## Phase 4: Fixed-topology VAT export (outline)
 
-Builds the full-lifetime mesh (P6): one index buffer over every organ the plant ever has, per-stage positions plus wind pivots and axes for N stages, unborn and dead organs collapsed to their attachment point. Exports a GLB (or GLB plus a binary VAT) and a loader in `dev/` with tests that check the topology is identical across stages. Open for its grill: N and stage spacing (denser where shape changes fast, such as unrolling), texture layout and precision (float16 or float32), and the number of plant variants (seeds) and the memory budget.
+Builds the full-lifetime mesh (P6): one index buffer over every organ the plant ever has, per-stage healthy positions plus wind pivots and axes and the per-stage leaf senescence and fade for N stages (decline is not baked, G10), unborn and dead organs collapsed to their attachment point. Exports a GLB (or GLB plus a binary VAT) and a loader in `dev/` with tests that check the topology is identical across stages. Open for its grill: N and stage spacing (denser where shape changes fast, such as unrolling), texture layout and precision (float16 or float32), and the number of plant variants (seeds) and the memory budget.
 
 ## Phase 5: Growth slider on a dev page (outline)
 
-A dev page, next to `wind-demo.html`, that draws instanced grass from the VAT with a per-instance growth value `g` and blends the two stages around it, under the top-down camera, with the wind from `dev/wind/` applied on top. Sliders for `g` (global and randomised per instance). Measure frame rate against instance count, and decide on the P6 alternative from that. Open for its grill: whether the wind renderer is extended or a new renderer is written, culling of zero-size triangles, and level of detail.
+A dev page, next to `wind-demo.html`, that draws instanced grass from the VAT with a per-instance growth value `g` and vitality `v`, blends the two stages around `g` and applies the `decline.py` look in GLSL, under the top-down camera, with the wind from `dev/wind/` applied on top. Sliders for `g` and `v` (global and randomised per instance). Measure frame rate against instance count, and decide on the P6 alternative from that. Open for its grill: whether the wind renderer is extended or a new renderer is written, culling of zero-size triangles, and level of detail.
 
 ## Deferred (not in this roadmap)
 

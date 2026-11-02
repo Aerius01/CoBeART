@@ -1,0 +1,374 @@
+"""Glade grass: a bushy vegetative grass clump (GP roadmap, Phase 1).
+
+Structure and timing only (P5): which leaves and tillers exist, where they attach, and their age, size, angles
+and state. Each Leaf and Tiller module carries `o`, a dict with exactly the organ-table fields of the roadmap's
+format (G2), recomputed every step; the exporter (export_organs.py) copies them. The viewer draws a skeleton.
+
+Open in the L-Py GUI:  ~/miniconda3/envs/lpy/bin/lpy cobeart-app/public/worlds/glade/dev/lpy/grass.lpy
+then Run (whole derivation) or Animate (step by step); Rewind restarts from the seed. Parameters can be edited
+in the block below (or in the GUI's parameter panel, since they are externs).
+
+Units: metres and radians, Z up. Time is in phyllochrons (P, the interval between two leaves on one shoot);
+one derivation step advances time by DT. A leaf of rank r on the main shoot is born at t = r - 1.
+
+A leaf's azimuth_rad and angle_from_axis_rad are spherical angles in its tiller's frame: the pole is the tiller
+direction and the frame is the minimal rotation taking +Z onto it (identity for the main shoot). direction is that
+rotation applied to those angles, in world space, and is the authoritative field.
+
+Use one Lsystem instance, derived forward only; birth draws live in module globals reset by Start(). Everything
+that changes after birth (age, state, senescence) is carried in the modules.
+
+Parameters (all externs, overridable with Lsystem(path, {"NAME": value})):
+  SEED                     seed of the single random stream; every organ draws once, at its birth
+  DT                       time step in P
+  T_END                    end time in P; derivation length is T_END / DT
+  LIVE_LEAVES              live (growing or mature) leaves per tiller before the oldest senesces (P7)
+  MAX_TILLERS              first-order tillers, from the axils of main-shoot leaves 1..MAX_TILLERS (P1, P7)
+  TILLER_DELAY             the bud in main-shoot leaf n's axil emerges when leaf n + TILLER_DELAY appears
+  TILLER_SIZE_SCALE        size factor on every tiller leaf relative to the main shoot's progression
+  CROWN_RADIUS_M           distance of a tiller's base from the crown centre
+  TILLER_SPLAY_DEG         outward tilt of a tiller's axis from vertical, with TILLER_SPLAY_JITTER_DEG
+  TILLER_AZIMUTH_SPREAD_DEG  a tiller's azimuth is its parent leaf's azimuth turned by this angle (plus
+                           uniform TILLER_AZIMUTH_SPREAD_JITTER_DEG), so the clump becomes radial instead of a
+                           vertical fan (same-side tiller bases crowd and push apart, Tokuyama et al. 2021). The
+                           turn direction alternates between successive tillers on the same side of the main shoot:
+                           side occurrence (parent_rank - 1) // 2 even turns +, odd turns -, so with 4 tillers
+                           tillers 1 and 3 turn opposite ways, likewise 2 and 4. The tiller's base, splay and leaf
+                           plane (first leaf faces the tiller azimuth, alternating from there) follow this azimuth.
+  BASE_AZIMUTH_RAD         azimuth of the main shoot's first leaf
+  AZIMUTH_JITTER_RAD       per-leaf jitter on the alternating (distichous) azimuth
+  RANK_PLATEAU             rank at which the size progressions stop growing
+  SHEATH_RANK1_M, SHEATH_PLATEAU_M, SHEATH_JITTER        sheath length at rank 1, at the plateau, relative jitter
+  BLADE_RANK1_M, BLADE_PLATEAU_M, BLADE_JITTER           blade length likewise
+  WIDTH_RANK1_M, WIDTH_PLATEAU_M, WIDTH_JITTER           blade width likewise
+  ELONGATION_AGE           age (P) at which sheath, blade and width reach full size (smoothstep from 0)
+  MATURE_AGE               age at which the collar appears and the leaf turns mature
+  UNROLL_START_AGE, UNROLL_DURATION   unroll fraction is smoothstep((age - start) / duration)
+  ANGLE_YOUNG_DEG, ANGLE_MATURE_DEG, ANGLE_OLD_DEG       angle from the tiller axis: young and rolled, at
+                                                         maturity, and eased toward after maturity
+  ANGLE_SPREAD_DURATION    time after maturity over which the angle eases to ANGLE_OLD_DEG
+  ANGLE_JITTER_DEG         per-leaf jitter on the angle from the tiller axis
+  ANGLE_SENESCENT_DEG      extra angle reached at full senescence
+  ARCH_YOUNG_RAD, ARCH_OLD_RAD, ARCH_AGE   arch (bend) rises from young to old over ARCH_AGE
+  SENESCENCE_DURATION      time from turning senescent to dead
+  SHRIVEL_FRACTION         final fraction of senescence over which the leaf shrivels to zero size and droops
+  SHRIVEL_ANGLE_DEG, SHRIVEL_ARCH_RAD      extra angle and arch reached at the end of the shrivel
+"""
+import math
+import random
+
+from openalea.plantgl.all import Index3, TriangleSet, Vector3
+
+extern(
+    SEED = 1,
+    DT = 0.05,
+    T_END = 12.0,
+    LIVE_LEAVES = 3,
+    MAX_TILLERS = 4,
+    TILLER_DELAY = 3,
+    TILLER_SIZE_SCALE = 0.9,
+    CROWN_RADIUS_M = 0.004,
+    TILLER_SPLAY_DEG = 12.0,
+    TILLER_SPLAY_JITTER_DEG = 4.0,
+    TILLER_AZIMUTH_SPREAD_DEG = 50.0,
+    TILLER_AZIMUTH_SPREAD_JITTER_DEG = 15.0,
+    BASE_AZIMUTH_RAD = 0.4,
+    AZIMUTH_JITTER_RAD = 0.45,
+    RANK_PLATEAU = 5,
+    SHEATH_RANK1_M = 0.02,
+    SHEATH_PLATEAU_M = 0.08,
+    SHEATH_JITTER = 0.15,
+    BLADE_RANK1_M = 0.06,
+    BLADE_PLATEAU_M = 0.20,
+    BLADE_JITTER = 0.10,
+    WIDTH_RANK1_M = 0.004,
+    WIDTH_PLATEAU_M = 0.013,
+    WIDTH_JITTER = 0.08,
+    ELONGATION_AGE = 2.0,
+    MATURE_AGE = 2.0,
+    UNROLL_START_AGE = 0.6,
+    UNROLL_DURATION = 1.2,
+    ANGLE_YOUNG_DEG = 8.0,
+    ANGLE_MATURE_DEG = 20.0,
+    ANGLE_OLD_DEG = 48.0,
+    ANGLE_SPREAD_DURATION = 1.0,
+    ANGLE_JITTER_DEG = 5.0,
+    ANGLE_SENESCENT_DEG = 12.0,
+    ARCH_YOUNG_RAD = 0.4,
+    ARCH_OLD_RAD = 0.9,
+    ARCH_AGE = 3.0,
+    SENESCENCE_DURATION = 2.0,
+    SHRIVEL_FRACTION = 0.3,
+    SHRIVEL_ANGLE_DEG = 25.0,
+    SHRIVEL_ARCH_RAD = 0.8,
+)
+
+PHYLLOCHRON = 1.0  # time is measured in phyllochrons, so the interval between two leaves is 1 by definition
+UP = (0.0, 0.0, 1.0)
+EPS = 1e-9
+
+
+def smoothstep(x):
+    x = min(max(x, 0.0), 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
+def lerp(a, b, f):
+    return a + (b - a) * f
+
+
+def dir_from(azimuth, from_vertical):
+    s = math.sin(from_vertical)
+    return [math.cos(azimuth) * s, math.sin(azimuth) * s, math.cos(from_vertical)]
+
+
+def rank_value(rank, at_rank1, at_plateau):
+    """Linear from rank 1 to RANK_PLATEAU, flat after."""
+    return lerp(at_rank1, at_plateau, min(max((rank - 1) / (RANK_PLATEAU - 1), 0.0), 1.0))
+
+
+def jitter(rel):
+    return 1.0 + RNG.uniform(-rel, rel)
+
+
+# Birth state outside the L-string, fixed once drawn. Reset in Start() so a GUI rewind replays the same plant.
+RNG = random.Random(SEED)
+TILLER_O = {}     # tiller id -> its organ fields (fixed at birth)
+LEAF_DRAWS = {}   # leaf id -> random draws made at birth
+NEWEST_RANK = {}  # tiller id -> rank of its newest leaf once this step's emissions are done (see EndEach)
+
+
+def reset():
+    global RNG
+    RNG = random.Random(SEED)
+    TILLER_O.clear()
+    LEAF_DRAWS.clear()
+    NEWEST_RANK.clear()
+    TILLER_O[0] = {"base": [0.0, 0.0, 0.0], "direction": list(UP), "azimuth_rad": BASE_AZIMUTH_RAD,
+                   "splay_rad": 0.0}
+
+
+reset()  # the axiom reads TILLER_O[0] before Start runs
+
+
+def Start():
+    reset()
+
+
+def emits(t_next):
+    """Whether an Apex with this countdown emits a leaf in the current step."""
+    return t_next < DT / 2
+
+
+def EndEach(lstring):
+    """Record, per tiller, the newest leaf rank after the next step's emissions.
+
+    Leaves and buds read it in the next step, so a leaf turns senescent in the same step as the leaf that would
+    make its tiller exceed LIVE_LEAVES, and a bud activates in the same step as its triggering leaf.
+    """
+    NEWEST_RANK.clear()
+    for m in lstring:
+        if m.name == "Apex":
+            tiller, rank, t_next = m[0], m[1], m[2]
+            NEWEST_RANK[tiller] = rank if emits(t_next) else rank - 1
+
+
+def now():
+    """Time of the state the current production step reads."""
+    return getIterationNb() * DT
+
+
+def leaf_id(tiller, rank):
+    return "L%d.%d" % (tiller, rank)
+
+
+def unit(v):
+    n = math.sqrt(sum(c * c for c in v))
+    return [c / n for c in v] if n > EPS else [0.0, 0.0, 1.0]
+
+
+def cross(a, b):
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+
+
+def rotate(v, axis, angle):
+    """Rodrigues rotation of v about a unit axis."""
+    c, s = math.cos(angle), math.sin(angle)
+    k = cross(axis, v)
+    dot = sum(axis[i] * v[i] for i in range(3))
+    return [v[i] * c + k[i] * s + axis[i] * dot * (1 - c) for i in range(3)]
+
+
+def to_tiller_frame(v, tiller_axis):
+    """Apply the minimal rotation taking +Z onto the tiller axis (identity for a vertical axis)."""
+    k = cross(UP, tiller_axis)
+    s = math.sqrt(sum(c * c for c in k))
+    if s < EPS:
+        return list(v)
+    return rotate(v, [c / s for c in k], math.atan2(s, tiller_axis[2]))
+
+
+def new_leaf(tiller, rank):
+    """Draw a new leaf's randomness and return its first Leaf parameters (age DT after this step)."""
+    tiller_az = TILLER_O[tiller]["azimuth_rad"]
+    scale = TILLER_SIZE_SCALE if tiller > 0 else 1.0
+    lid = leaf_id(tiller, rank)
+    LEAF_DRAWS[lid] = {
+        "azimuth_rad": math.remainder(tiller_az + (rank - 1) * math.pi
+                                      + RNG.uniform(-AZIMUTH_JITTER_RAD, AZIMUTH_JITTER_RAD), 2 * math.pi),
+        "angle_jitter_rad": math.radians(RNG.uniform(-ANGLE_JITTER_DEG, ANGLE_JITTER_DEG)),
+        "sheath_m": rank_value(rank, SHEATH_RANK1_M, SHEATH_PLATEAU_M) * scale * jitter(SHEATH_JITTER),
+        "blade_m": rank_value(rank, BLADE_RANK1_M, BLADE_PLATEAU_M) * scale * jitter(BLADE_JITTER),
+        "width_m": rank_value(rank, WIDTH_RANK1_M, WIDTH_PLATEAU_M) * scale * jitter(WIDTH_JITTER),
+    }
+    return lid, now(), DT, "growing", leaf_o(lid, tiller, DT, "growing", 0.0)
+
+
+def new_tiller(tiller, parent_rank):
+    """A first-order tiller on the crown, turned off its parent leaf's azimuth, splayed outward."""
+    sign = 1.0 if ((parent_rank - 1) // 2) % 2 == 0 else -1.0  # alternate between same-side tillers
+    spread = math.radians(TILLER_AZIMUTH_SPREAD_DEG + RNG.uniform(-TILLER_AZIMUTH_SPREAD_JITTER_DEG,
+                                                                  TILLER_AZIMUTH_SPREAD_JITTER_DEG))
+    az = math.remainder(LEAF_DRAWS[leaf_id(0, parent_rank)]["azimuth_rad"] + sign * spread, 2 * math.pi)
+    splay = math.radians(TILLER_SPLAY_DEG + RNG.uniform(-TILLER_SPLAY_JITTER_DEG, TILLER_SPLAY_JITTER_DEG))
+    o = {"base": [CROWN_RADIUS_M * math.cos(az), CROWN_RADIUS_M * math.sin(az), 0.0],
+         "direction": dir_from(az, splay), "azimuth_rad": az, "splay_rad": splay}
+    TILLER_O[tiller] = o
+    return o
+
+
+def leaf_o(lid, tiller, age, state, sen):
+    """Organ-table leaf fields at this age, state and senescence (pure given the leaf's birth draws)."""
+    d = LEAF_DRAWS[lid]
+    t = TILLER_O[tiller]
+    shrivel = smoothstep((sen - (1.0 - SHRIVEL_FRACTION)) / SHRIVEL_FRACTION)
+    size = 0.0 if state == "dead" else smoothstep(age / ELONGATION_AGE) * (1.0 - shrivel)
+    angle_deg = (ANGLE_YOUNG_DEG
+                 + (ANGLE_MATURE_DEG - ANGLE_YOUNG_DEG) * smoothstep(age / MATURE_AGE)
+                 + (ANGLE_OLD_DEG - ANGLE_MATURE_DEG) * smoothstep((age - MATURE_AGE) / ANGLE_SPREAD_DURATION)
+                 + ANGLE_SENESCENT_DEG * sen + SHRIVEL_ANGLE_DEG * shrivel)
+    angle = max(math.radians(angle_deg) + d["angle_jitter_rad"], 0.0)
+    sheath = d["sheath_m"] * size
+    base, axis = t["base"], t["direction"]
+    return {
+        "attach": [base[i] + axis[i] * sheath for i in range(3)],
+        "direction": unit(to_tiller_frame(dir_from(d["azimuth_rad"], angle), axis)),
+        "azimuth_rad": d["azimuth_rad"],
+        "angle_from_axis_rad": angle,
+        "sheath_length_m": sheath,
+        "blade_length_m": d["blade_m"] * size,
+        "blade_width_m": d["width_m"] * size,
+        "unroll": smoothstep((age - UNROLL_START_AGE) / UNROLL_DURATION),
+        "arch_rad": lerp(ARCH_YOUNG_RAD, ARCH_OLD_RAD, smoothstep(age / ARCH_AGE)) + SHRIVEL_ARCH_RAD * shrivel,
+        "senescence": sen,
+    }
+
+
+def next_state(tiller, rank, age, state, sen):
+    """Leaf life cycle growing -> mature -> senescent (turnover) -> dead; returns the new state and senescence."""
+    rate = DT / SENESCENCE_DURATION
+    if state in ("growing", "mature"):
+        if NEWEST_RANK.get(tiller, rank) - rank >= LIVE_LEAVES:
+            return "senescent", rate
+        return ("mature" if age >= MATURE_AGE - EPS else "growing"), 0.0
+    if state == "senescent":
+        sen = min(sen + rate, 1.0)
+        return ("dead" if sen >= 1.0 - EPS else "senescent"), sen
+    return state, 1.0
+
+
+# Skeleton preview: world-space triangle meshes inserted with @g while the turtle stays unrotated at the origin.
+N_COLOURS = 12
+GREEN, BROWN, SHEATH_GREEN = (40, 120, 20), (140, 100, 45), (90, 120, 40)
+COLOUR_BASE = 10
+for _i in range(N_COLOURS):
+    _f = _i / (N_COLOURS - 1)
+    context().turtle.setMaterial(COLOUR_BASE + _i, Material(tuple(int(lerp(g, b, _f)) for g, b in zip(GREEN, BROWN))))
+context().turtle.setMaterial(COLOUR_BASE + N_COLOURS, Material(SHEATH_GREEN))
+BLADE_SEGMENTS, TUBE_SIDES = 8, 6
+ROLLED_WIDTH = 0.25  # drawn width fraction of a fully rolled blade
+
+
+def colour_index(senescence):
+    return COLOUR_BASE + int(round(senescence * (N_COLOURS - 1)))
+
+
+def sheath_mesh(base, axis, length, radius):
+    side = unit(cross(axis, [1.0, 0.0, 0.0] if abs(axis[0]) < 0.9 else [0.0, 1.0, 0.0]))
+    other = cross(axis, side)
+    pts = []
+    for z in (0.0, length):
+        for j in range(TUBE_SIDES):
+            a = 2 * math.pi * j / TUBE_SIDES
+            pts.append(Vector3(*[base[i] + axis[i] * z + radius * (math.cos(a) * side[i] + math.sin(a) * other[i])
+                                 for i in range(3)]))
+    idx = []
+    for j in range(TUBE_SIDES):
+        k = (j + 1) % TUBE_SIDES
+        idx += [Index3(j, k, TUBE_SIDES + k), Index3(j, TUBE_SIDES + k, TUBE_SIDES + j)]
+    return TriangleSet(pts, idx)
+
+
+def blade_mesh(o, tiller_axis):
+    """Flat tapered strip from the collar, bending away from the tiller axis by arch_rad, narrower while rolled."""
+    d = list(o["direction"])
+    az = o["azimuth_rad"]
+    side = to_tiller_frame([-math.sin(az), math.cos(az), 0.0], tiller_axis)  # normal of the axis-to-leaf plane
+    step = o["blade_length_m"] / BLADE_SEGMENTS
+    width = o["blade_width_m"] * lerp(ROLLED_WIDTH, 1.0, o["unroll"])
+    p, pts = list(o["attach"]), []
+    for i in range(BLADE_SEGMENTS + 1):
+        s = i / BLADE_SEGMENTS
+        half = 0.5 * width * min(1.0, 0.5 + 1.6 * s) * (1 - s) ** 0.6
+        pts += [Vector3(*[p[k] - side[k] * half for k in range(3)]), Vector3(*[p[k] + side[k] * half for k in range(3)])]
+        bent = rotate(d, side, o["arch_rad"] * s * s)
+        p = [p[k] + bent[k] * step for k in range(3)]
+    idx = []
+    for i in range(BLADE_SEGMENTS):
+        a = 2 * i
+        idx += [Index3(a, a + 1, a + 3), Index3(a, a + 3, a + 2)]
+    return TriangleSet(pts, idx)
+
+
+module Apex(tiller, rank, t_next), Leaf(id, tiller, rank, birth_time, age, state, o)
+module Tiller(tiller, parent_rank, birth_time, o), Bud(tiller, rank, age)
+
+Axiom: Tiller(0, 0, 0.0, TILLER_O[0]) Apex(0, 1, 0.0)
+
+derivation length: int(round(T_END / DT))
+
+production:
+
+Apex(tiller, rank, t_next):
+    if emits(t_next):
+        lid, birth, age, state, o = new_leaf(tiller, rank)
+        if tiller == 0 and rank <= MAX_TILLERS:
+            produce Leaf(lid, tiller, rank, birth, age, state, o) Bud(tiller, rank, 0.0) Apex(tiller, rank + 1, t_next + PHYLLOCHRON - DT)
+        produce Leaf(lid, tiller, rank, birth, age, state, o) Apex(tiller, rank + 1, t_next + PHYLLOCHRON - DT)
+    produce Apex(tiller, rank, t_next - DT)
+
+Bud(tiller, rank, age):
+    if NEWEST_RANK.get(0, 0) >= rank + TILLER_DELAY:
+        o = new_tiller(rank, rank)
+        lid, birth, leaf_age, state, leaf = new_leaf(rank, 1)
+        produce Tiller(rank, rank, now(), o) Leaf(lid, rank, 1, birth, leaf_age, state, leaf) Apex(rank, 2, PHYLLOCHRON - DT)
+    produce Bud(tiller, rank, age + DT)
+
+Leaf(lid, tiller, rank, birth, age, state, o):
+    new_age = age + DT
+    new_state, sen = next_state(tiller, rank, new_age, state, o["senescence"])
+    produce Leaf(lid, tiller, rank, birth, new_age, new_state, leaf_o(lid, tiller, new_age, new_state, sen))
+
+interpretation:
+
+Tiller(tiller, parent_rank, birth_time, o) --> @M(0, 0, 0)
+Leaf(lid, tiller, rank, birth, age, state, o):
+    if state == "dead":
+        produce @M(0, 0, 0)
+    axis = TILLER_O[tiller]["direction"]
+    radius = 0.25 * o["blade_width_m"] + 0.0004
+    produce @M(0, 0, 0) ,(COLOUR_BASE + N_COLOURS) @g(sheath_mesh(TILLER_O[tiller]["base"], axis, o["sheath_length_m"], radius)) ,(colour_index(o["senescence"])) @g(blade_mesh(o, axis))
+Apex(tiller, rank, t_next) --> @M(0, 0, 0)
+Bud(tiller, rank, age) --> @M(0, 0, 0)
+
+endlsystem

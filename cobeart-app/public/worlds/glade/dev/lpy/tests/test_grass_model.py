@@ -112,3 +112,59 @@ def test_tiller_leaf_planes_differ_from_main_shoot(doc25: dict[str, Any]) -> Non
         folded = math.degrees(tiller["azimuth_rad"] - main_azimuth) % 180.0
         angle = min(folded, 180.0 - folded)
         assert angle >= MIN_TILLER_PLANE_ANGLE_DEG, (tiller_id, angle)
+
+
+def leaf_histories(doc: dict[str, Any]) -> dict[str, list[tuple[float, dict[str, Any]]]]:
+    histories: dict[str, list[tuple[float, dict[str, Any]]]] = {}
+    for sample in doc["samples"]:
+        for organ in sample["organs"]:
+            if organ["kind"] == "leaf":
+                histories.setdefault(organ["id"], []).append((sample["time"], organ))
+    return histories
+
+
+def test_schema_version_and_new_leaf_fields(doc25: dict[str, Any]) -> None:
+    assert doc25["schema_version"] == 2
+    leaves = [o for o in doc25["samples"][-1]["organs"] if o["kind"] == "leaf"]
+    assert leaves and all("fade" in o and "decline_draw" in o for o in leaves)
+    assert len({o["decline_draw"] for o in leaves}) > 1
+
+
+def test_senescence_one_iff_dead_and_fade_only_when_dead(doc25: dict[str, Any]) -> None:
+    for history in leaf_histories(doc25).values():
+        for time, leaf in history:
+            assert (leaf["senescence"] == 1) == (leaf["state"] == "dead"), (leaf["id"], time)
+            assert leaf["fade"] == 0 or leaf["state"] == "dead", (leaf["id"], time)
+
+
+def test_fade_never_decreases_and_fade_one_is_collapsed(doc25: dict[str, Any]) -> None:
+    tillers = {t["id"]: t for t in doc25["samples"][-1]["organs"] if t["kind"] == "tiller"}
+    collapsed_seen = 0
+    for leaf_id, history in leaf_histories(doc25).items():
+        fades = [leaf["fade"] for _, leaf in history]
+        assert fades == sorted(fades), leaf_id
+        collapsed = False
+        for time, leaf in history:
+            collapsed = collapsed or leaf["fade"] == 1
+            if collapsed:
+                assert leaf["fade"] == 1 and leaf["state"] == "dead", (leaf_id, time)
+                assert leaf["sheath_length_m"] == leaf["blade_length_m"] == leaf["blade_width_m"] == 0, (leaf_id, time)
+                assert leaf["attach"] == tillers[f"T{leaf['tiller']}"]["base"], (leaf_id, time)
+                collapsed_seen += 1
+    assert collapsed_seen > 0
+
+
+def test_dead_leaves_reach_fade_one_within_fade_duration(tmp_path: Path) -> None:
+    """With a sample at every step, a leaf dead for FADE_DURATION (plus half a step) is collapsed."""
+    lsystem = Lsystem(str(GRASS))
+    reference = lsystem.context().globals()
+    dt, fade_duration = reference["DT"], reference["FADE_DURATION"]
+    every_step = export(tmp_path, "all_steps.json", samples=round(reference["T_END"] / dt) + 1)
+    checked = 0
+    for leaf_id, history in leaf_histories(every_step).items():
+        first_dead = next((time for time, leaf in history if leaf["state"] == "dead"), None)
+        for time, leaf in history:
+            if first_dead is not None and time >= first_dead + fade_duration + dt / 2:
+                assert leaf["fade"] == 1, (leaf_id, time, leaf["fade"])
+                checked += 1
+    assert checked > 0

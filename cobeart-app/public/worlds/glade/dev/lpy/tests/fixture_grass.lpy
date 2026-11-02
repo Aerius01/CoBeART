@@ -1,7 +1,8 @@
 """Tiny deterministic model following the grass module interface, for exporter tests.
 
 Leaf(id, tiller, rank, birth_time, age, state, o): a leaf born in the step starting at time b first appears
-with age DT and birth_time b. The axiom leaf is born at time 0 with age 0. Apex needs the module declaration below to bind its parameters.
+with age DT and birth_time b. A dead leaf keeps its size while its fade rises to 1 over FADE_DURATION,
+then collapses (zero sizes, attach at the tiller base). PREVIEW_DECLINE is unused (parity with grass.lpy). The axiom leaf is born at time 0 with age 0. Apex needs the module declaration below to bind its parameters.
 """
 import math
 import random
@@ -10,9 +11,18 @@ extern(SEED=1)
 extern(DT=0.5)
 extern(T_END=12.0)
 extern(LIFE=4.0)
+extern(FADE_DURATION=1.0)
+extern(PREVIEW_DECLINE=0.0)
 
 rng = random.Random(SEED)
 jitter = {}
+draws = {}
+
+
+def decline_draw(leaf_id):
+    if leaf_id not in draws:
+        draws[leaf_id] = rng.uniform(-0.1, 0.1)
+    return draws[leaf_id]
 
 
 def birth_jitter(leaf_id):
@@ -34,7 +44,8 @@ def leaf_state(age):
 def leaf_o(leaf_id, tiller, rank, age):
     j = birth_jitter(leaf_id)
     az = math.pi * (rank % 2) + j
-    size = 0.0 if age >= LIFE else min(1.0, age / 2.0)
+    fade = min(1.0, max(0.0, (age - LIFE) / FADE_DURATION))
+    size = 0.0 if fade >= 1.0 else min(1.0, age / 2.0)
     sen = 1.0 if age >= LIFE else min(1.0, max(0.0, age - (LIFE - 1.0)))
     sheath = 0.05 * size
     return {
@@ -48,6 +59,8 @@ def leaf_o(leaf_id, tiller, rank, age):
         "unroll": min(1.0, age / 2.0),
         "arch_rad": 0.4,
         "senescence": sen,
+        "fade": fade,
+        "decline_draw": decline_draw(leaf_id),
     }
 
 

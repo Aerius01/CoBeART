@@ -17,7 +17,7 @@ from openalea.lpy import Lsystem
 
 LOG = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA_PATH = Path(__file__).with_name("organ_table.schema.json")
 DEFAULT_SAMPLES = 25
 TIME_DECIMALS = 9
@@ -29,7 +29,7 @@ LEAF_STATES: frozenset[str] = frozenset({"growing", "mature", "senescent", "dead
 LEAF_VECTOR_KEYS = ("attach", "direction")
 LEAF_SCALAR_KEYS = (
     "azimuth_rad", "angle_from_axis_rad", "sheath_length_m", "blade_length_m",
-    "blade_width_m", "unroll", "arch_rad", "senescence",
+    "blade_width_m", "unroll", "arch_rad", "senescence", "fade", "decline_draw",
 )
 TILLER_VECTOR_KEYS = ("base", "direction")
 TILLER_SCALAR_KEYS = ("azimuth_rad", "splay_rad")
@@ -58,6 +58,8 @@ class LeafOrgan:
     unroll: float
     arch_rad: float
     senescence: float
+    fade: float
+    decline_draw: float
 
 
 @dataclass(frozen=True)
@@ -202,7 +204,7 @@ def sample_steps(dt: float, t_end: float, samples: int) -> list[int]:
 def check_stable_ids(samples: Sequence[Sample]) -> None:
     """Raise if an organ id vanishes or changes kind, tiller, rank or birth_time in a later sample."""
     first_seen: dict[str, Organ] = {}
-    dead_seen: set[str] = set()
+    previous_leaves: dict[str, LeafOrgan] = {}
     for sample in samples:
         by_id = {o.id: o for o in sample.organs}
         if len(by_id) != len(sample.organs):
@@ -217,36 +219,64 @@ def check_stable_ids(samples: Sequence[Sample]) -> None:
                         f"organ {organ_id} changed {field} from {getattr(first, field)!r} "
                         f"to {getattr(later, field)!r} at time {sample.time}"
                     )
-        check_dead_leaves(sample, by_id, dead_seen)
+        check_leaf_invariants(sample, by_id, previous_leaves)
         for organ_id, organ in by_id.items():
             first_seen.setdefault(organ_id, organ)
 
 
-def check_dead_leaves(sample: Sample, by_id: dict[str, Organ], dead_seen: set[str]) -> None:
-    """Dead leaves stay dead, have zero size and senescence 1, and sit at their tiller base."""
+SIZE_FIELDS = ("sheath_length_m", "blade_length_m", "blade_width_m")
+
+
+def check_leaf_invariants(sample: Sample, by_id: dict[str, Organ], previous: dict[str, LeafOrgan]) -> None:
+    """Check the life-cycle rules of every leaf in a sample and record it in `previous` for the next one.
+
+    Rules: senescence is 1 exactly when dead; fade is positive only when dead and never decreases; at fade 1 the
+    sizes are 0 and attach equals the tiller base, and a collapsed leaf stays collapsed. A dead leaf with fade < 1
+    is a dry blade fading out and may have a nonzero size.
+    """
+    time = sample.time
     for organ_id, organ in by_id.items():
         if not isinstance(organ, LeafOrgan):
             continue
-        if organ_id in dead_seen and organ.state != "dead":
+        before = previous.get(organ_id)
+        if before is not None and before.state == "dead" and organ.state != "dead":
+            raise OrganTableError(f"leaf {organ_id}: field 'state' left 'dead' for {organ.state!r} at time {time}")
+        if (organ.senescence == 1) != (organ.state == "dead"):
             raise OrganTableError(
-                f"leaf {organ_id}: field 'state' left 'dead' for {organ.state!r} at time {sample.time}"
+                f"leaf {organ_id}: field 'senescence' is {organ.senescence} but state is {organ.state!r} at time "
+                f"{time}; senescence must be 1 if and only if the leaf is dead"
             )
-        if organ.state != "dead":
-            continue
-        dead_seen.add(organ_id)
-        for field in ("sheath_length_m", "blade_length_m", "blade_width_m"):
-            if getattr(organ, field) != 0:
-                raise OrganTableError(f"dead leaf {organ_id}: field {field!r} must be 0 at time {sample.time}")
-        if organ.senescence != 1:
-            raise OrganTableError(f"dead leaf {organ_id}: field 'senescence' must be 1 at time {sample.time}")
-        tiller = by_id.get(f"T{organ.tiller}")
-        if not isinstance(tiller, TillerOrgan):
-            raise OrganTableError(f"dead leaf {organ_id}: tiller T{organ.tiller} is missing at time {sample.time}")
-        if organ.attach != tiller.base:
+        if organ.fade > 0 and organ.state != "dead":
             raise OrganTableError(
-                f"dead leaf {organ_id}: field 'attach' {organ.attach} must equal tiller base {tiller.base} "
-                f"at time {sample.time}"
+                f"leaf {organ_id}: field 'fade' is {organ.fade} but state is {organ.state!r} at time {time}; "
+                "fade may be positive only when the leaf is dead"
             )
+        if before is not None and organ.fade < before.fade:
+            raise OrganTableError(
+                f"leaf {organ_id}: field 'fade' decreased from {before.fade} to {organ.fade} at time {time}"
+            )
+        collapsed_before = before is not None and before.fade == 1
+        if organ.fade == 1 or collapsed_before:
+            _check_collapsed(organ, by_id, time, collapsed_before)
+        previous[organ_id] = organ
+
+
+def _check_collapsed(leaf: LeafOrgan, by_id: dict[str, Organ], time: float, collapsed_before: bool) -> None:
+    """A collapsed leaf has zero sizes and sits at its tiller base."""
+    for field in SIZE_FIELDS:
+        if getattr(leaf, field) != 0:
+            raise OrganTableError(
+                f"leaf {leaf.id}: field {field!r} is {getattr(leaf, field)} at time {time}; "
+                f"it must be 0 once fade is 1{' (collapsed earlier)' if collapsed_before else ''}"
+            )
+    tiller = by_id.get(f"T{leaf.tiller}")
+    if not isinstance(tiller, TillerOrgan):
+        raise OrganTableError(f"leaf {leaf.id}: tiller T{leaf.tiller} is missing at time {time}")
+    if leaf.attach != tiller.base:
+        raise OrganTableError(
+            f"leaf {leaf.id}: field 'attach' {leaf.attach} must equal tiller base {tiller.base} at time {time} "
+            "once fade is 1"
+        )
 
 
 def read_model_info(lsystem: Lsystem, model_path: Path) -> ModelInfo:

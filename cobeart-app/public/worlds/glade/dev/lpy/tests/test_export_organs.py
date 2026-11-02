@@ -1,6 +1,7 @@
 """Exporter tests against the small fixture model (needs the lpy conda env)."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -30,10 +31,10 @@ def test_export_matches_schema_and_header(tmp_path: Path) -> None:
     doc = run_export(tmp_path, samples=7)
     schema = json.loads(eo.SCHEMA_PATH.read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator(schema).validate(doc)
-    assert doc["schema_version"] == 1
+    assert doc["schema_version"] == 2
     assert doc["model"] == "fixture_grass.lpy"
     assert doc["seed"] == 1
-    assert set(doc["params"]) == {"SEED", "DT", "T_END", "LIFE"}
+    assert set(doc["params"]) == {"SEED", "DT", "T_END", "LIFE", "FADE_DURATION", "PREVIEW_DECLINE"}
     assert doc["sample_times"] == [s["time"] for s in doc["samples"]]
     assert doc["sample_times"][0] == 0 and doc["sample_times"][-1] == doc["t_end"]
     assert len(doc["samples"]) == 7
@@ -66,14 +67,16 @@ def test_ids_stable_across_samples(tmp_path: Path) -> None:
     assert {"T0", "T1", "L0.1", "L1.1"} <= set(seen)
 
 
-def test_dead_leaf_persists_with_zero_size(tmp_path: Path) -> None:
-    doc = run_export(tmp_path, samples=13)
-    final = organs_by_id(doc["samples"][-1])
-    leaf = final["L0.1"]
-    assert leaf["state"] == "dead"
-    assert leaf["senescence"] == 1
-    assert leaf["sheath_length_m"] == leaf["blade_length_m"] == leaf["blade_width_m"] == 0
-    assert "L0.1" in organs_by_id(doc["samples"][len(doc["samples"]) // 2])
+def test_dead_leaf_fades_then_collapses(tmp_path: Path) -> None:
+    doc = run_export(tmp_path, samples=25)
+    history = [organs_by_id(s)["L0.1"] for s in doc["samples"]]
+    assert history[-1]["state"] == "dead" and history[-1]["fade"] == 1
+    assert all(history[-1][f] == 0 for f in eo.SIZE_FIELDS)
+    dry = [h for h in history if h["state"] == "dead" and h["fade"] < 1]
+    assert dry and all(h["senescence"] == 1 and h["blade_length_m"] > 0 for h in dry)
+    fades = [h["fade"] for h in history]
+    assert fades == sorted(fades)
+    assert all(h["fade"] == 0 for h in history if h["state"] != "dead")
 
 
 def test_birth_time_follows_age_convention(tmp_path: Path) -> None:
@@ -121,12 +124,78 @@ def test_wrong_type_names_module_and_field(tmp_path: Path) -> None:
         eo.export_organs(broken, tmp_path / "out.json")
 
 
-def test_vanishing_organ_is_reported() -> None:
+def make_leaf(**changes: Any) -> eo.LeafOrgan:
     leaf = eo.LeafOrgan(
         id="L0.1", kind="leaf", tiller=0, rank=1, birth_time=0.0, age=0.0, state="growing",
         attach=(0.0, 0.0, 0.0), direction=(0.0, 0.0, 1.0), azimuth_rad=0.0, angle_from_axis_rad=0.0,
-        sheath_length_m=0.0, blade_length_m=0.0, blade_width_m=0.0, unroll=0.0, arch_rad=0.0, senescence=0.0,
+        sheath_length_m=0.1, blade_length_m=0.1, blade_width_m=0.01, unroll=0.0, arch_rad=0.0, senescence=0.0,
+        fade=0.0, decline_draw=0.0,
     )
+    return dataclasses.replace(leaf, **changes)
+
+
+def make_tiller() -> eo.TillerOrgan:
+    return eo.TillerOrgan(
+        id="T0", kind="tiller", tiller=0, rank=0, birth_time=0.0, age=0.0, state="growing",
+        base=(0.0, 0.0, 0.0), direction=(0.0, 0.0, 1.0), azimuth_rad=0.0, splay_rad=0.0,
+    )
+
+
+COLLAPSED = {"state": "dead", "senescence": 1.0, "fade": 1.0, "sheath_length_m": 0.0, "blade_length_m": 0.0,
+             "blade_width_m": 0.0}
+DRY = {"state": "dead", "senescence": 1.0, "fade": 0.4}
+
+
+def check(*leaves: eo.LeafOrgan) -> None:
+    """Run the stable-id checks over one sample per leaf (times 0, 1, ...), each with the tiller T0."""
+    eo.check_stable_ids([eo.Sample(float(i), (make_tiller(), leaf)) for i, leaf in enumerate(leaves)])
+
+
+def test_valid_life_cycle_passes() -> None:
+    check(make_leaf(), make_leaf(state="senescent", senescence=0.5), make_leaf(**DRY), make_leaf(**COLLAPSED),
+          make_leaf(**COLLAPSED))
+
+
+@pytest.mark.parametrize("changes, pattern", [
+    ({"state": "senescent", "senescence": 1.0}, r"leaf L0\.1.*'senescence'.*time 0\.0"),
+    ({"state": "dead", "senescence": 0.9}, r"leaf L0\.1.*'senescence'.*time 0\.0"),
+    ({"fade": 0.2}, r"leaf L0\.1.*'fade'.*time 0\.0"),
+    ({"state": "mature", "fade": 0.1}, r"leaf L0\.1.*'fade'.*time 0\.0"),
+])
+def test_senescence_and_fade_state_rules(changes: dict[str, Any], pattern: str) -> None:
+    with pytest.raises(eo.OrganTableError, match=pattern):
+        check(make_leaf(**changes))
+
+
+def test_fade_must_not_decrease() -> None:
+    with pytest.raises(eo.OrganTableError, match=r"leaf L0\.1.*'fade' decreased.*time 1\.0"):
+        check(make_leaf(**DRY), make_leaf(**{**DRY, "fade": 0.2}))
+
+
+@pytest.mark.parametrize("field", ["sheath_length_m", "blade_length_m", "blade_width_m"])
+def test_collapsed_leaf_must_have_zero_size(field: str) -> None:
+    with pytest.raises(eo.OrganTableError, match=rf"leaf L0\.1.*{field!r}.*time 0\.0"):
+        check(make_leaf(**{**COLLAPSED, field: 0.01}))
+
+
+def test_collapsed_leaf_must_sit_at_tiller_base() -> None:
+    with pytest.raises(eo.OrganTableError, match=r"leaf L0\.1.*'attach'.*time 0\.0"):
+        check(make_leaf(**COLLAPSED, attach=(0.0, 0.0, 0.1)))
+
+
+def test_collapsed_leaf_stays_collapsed() -> None:
+    regrown = make_leaf(**{**COLLAPSED, "blade_length_m": 0.05})
+    with pytest.raises(eo.OrganTableError, match=r"leaf L0\.1.*'blade_length_m'.*time 1\.0.*collapsed earlier"):
+        check(make_leaf(**COLLAPSED), regrown)
+
+
+def test_dead_leaf_cannot_revive() -> None:
+    with pytest.raises(eo.OrganTableError, match=r"leaf L0\.1.*'state' left 'dead'.*time 1\.0"):
+        check(make_leaf(**DRY), make_leaf(**{**DRY, "state": "senescent"}))
+
+
+def test_vanishing_organ_is_reported() -> None:
+    leaf = make_leaf()
     with pytest.raises(eo.OrganTableError, match="L0.1"):
         eo.check_stable_ids([eo.Sample(0.0, (leaf,)), eo.Sample(1.0, ())])
 
@@ -159,11 +228,25 @@ def test_organs_sorted_by_birth_time_then_id(tmp_path: Path) -> None:
         assert keys == sorted(keys)
 
 
-def test_dead_leaf_invariants_are_checked(tmp_path: Path) -> None:
+def test_model_breaking_an_invariant_is_reported(tmp_path: Path) -> None:
     broken = tmp_path / "broken.lpy"
     text = FIXTURE.read_text().replace(
-        '"blade_length_m": 0.15 * size', '"blade_length_m": 0.15 * size + (0.01 if age >= LIFE else 0.0)'
+        '"blade_length_m": 0.15 * size', '"blade_length_m": 0.15 * size + (0.01 if fade >= 1.0 else 0.0)'
     )
     broken.write_text(text, encoding="utf-8")
-    with pytest.raises(eo.OrganTableError, match=r"dead leaf L0\.1.*blade_length_m"):
-        eo.export_organs(broken, tmp_path / "out.json", samples=13)
+    with pytest.raises(eo.OrganTableError, match=r"leaf L0\.1.*'blade_length_m'"):
+        eo.export_organs(broken, tmp_path / "out.json", samples=25)
+
+
+def test_sampling_never_derives_beyond_t_end(tmp_path: Path) -> None:
+    longer = tmp_path / "longer.lpy"
+    longer.write_text(
+        FIXTURE.read_text().replace("derivation length: int(round(T_END / DT))",
+                                    "derivation length: int(round(T_END / DT)) + 8"),
+        encoding="utf-8",
+    )
+    assert longer.read_text() != FIXTURE.read_text()
+    reference = run_export(tmp_path, "ref.json", samples=13)
+    doc = run_export(tmp_path, "long.json", model=longer, samples=13)
+    assert doc["samples"] == reference["samples"]
+    assert doc["samples"][-1]["time"] == doc["t_end"]

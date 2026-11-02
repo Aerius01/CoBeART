@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Glade organ table",
-  "description": "Organs of an L-Py grass model sampled at several times. Lengths in metres, angles in radians, time in phyllochrons. Organs are sorted by (birth_time, id) within a sample; consumers must key organs by id, not by position.",
+  "description": "Organs of an L-Py grass model sampled at several times; the track is the healthy growth baseline, decline is applied by consumers. Lengths in metres, angles in radians, time in phyllochrons. Organs are sorted by (birth_time, id) within a sample; consumers must key organs by id, not by position.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "model", "seed", "params", "dt", "t_end", "sample_times", "samples"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "model": {"type": "string", "minLength": 1, "description": "File name of the L-Py model."},
     "seed": {"type": "integer", "description": "Value of the SEED extern used for this export."},
     "params": {
@@ -44,7 +44,7 @@
       "required": [
         "id", "kind", "tiller", "rank", "birth_time", "age", "state", "attach", "direction", "azimuth_rad",
         "angle_from_axis_rad", "sheath_length_m", "blade_length_m", "blade_width_m", "unroll", "arch_rad",
-        "senescence"
+        "senescence", "fade", "decline_draw"
       ],
       "properties": {
         "id": {"type": "string", "pattern": "^L[0-9]+\\.[0-9]+$"},
@@ -57,13 +57,15 @@
         "attach": {"$ref": "#/$defs/vec3", "description": "Collar position: tiller base plus tiller axis times sheath length."},
         "direction": {"$ref": "#/$defs/vec3", "description": "Unit initial blade direction in world space; authoritative over azimuth_rad and angle_from_axis_rad."},
         "azimuth_rad": {"type": "number"},
-        "angle_from_axis_rad": {"type": "number", "description": "Angle between the initial blade direction and the tiller axis; azimuth_rad is measured about the same tiller axis."},
-        "sheath_length_m": {"$ref": "#/$defs/nonNegative"},
-        "blade_length_m": {"$ref": "#/$defs/nonNegative"},
-        "blade_width_m": {"$ref": "#/$defs/nonNegative"},
+        "angle_from_axis_rad": {"type": "number", "description": "Healthy baseline at the leaf age (no senescence, fade or decline terms). Angle between the initial blade direction and the tiller axis; azimuth_rad is measured about the same tiller axis."},
+        "sheath_length_m": {"$ref": "#/$defs/nonNegative", "description": "Healthy baseline at the leaf age; 0 once fade is 1 (collapsed). Senescence, fade and decline are applied by consumers."},
+        "blade_length_m": {"$ref": "#/$defs/nonNegative", "description": "Healthy baseline at the leaf age; 0 once fade is 1 (collapsed). Senescence, fade and decline are applied by consumers."},
+        "blade_width_m": {"$ref": "#/$defs/nonNegative", "description": "Healthy baseline at the leaf age; 0 once fade is 1 (collapsed). Senescence, fade and decline are applied by consumers."},
         "unroll": {"$ref": "#/$defs/unitInterval", "description": "0 rolled, 1 open."},
-        "arch_rad": {"type": "number"},
-        "senescence": {"$ref": "#/$defs/unitInterval", "description": "0 green, 1 dead."}
+        "arch_rad": {"type": "number", "description": "Healthy baseline at the leaf age; senescence and decline are applied by consumers."},
+        "senescence": {"$ref": "#/$defs/unitInterval", "description": "Turnover senescence: 0 green, 1 dead. Equals 1 if and only if state is dead."},
+        "fade": {"$ref": "#/$defs/unitInterval", "description": "0 until the leaf dies, then rises to 1 (collapsed: zero sizes, attach at the tiller base). Positive only when dead, never decreases."},
+        "decline_draw": {"type": "number", "description": "Per-leaf random draw made at birth; input of the plant-decline rule in decline.py."}
       }
     },
     "tiller": {

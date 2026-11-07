@@ -44,6 +44,7 @@ MATERIALS: tuple[tuple[str, tuple[float, float, float], float], ...] = (
     ("Grass_Sheath", (0.30, 0.40, 0.12), 0.5),
     ("Grass_Blade", (0.10, 0.32, 0.05), 0.45),
 )
+GLB_MATERIAL = ("Grass", (0.10, 0.32, 0.05), 0.45)  # one material: glTF would write the shared collar row twice
 
 Vec3 = gg.Vec3
 
@@ -88,11 +89,12 @@ def ensure_material(name: str, color: tuple[float, float, float], roughness: flo
 
 
 def to_blender_mesh(name: str, positions: Sequence[Vec3], faces: Sequence[gg.Quad], face_uvs: Sequence[object],
-                    face_materials: Sequence[int], vertex_color: str | None = None) -> bpy.types.Mesh:
-    """Mesh with the two materials, smooth shading and UVs; validation failures raise."""
+                    face_materials: Sequence[int], vertex_color: str | None = None,
+                    materials: Sequence[tuple[str, tuple[float, float, float], float]] = MATERIALS) -> bpy.types.Mesh:
+    """Mesh with the given materials (default the two display ones), smooth shading and UVs."""
     me = bpy.data.meshes.new(name)
     me.from_pydata(list(positions), [], list(faces))
-    for mat_name, color, rough in MATERIALS:
+    for mat_name, color, rough in materials:
         me.materials.append(ensure_material(mat_name + ("_Stage" if vertex_color else ""), color, rough, vertex_color))
     me.polygons.foreach_set("material_index", list(face_materials))
     me.polygons.foreach_set("use_smooth", [True] * len(faces))
@@ -109,7 +111,8 @@ def finish_mesh(me: bpy.types.Mesh) -> bpy.types.Mesh:
 
 def plant_blender_mesh(plant: gg.PlantMesh) -> bpy.types.Mesh:
     """The healthy plant with every G29 attribute as a point attribute named by gltf_name."""
-    me = to_blender_mesh(MESH_NAME, plant.positions, plant.faces, plant.face_uvs, plant.face_materials)
+    me = to_blender_mesh(MESH_NAME, plant.positions, plant.faces, plant.face_uvs, [0] * len(plant.faces),
+                         materials=(GLB_MATERIAL,))
     for name in gg.VECTOR_ATTRIBUTES:
         me.attributes.new(gg.gltf_name(name), 'FLOAT_VECTOR', 'POINT').data.foreach_set(
             "vector", [c for v in plant.vectors[name] for c in v])

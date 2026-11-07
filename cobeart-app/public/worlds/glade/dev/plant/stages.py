@@ -73,7 +73,8 @@ def build_stage(table: gg.OrganTable, spec: StageSpec, p: gg.GeometryParams, dec
     colors: list[Rgba] = []
     for rng in mesh.leaves:
         for i in (*range(*rng.sheath), *range(*rng.blade)):
-            dv = declined_vertex(mesh.positions[i], gg.vertex_inputs(mesh, i), spec.time, spec.vitality, decline)
+            dv = declined_vertex(mesh.positions[i], gg.vertex_inputs(mesh, i), spec.time, spec.vitality, decline,
+                                 collar_bend=p.collar_bend)
             if dv.opacity < HIDE_OPACITY:
                 continue
             keep[i] = len(positions)

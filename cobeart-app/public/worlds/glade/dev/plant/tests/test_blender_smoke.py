@@ -49,5 +49,15 @@ def test_blender_builds_glb_and_stages(organ_table_path: Path, tmp_path: Path) -
         assert not missing, f"primitive lacks attributes {sorted(missing)}"
     accessors = document["accessors"]
     total = sum(accessors[prim["attributes"]["POSITION"]]["count"] for prim in primitives)  # type: ignore[index]
-    # Blender may split vertices per material and UV seam, so it can only have more vertices than the mesh.
-    assert total >= len(expected.positions), f"GLB has {total} vertices, the mesh {len(expected.positions)}"
+    assert total == len(expected.positions), f"GLB has {total} vertices, the mesh {len(expected.positions)}"
+
+
+def test_blender_exits_nonzero_on_bad_input(tmp_path: Path) -> None:
+    blender = shutil.which("blender")
+    if blender is None:
+        pytest.skip("blender is not on the PATH; install it or add it to run the Blender smoke test")
+    result = subprocess.run([blender, "--background", "--factory-startup", "--python", str(SCRIPT), "--",
+                             str(tmp_path / "missing.json"), "--glb", str(tmp_path / "p.glb")],
+                            capture_output=True, text=True, timeout=BLENDER_TIMEOUT_S)
+    assert result.returncode != 0, f"blender exited 0 on a missing organ table:\n{result.stdout[-1000:]}"
+    assert "Traceback" in result.stderr + result.stdout

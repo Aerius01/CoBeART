@@ -1,9 +1,12 @@
-"""Decline rule of the Glade grass (GP roadmap, Phase 2, G10 to G14): pure functions, stdlib only.
+"""Decline rule of the Glade grass (GP roadmap, Phase 2, G10 to G14; per vertex, Phase 3, G23 and G32): pure
+functions, stdlib only.
 
 A plant has a vitality v (1 healthy, 0 gone), independent of its growth. Each leaf has a health h (1 healthy,
 0 dead) from its turnover senescence and from v, and one look maps h onto the leaf's healthy shape. The same
-rule runs in grass.lpy's preview, in Phase 3's Blender generator and, mirrored in GLSL, in Phase 5's shader;
-declined_leaf is the whole composition, so consumers call it rather than rebuilding it.
+rule runs in grass.lpy's preview, in Phase 3's Blender generator and, mirrored in GLSL, in Phase 5's shader.
+declined_leaf is the whole composition for one leaf, so consumers call it rather than rebuilding it.
+declined_vertex is the same rule applied to one vertex of the healthy mesh, the Python reference of the shader:
+exact for the collar, sizes, angle and tiller lean, and a closed-form approximation of the extra arch.
 The field names of DeclineParams are the extern names of grass.lpy, so an export's `params` builds it.
 """
 from __future__ import annotations
@@ -84,6 +87,58 @@ class DeclinedLeaf:
     opacity: float          # 1 opaque, 0 gone
 
 
+KIND_SHEATH, KIND_BLADE = 0, 1
+TIME_TOLERANCE = 1e-6  # sample times and birth times are rounded, so a leaf born at the sample time may be "early"
+UNIT_TOLERANCE = 1e-6
+
+
+@dataclass(frozen=True)
+class VertexInputs:
+    """Decline inputs of one healthy-mesh vertex: the G29 decline attributes, one to one, plus the healthy arch."""
+    kind: int               # KIND_SHEATH or KIND_BLADE
+    s: float                # 0..1 along the organ, base to tip
+    collar: Vec3            # the leaf's healthy collar (its attach)
+    side: Vec3              # unit axis of the leaf's angle and arch, through the collar (healthy frame)
+    tiller_base: Vec3
+    tiller_axis: Vec3       # unit healthy tiller axis
+    tiller_azimuth: float   # the tiller's azimuth_rad; it leans about (-sin az, cos az, 0)
+    tiller: int             # 0 is the main shoot, which never leans
+    birth_time: float
+    decline_draw: float
+    senescence: float
+    fade: float
+    arch_rad: float         # the leaf's healthy arch at the built sample (unused by sheath vertices)
+
+    def __post_init__(self) -> None:
+        for name in ("kind", "tiller"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"vertex {name} must be an int, got {value!r}")
+        if self.kind not in (KIND_SHEATH, KIND_BLADE):
+            raise ValueError(f"vertex kind must be {KIND_SHEATH} (sheath) or {KIND_BLADE} (blade), got {self.kind}")
+        if self.tiller < 0:
+            raise ValueError(f"vertex tiller must be >= 0, got {self.tiller}")
+        for name in ("collar", "side", "tiller_base", "tiller_axis"):
+            object.__setattr__(self, name, _vec3("vertex", {name: getattr(self, name)}, name))
+        for name in ("side", "tiller_axis"):
+            n = math.sqrt(sum(c * c for c in getattr(self, name)))
+            if abs(n - 1.0) > UNIT_TOLERANCE:
+                raise ValueError(f"vertex {name} must be a unit vector, got {getattr(self, name)} (length {n})")
+        for name in ("tiller_azimuth", "birth_time", "arch_rad"):
+            _number("vertex", {name: getattr(self, name)}, name)
+        for name in ("s", "senescence", "fade"):
+            _unit(name, getattr(self, name))
+        if not (math.isfinite(self.decline_draw) and -1.0 <= self.decline_draw <= 1.0):
+            raise ValueError(f"decline_draw must be in [-1, 1], got {self.decline_draw}")
+
+
+@dataclass(frozen=True)
+class DeclinedVertex:
+    position: Vec3
+    browning: float  # 0 green, 1 brown
+    opacity: float   # 1 opaque, 0 gone
+
+
 # Vector helpers (world space, Z up).
 
 def unit(v: Sequence[float]) -> Vec3:
@@ -112,6 +167,22 @@ def dir_from(azimuth: float, from_vertical: float) -> Vec3:
     """Unit vector at this azimuth, tilted from +Z by from_vertical."""
     s = math.sin(from_vertical)
     return (math.cos(azimuth) * s, math.sin(azimuth) * s, math.cos(from_vertical))
+
+
+def _add(a: Sequence[float], b: Sequence[float]) -> Vec3:
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def _sub(a: Sequence[float], b: Sequence[float]) -> Vec3:
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _scaled(a: Sequence[float], f: float) -> Vec3:
+    return (a[0] * f, a[1] * f, a[2] * f)
+
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
 def to_tiller_frame(v: Sequence[float], tiller_axis: Sequence[float]) -> Vec3:
@@ -253,3 +324,45 @@ def declined_leaf(leaf: Mapping[str, object], tiller: Mapping[str, object], v: f
         browning=lk.browning,
         opacity=opacity(_number("leaf", leaf, "fade"), v, p),
     )
+
+
+def chord_factor(arch: float, s: float) -> float:
+    """Chord length from the collar to fraction s of a blade bent by arch * u^2, relative to the arc length.
+
+    Second order in the bend: 1 - 2 arch^2 s^4 / 45 (the variance of the bend angle over [0, s] is
+    4 arch^2 s^4 / 45). Accurate to well under 1% for arch up to about 2 rad.
+    """
+    f = 1.0 - 2.0 * arch * arch * s ** 4 / 45.0
+    if f <= 0.0:
+        raise ValueError(f"arch {arch} at s = {s} is beyond the chord approximation (factor {f})")
+    return f
+
+
+def declined_vertex(position: Sequence[float], vin: VertexInputs, time: float, v: float,
+                    p: DeclineParams) -> DeclinedVertex:
+    """One healthy-mesh vertex as drawn at vitality v and growth time `time` (G32, G23).
+
+    A sheath vertex scales its component along the tiller axis, from the tiller base, by the size scale. A blade
+    vertex moves with the scaled collar, and its offset from the collar is scaled by the size scale and by the
+    chord shortening of the extra arch, then rotated about `side` through the collar by the extra angle plus
+    extra_arch * s^2 / 3 (the mean extra bend up to s). A tiller other than the main shoot then leans rigidly
+    about its base, as in declined_leaf.
+    """
+    pos = _vec3("vertex", {"position": position}, "position")
+    if not math.isfinite(time) or time < vin.birth_time - TIME_TOLERANCE:
+        raise ValueError(f"time must be finite and >= the leaf's birth_time {vin.birth_time}, got {time}")
+    age = max(time - vin.birth_time, 0.0)
+    lk = look(health(vin.senescence, v, age, vin.decline_draw, p), p)
+    base, axis = vin.tiller_base, vin.tiller_axis
+    rel = _sub(pos, base)
+    if vin.kind == KIND_SHEATH:
+        drawn = _add(pos, _scaled(axis, _dot(rel, axis) * (lk.size_scale - 1.0)))
+    else:
+        collar = _add(base, _scaled(_sub(vin.collar, base), lk.size_scale))
+        k = lk.size_scale * chord_factor(vin.arch_rad + lk.extra_arch_rad, vin.s) / chord_factor(vin.arch_rad, vin.s)
+        offset = _scaled(_sub(pos, vin.collar), k)
+        drawn = _add(collar, rotate(offset, vin.side, lk.extra_angle_rad + lk.extra_arch_rad * vin.s ** 2 / 3.0))
+    if vin.tiller != 0:
+        lean_axis = (-math.sin(vin.tiller_azimuth), math.cos(vin.tiller_azimuth), 0.0)
+        drawn = _add(base, rotate(_sub(drawn, base), lean_axis, tiller_lean_rad(v, p)))
+    return DeclinedVertex(position=drawn, browning=lk.browning, opacity=opacity(vin.fade, v, p))

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import sys
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -235,3 +236,179 @@ def test_declined_leaf_bad_fields_raise() -> None:
         dc.declined_leaf(leaf_fields(1), dict(tiller_fields(1), base=[0.0, 0.0]), 1.0, P)
     with pytest.raises(ValueError, match="'blade_width_m' must be a finite number"):
         dc.declined_leaf(dict(leaf_fields(1), blade_width_m=math.nan), tiller_fields(1), 1.0, P)
+
+
+# Per-vertex rule (G23, G32), checked against declined_leaf on a blade built the way G22 builds it.
+
+P_DEFAULT = dc.DeclineParams(  # grass.lpy's defaults
+    V_DEAD=0.15, DECLINE_AGE_SPREAD=0.4, DECLINE_AGE_REF=3.0, DECLINE_JITTER=0.1, DECLINE_RESIDUAL=0.7,
+    SHRIVEL_FRACTION=1.0,
+    ANGLE_SENESCENT_DEG=12.0, SHRIVEL_ANGLE_DEG=25.0, SHRIVEL_ARCH_RAD=0.8, DECLINE_SPLAY_DEG=25.0,
+)
+BIRTH, TIME = 4.0, 6.5  # leaf_fields has age 2.5
+ARCH_BOUND = 0.02  # tip error relative to the declined blade length (G23 amendment)
+MIDRIB_STEPS = 2000
+FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
+Vec = tuple[float, float, float]
+
+
+def leaf_side(azimuth: float, tiller_axis: object) -> Vec:
+    assert isinstance(tiller_axis, (list, tuple))
+    return dc.unit(dc.to_tiller_frame((-math.sin(azimuth), math.cos(azimuth), 0.0), tiller_axis))
+
+
+def midrib(collar: object, direction: object, side: Vec, length: float, arch: float, s: float) -> Vec:
+    """Exact (midpoint rule) midrib point at fraction s: direction bent about side by arch * u^2 (G22)."""
+    assert isinstance(collar, (list, tuple)) and isinstance(direction, (list, tuple))
+    n = max(1, round(MIDRIB_STEPS * s))
+    point = [float(c) for c in collar]
+    for i in range(n):
+        u = (i + 0.5) / n * s
+        d = dc.rotate(direction, side, arch * u * u)
+        point = [point[k] + d[k] * length * s / n for k in range(3)]
+    return (point[0], point[1], point[2])
+
+
+def vertex_inputs(leaf: dict[str, object], tiller: dict[str, object], kind: int, s: float) -> dc.VertexInputs:
+    axis = tiller["direction"]
+    az, t_az, draw, sen, fade, arch = (leaf["azimuth_rad"], tiller["azimuth_rad"], leaf["decline_draw"],
+                                       leaf["senescence"], leaf["fade"], leaf["arch_rad"])
+    assert isinstance(az, float) and isinstance(t_az, float) and isinstance(draw, float)
+    assert isinstance(sen, float) and isinstance(fade, float) and isinstance(arch, float)
+    tid = leaf["tiller"]
+    assert isinstance(tid, int)
+    return dc.VertexInputs(
+        kind=kind, s=s, collar=tuple(leaf["attach"]), side=leaf_side(az, axis),  # type: ignore[arg-type]
+        tiller_base=tuple(tiller["base"]), tiller_axis=tuple(axis),  # type: ignore[arg-type]
+        tiller_azimuth=t_az, tiller=tid, birth_time=BIRTH, decline_draw=draw, senescence=sen, fade=fade,
+        arch_rad=arch)
+
+
+def healthy_midrib(leaf: dict[str, object], tiller: dict[str, object], s: float) -> Vec:
+    length, arch, az = leaf["blade_length_m"], leaf["arch_rad"], leaf["azimuth_rad"]
+    assert isinstance(length, float) and isinstance(arch, float) and isinstance(az, float)
+    return midrib(leaf["attach"], leaf["direction"], leaf_side(az, tiller["direction"]), length, arch, s)
+
+
+def declined_midrib(leaf: dict[str, object], tiller: dict[str, object], v: float, p: dc.DeclineParams,
+                    s: float) -> Vec:
+    """Exact midrib point of the leaf rebuilt from declined_leaf (the leaned frame's side axis)."""
+    dl = dc.declined_leaf(leaf, tiller, v, p)
+    az = leaf["azimuth_rad"]
+    assert isinstance(az, float)
+    return midrib(dl.attach, dl.direction, leaf_side(az, dl.tiller_axis), dl.blade_length_m, dl.arch_rad, s)
+
+
+def distance(a: Sequence[float], b: Sequence[float]) -> float:
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
+@pytest.mark.parametrize("tiller", [0, 2])
+def test_declined_vertex_healthy_is_identity(tiller: int) -> None:
+    leaf, t = leaf_fields(tiller), tiller_fields(tiller)
+    for s in FRACTIONS:
+        point = healthy_midrib(leaf, t, s)
+        dv = dc.declined_vertex(point, vertex_inputs(leaf, t, dc.KIND_BLADE, s), TIME, 1.0, P_DEFAULT)
+        assert close(dv.position, point) and dv.browning == 0.0 and dv.opacity == 1.0
+    sheath_point = [0.001, -0.002, 0.03]
+    dv = dc.declined_vertex(sheath_point, vertex_inputs(leaf, t, dc.KIND_SHEATH, 0.5), TIME, 1.0, P_DEFAULT)
+    assert close(dv.position, sheath_point)
+
+
+@pytest.mark.parametrize("tiller", [0, 2])
+def test_declined_vertex_collar_and_look_match_declined_leaf(tiller: int) -> None:
+    for sen in (0.0, 0.4, 1.0):
+        leaf, t = dict(leaf_fields(tiller), senescence=sen, fade=0.3 if sen == 1.0 else 0.0), tiller_fields(tiller)
+        for v in VS[::10]:
+            dl = dc.declined_leaf(leaf, t, v, P_DEFAULT)
+            dv = dc.declined_vertex(leaf["attach"], vertex_inputs(leaf, t, dc.KIND_BLADE, 0.0), TIME, v, P_DEFAULT)
+            assert close(dv.position, dl.attach), (sen, v)
+            assert dv.browning == dl.browning and dv.opacity == dl.opacity
+
+
+@pytest.mark.parametrize("tiller", [0, 2])
+def test_declined_blade_within_arch_bound(tiller: int) -> None:
+    """Every midrib point of the declined blade is within ARCH_BOUND of the declined length from the exact one."""
+    t = tiller_fields(tiller)
+    for arch in (0.0, 0.4, 0.65, 0.9):
+        for extra_arch in (0.2, 0.4, 0.8):
+            p = replace(P_DEFAULT, SHRIVEL_ARCH_RAD=extra_arch)
+            leaf = dict(leaf_fields(tiller), arch_rad=arch, blade_length_m=0.20)
+            for v in (0.8, 0.5, 0.3, P_DEFAULT.V_DEAD):
+                length = dc.declined_leaf(leaf, t, v, p).blade_length_m
+                for s in FRACTIONS:
+                    vin = vertex_inputs(leaf, t, dc.KIND_BLADE, s)
+                    dv = dc.declined_vertex(healthy_midrib(leaf, t, s), vin, TIME, v, p)
+                    error = distance(dv.position, declined_midrib(leaf, t, v, p, s))
+                    assert error < ARCH_BOUND * length, (arch, extra_arch, v, s, error / length)
+
+
+def test_arch_bound_at_the_default_extremes() -> None:
+    """Healthy arch 0.9 plus the full SHRIVEL_ARCH_RAD on a 20 cm blade at health 0 (G23)."""
+    t = tiller_fields(2)
+    leaf = dict(leaf_fields(2), arch_rad=0.9, blade_length_m=0.20, senescence=1.0)
+    dl = dc.declined_leaf(leaf, t, 1.0, P_DEFAULT)
+    assert dl.arch_rad == pytest.approx(0.9 + P_DEFAULT.SHRIVEL_ARCH_RAD)
+    dv = dc.declined_vertex(healthy_midrib(leaf, t, 1.0), vertex_inputs(leaf, t, dc.KIND_BLADE, 1.0), TIME, 1.0,
+                            P_DEFAULT)
+    assert distance(dv.position, declined_midrib(leaf, t, 1.0, P_DEFAULT, 1.0)) < ARCH_BOUND * dl.blade_length_m
+
+
+def test_main_shoot_vertices_never_lean_and_tillers_lean_rigidly() -> None:
+    no_lean = replace(P_DEFAULT, DECLINE_SPLAY_DEG=0.0)
+    for tiller in (0, 2):
+        leaf, t = leaf_fields(tiller), tiller_fields(tiller)
+        base = t["base"]
+        assert isinstance(base, list)
+        points = [(healthy_midrib(leaf, t, s), vertex_inputs(leaf, t, dc.KIND_BLADE, s)) for s in FRACTIONS]
+        points.append(((0.001, 0.0, 0.02), vertex_inputs(leaf, t, dc.KIND_SHEATH, 0.4)))
+        for v in (0.7, 0.3, 0.1):
+            leaned = [dc.declined_vertex(pt, vin, TIME, v, P_DEFAULT).position for pt, vin in points]
+            upright = [dc.declined_vertex(pt, vin, TIME, v, no_lean).position for pt, vin in points]
+            if tiller == 0:
+                assert all(close(a, b) for a, b in zip(leaned, upright))
+                continue
+            assert not close(leaned[-2], upright[-2])
+            for i, a in enumerate(leaned):
+                assert distance(a, base) == pytest.approx(distance(upright[i], base), abs=1e-12)
+                for j in range(i):
+                    assert distance(a, leaned[j]) == pytest.approx(distance(upright[i], upright[j]), abs=1e-12)
+
+
+@pytest.mark.parametrize("tiller", [0, 2])
+def test_sheath_vertices_scale_along_the_leaned_axis(tiller: int) -> None:
+    leaf, t = dict(leaf_fields(tiller), senescence=0.7), tiller_fields(tiller)
+    base, axis = t["base"], t["direction"]
+    assert isinstance(base, list) and isinstance(axis, list)
+    sheath = 0.05
+    vin = vertex_inputs(leaf, t, dc.KIND_SHEATH, 1.0)
+    for v in (1.0, 0.6, 0.2):
+        dl = dc.declined_leaf(leaf, t, v, P_DEFAULT)
+        top = dc.declined_vertex([base[i] + axis[i] * sheath for i in range(3)], vin, TIME, v, P_DEFAULT)
+        assert close(top.position, dl.attach)
+        mid = dc.declined_vertex([base[i] + axis[i] * 0.02 for i in range(3)], vin, TIME, v, P_DEFAULT).position
+        rel = [mid[i] - base[i] for i in range(3)]
+        assert close(dc.cross(rel, dl.tiller_axis), (0.0, 0.0, 0.0))  # still on the axis line through the base
+        assert math.sqrt(sum(c * c for c in rel)) == pytest.approx(0.02 * dl.sheath_length_m / sheath)
+
+
+def test_declined_vertex_bad_inputs_raise() -> None:
+    leaf, t = leaf_fields(1), tiller_fields(1)
+    good = vertex_inputs(leaf, t, dc.KIND_BLADE, 0.5)
+    for field, value, message in [
+        ("kind", 2, "kind must be"), ("kind", True, "kind must be an int"), ("tiller", -1, "tiller must be >= 0"),
+        ("s", 1.5, "s must be in"), ("side", (1.0, 1.0, 0.0), "side must be a unit vector"),
+        ("tiller_axis", (0.0, 0.0), "'tiller_axis' must be 3 numbers"), ("senescence", math.nan, "senescence"),
+        ("fade", -0.1, "fade must be in"), ("decline_draw", 2.0, "decline_draw must be in"),
+        ("arch_rad", math.inf, "'arch_rad' must be a finite number"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            replace(good, **{field: value})
+    with pytest.raises(ValueError, match="birth_time"):
+        dc.declined_vertex(leaf["attach"], good, BIRTH - 0.1, 1.0, P_DEFAULT)
+    with pytest.raises(ValueError, match="v must be in"):
+        dc.declined_vertex(leaf["attach"], good, TIME, 1.5, P_DEFAULT)
+    with pytest.raises(ValueError, match="'position' must be 3 numbers"):
+        dc.declined_vertex([0.0, 0.0], good, TIME, 1.0, P_DEFAULT)
+    with pytest.raises(ValueError, match="beyond the chord approximation"):
+        dc.chord_factor(5.0, 1.0)

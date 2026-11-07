@@ -133,6 +133,14 @@ Base: `86b8c17` (tip of `main` after the Phase 1 merge). Adds P3 step three. The
 - **G17 Preview.** New extern `PREVIEW_DECLINE` (4.0 P; 0 turns it off): the derivation runs to `T_END + PREVIEW_DECLINE`; after `T_END` the productions freeze (modules are reproduced unchanged), and the interpretation draws with `v = 1 - (t - T_END) / PREVIEW_DECLINE`. Lower `T_END` in the GUI to preview decline from a younger stage. The exporter already samples only up to `T_END`.
 - **G18 One Python home for the rule.** `dev/lpy/decline.py`, stdlib only, pure functions over a frozen `DeclineParams` dataclass whose field names are the extern names; `grass.lpy` imports it after putting its own folder on `sys.path` (L-Py sets `__file__` in the `.lpy` but does not add the model's folder to the import path; corrected in WP 2.1), Phase 3's Blender script can too, and Phase 5's GLSL mirrors it. The decline externs live in `grass.lpy`'s parameter block and reach consumers through the export's `params`.
 
+- **G20 User review of the preview (2026-11-07):**
+  - Shrinking was too fast and too strong. A dead organ is now 70% of its healthy size (`DECLINE_RESIDUAL` 0.7), and the shrink, droop and arch run over the whole health range instead of the last 30% (`SHRIVEL_FRACTION` 1.0). Both are parameter changes; judge again in the viewer.
+  - Death was too rapid. The decline preview lasts half the growth track (`PREVIEW_DECLINE` 6 for `T_END` 12). In Glade the speed comes from how fast Glade lowers `v`, not from the model. A single leaf already takes as long to die (`SENESCENCE_DURATION` 2 P, plus the 0.5 P fade) as to grow (`ELONGATION_AGE` 2 P).
+  - Growth and death were synchronised across shoots: every tiller emerged at a whole-number time and kept the main shoot's phyllochron of 1, so all shoots grew a leaf, and dropped their oldest leaf, in the same step. That looked like a skirt falling away all at once. Desynchronised with three seeded per-organ draws, each from its own stream like `decline_draw`, so the other draws keep their values:
+    - a tiller's emergence is delayed by a uniform `[0, TILLER_EMERGENCE_JITTER]` (0.6 P) after its trigger;
+    - each tiller's phyllochron is `1 ± TILLER_PHYLLOCHRON_JITTER` (0.15); the main shoot's stays 1, and time is still measured in main-shoot phyllochrons;
+    - each leaf's turnover senescence lasts `SENESCENCE_DURATION * (1 ± SENESCENCE_JITTER)` (0.2).
+
 **`decline.py` interface (settled):**
 - `DeclineParams` (frozen): `V_DEAD`, `DECLINE_AGE_SPREAD`, `DECLINE_AGE_REF`, `DECLINE_RESIDUAL`, `SHRIVEL_FRACTION`, `ANGLE_SENESCENT_DEG`, `SHRIVEL_ANGLE_DEG`, `SHRIVEL_ARCH_RAD`, `DECLINE_SPLAY_DEG`; `from_mapping(names)` builds it from a dict of externs (or export `params`), raising `ValueError` naming any missing name.
 - `death_point(age, decline_draw, p) -> float`, `decline_health(v, age, decline_draw, p) -> float`, `health(senescence, v, age, decline_draw, p) -> float`.

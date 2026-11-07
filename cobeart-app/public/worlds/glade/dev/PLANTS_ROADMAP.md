@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GP`. Scope: the growth chain for Glade's first 3D plant, a bushy vegetative grass (no heading, no flowering), from an L-Py model to a growth slider on a dev page. Design input: the grill of 2026-11-01 (decisions P1 to P8 below) and the reference plant in `dev/assets/build_grass_plant.py`. The wind MVP (`dev/wind-demo.html`, `dev/wind/`) is a sibling prototype and not part of this roadmap; Phase 5 reuses its renderer.
 
-**Status (2026-11-02):** Phases 0 and 1 done and merged into `main`; Phase 2 in progress on `gp-2-decline` from `86b8c17`.
+**Status (2026-11-07):** Phases 0 to 2 done and merged into `main`. **Next phase base:** the tip of `main` after the Phase 2 merge (the `[GP 2] Record the Phase 2 outcome` commit).
 
 ## Project facts
 
@@ -168,6 +168,8 @@ Base: `86b8c17` (tip of `main` after the Phase 1 merge). Adds P3 step three. The
 
 ## Phase 3: Geometry from the organ table (outline)
 
+Base: the tip of `main` after the Phase 2 merge. Read the Phase 2 carry-over in Outcomes first.
+
 Refactors `build_grass_plant.py` into a generator that reads an organ table and builds the plant mesh at one sample: pseudostem sheaths, curled blades from the reference profiles driven by each organ's healthy length, width, unroll and arch, and the wind attributes per vertex (pivots at sheath tops). Decline (G10 to G14) is applied on top through `decline.py`, so the generator also writes what the shader needs for it per vertex: senescence, fade, decline draw, birth time, and the tiller base and axis for the lean. Runs in Blender; viewed at a few stages there. Open for its grill: a closed-form per-vertex approximation of the extra arch (the preview integrates arch along the blade, a vertex shader cannot), defined once in `decline.py` with a test bounding its error, so Blender and GLSL agree; the per-vertex decline inputs (`decline_draw`, `birth_time`, tiller base and azimuth, collar and leaf side axis, sheath or blade flag, blade fraction s); how the reference's rolled top leaf maps onto the unroll fraction, how a young leaf hidden inside its parent sheath is drawn, vertex count across blades (2 to 3 may suffice from above), and per-vertex colour or a texture coordinate for senescence.
 
 ## Phase 4: Fixed-topology VAT export (outline)
@@ -205,9 +207,67 @@ A dev page, next to `wind-demo.html`, that draws instanced grass from the VAT wi
   - Not applied, open for Phase 2: tiller `state` (schema pins it to `growing`) and a `parent_tiller` field for second-order tillers.
 - **Lessons:** the L-Py API facts (externs only via `extern(...)`, `__externs__`, `derivation length` expressions) were verified before the grill and saved a round. Interface changes after review forced rebuilding the phase branch; worker worktrees on the old base had to be reset or rebased onto the new 1.1 commit, which went cleanly because each WP owns disjoint files.
 
-### Carry-over to Phase 2
+### Carry-over to Phase 2 (resolved)
+
+The tiller-state and time-varying-direction items were dropped by G10 to G15: tillers do not die in the track, and the lean is applied by `decline.py`. The field-list item is resolved by deriving the exporter's key lists from the dataclasses (G19).
 
 - `grass.lpy` keeps birth draws in module globals (`LEAF_DRAWS`, `TILLER_O`) reset by `Start()`; time-varying state lives in modules. Keep that split when adding decline.
 - Decline needs tiller state: widen `Tiller` with a `state` parameter, widen the schema's tiller `state` beyond `growing` and the exporter's `TillerOrgan`, bump `schema_version` to 2. Collapse may also need a time-varying tiller `direction`, which today is fixed at birth in `TILLER_O`.
 - The organ field list exists three times (exporter key lists, dataclasses, schema); a new field edits all three.
 - Phase 3 should build from `direction` (authoritative), `attach`, the sheath along the tiller axis from the tiller `base`, and treat unborn organs as collapsed at their first-seen `attach`.
+
+### Phase 2 (2026-11-07)
+
+- **Commits on `gp-2-decline` from `86b8c17`:**
+  - `80ca360`: the grill outcomes (G10 to G18).
+  - `c2d18b2` [GP 2.1]: `decline.py`, the healthy-baseline track with leaf fade, and the preview (Opus fork).
+  - `b42a878` [GP 2.2]: exporter and schema v2 (Sonnet).
+  - `aa43ee1`: the G18 correction.
+  - `74d7a0a`: the gate-review notes.
+  - `62c25f4` [GP 2.1] and `bb744ff` [GP 2.2]: the gate-review fixes.
+  - `c7eaedb` and `b7de6bc` [GP 2.1]: the user's preview review (G20).
+  - This outcome commit. Fast-forwarded into `main`.
+- **Gate:**
+  - The lpy pytest run gives 75 passed: `test_decline.py`, the exporter tests on the fixture, and `test_grass_model.py` on the real model.
+  - flake8 is clean, and `node scripts/fitness.mjs` reports 0 violations.
+  - The default export of `grass.lpy` validates: 25 samples, 51 organs at t = 12.
+  - The user stepped the preview in the L-Py GUI and approved it after G20.
+- **Model facts (replacing the Phase 1 timing facts):**
+  - Main-shoot leaf r is still born at t = r - 1.
+  - With seed 1, tillers T1 to T4 emerge at t = 3.05, 4.50, 5.05 and 6.55, with phyllochrons 0.87, 0.92, 0.89 and 1.02.
+  - One chance coincidence remains: at t = 10.0 the main shoot, T1 and T2 emit a leaf in the same step. G20 does not rule this out; a per-leaf interval jitter would.
+  - The derivation runs `(T_END + PREVIEW_DECLINE) / DT` = 360 steps; the exporter samples only up to `T_END`.
+- **Gate-review decisions (G19):** reviewers `code-optimizer-reviewer` and `system-architect`. Applied as follow-up WP commits:
+  - `declined_leaf` and the vector helpers moved into `decline.py`, so the leaf-level rule has one Python home. The main shoot never leans.
+  - `decline_draw` is a unit draw in [-1, 1], and `DECLINE_JITTER` is a `DeclineParams` field.
+  - Validation at load time: durations and `DT` must be positive, and the jitters non-negative. The first senescent step goes through the same clamp and snap as later steps.
+  - The exporter checks the decline externs via `DeclineParams.from_mapping`.
+  - The exporter's field lists are derived from the dataclasses, with a test that the schema matches them.
+  - Explicit freeze and contract tests.
+  - `importlib.reload(decline)` so edits reach a GUI reload.
+  - Sheaths brown with their leaves in the preview.
+  - Not applied:
+    - a `beyond_saving` helper (Glade compares `v <= V_DEAD` itself);
+    - recomputing the preview time per step instead of `STATE_TIME` (a one-step lag in Animate is negligible);
+    - a per-vertex arch approximation and per-leaf event times, which are open in the Phase 3 and Phase 4 grills.
+- **Lessons:**
+  - The grill turned decline from a timeline section into an independent vitality axis. That removed the need for decline tracks from several onsets, kept the time span and sample count, and matches Glade's decline-at-any-energy and revival.
+  - My check that L-Py imports sibling modules was wrong: the runner script sat in the same folder. The worker caught it. Verify imports from a different directory.
+  - An `Lsystem` that is garbage-collected empties its globals, and iterating an L-string after that segfaults. Keep the `Lsystem` alive in tests and scripts.
+  - Separate per-organ random streams (`decline:`, `emergence:`, `phyllochron:` and `senescence:`, each with seed and id) let new draws be added without changing the existing plant.
+  - Workers must not use `git stash`: a worker's stash drop was blocked, and the user had to drop the entry.
+
+### Carry-over to Phase 3
+
+- **Rule and inputs:**
+  - The decline rule is `decline.declined_leaf(leaf, tiller, v, p)`. `leaf` is an organ-table leaf dict (it includes `age`), `tiller` is the tiller dict, and `p = DeclineParams.from_mapping(doc["params"])`.
+  - It is stdlib only. Blender's Python can import it after putting `dev/lpy/` on `sys.path`.
+  - Build the healthy mesh from the track. Use `declined_leaf` only to view decline stages in Blender, or to check a shader port against it.
+- **Track semantics (schema v2):**
+  - Sizes, `angle_from_axis_rad` and `arch_rad` are the healthy baseline at the leaf's age.
+  - `senescence` and `fade` come from turnover.
+  - A leaf at `fade` 1 is collapsed: zero sizes, `attach` at its tiller base.
+  - `direction` is authoritative, but `declined_leaf` rebuilds the direction from `azimuth_rad` and `angle_from_axis_rad` in the (leaned) tiller frame. Both agree in the track.
+- **Per-vertex arch:** the preview integrates arch along 8 segments (`rotate(d, side, arch * s^2)` per segment in `grass.lpy`'s `blade_mesh`). The grill settles the closed form that Blender and GLSL share.
+- **Shapes from Phase 1 still hold:** build from `direction`, `attach`, and the sheath along the tiller axis from the tiller `base`. Treat unborn organs as collapsed at their first-seen `attach`.
+- **Leaf count:** the leaf count per lifetime changed with G20 (51 organs at t = 12 for seed 1), so Phase 4's vertex budget should use a fresh export.

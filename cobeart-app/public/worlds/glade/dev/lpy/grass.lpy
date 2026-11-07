@@ -21,8 +21,9 @@ v < V_DEAD. So Run with the defaults ends on an empty scene (fully faded at T_EN
 to watch growth and decline, or set PREVIEW_DECLINE to 0 to Run to the grown plant. Lower T_END to preview decline
 from a younger plant. The exporter samples only up to T_END.
 
-Units: metres and radians, Z up. Time is in phyllochrons (P, the interval between two leaves on one shoot);
-one derivation step advances time by DT. A leaf of rank r on the main shoot is born at t = r - 1.
+Units: metres and radians, Z up. Time is in phyllochrons (P, the interval between two leaves on the main shoot);
+one derivation step advances time by DT. A leaf of rank r on the main shoot is born at t = r - 1. Tillers emerge a
+little after their trigger and keep their own phyllochron (G20), so shoots do not grow or drop leaves in step.
 
 A leaf's azimuth_rad and angle_from_axis_rad are spherical angles in its tiller's frame: the pole is the tiller
 direction and the frame is the minimal rotation taking +Z onto it (identity for the main shoot). direction is that
@@ -37,7 +38,9 @@ Parameters (all externs, overridable with Lsystem(path, {"NAME": value})):
   T_END                    end time in P of the growth track (what the exporter samples)
   LIVE_LEAVES              live (growing or mature) leaves per tiller before the oldest senesces (P7)
   MAX_TILLERS              first-order tillers, from the axils of main-shoot leaves 1..MAX_TILLERS (P1, P7)
-  TILLER_DELAY             the bud in main-shoot leaf n's axil emerges when leaf n + TILLER_DELAY appears
+  TILLER_DELAY             the bud in main-shoot leaf n's axil is triggered when leaf n + TILLER_DELAY appears
+  TILLER_EMERGENCE_JITTER  a tiller emerges a uniform [0, J] P after its trigger (own stream per tiller, G20)
+  TILLER_PHYLLOCHRON_JITTER  a tiller's phyllochron is 1 + uniform(-J, J) P; the main shoot's is 1 (G20)
   TILLER_SIZE_SCALE        size factor on every tiller leaf relative to the main shoot's progression
   CROWN_RADIUS_M           distance of a tiller's base from the crown centre
   TILLER_SPLAY_DEG         outward tilt of a tiller's axis from vertical, with TILLER_SPLAY_JITTER_DEG
@@ -63,11 +66,13 @@ Parameters (all externs, overridable with Lsystem(path, {"NAME": value})):
   ANGLE_JITTER_DEG         per-leaf jitter on the angle from the tiller axis
   ARCH_YOUNG_RAD, ARCH_OLD_RAD, ARCH_AGE   arch (bend) rises from young to old over ARCH_AGE
   SENESCENCE_DURATION      time from turning senescent to dead (turnover)
+  SENESCENCE_JITTER        a leaf's turnover senescence lasts SENESCENCE_DURATION * (1 + uniform(-J, J)) (G20)
   FADE_DURATION            time from a turnover leaf's death to its full fade (then it is collapsed)
   PREVIEW_DECLINE          length (P) of the decline preview after T_END; 0 turns it off
   Look and decline (applied through decline.py, whose DeclineParams uses these names):
   ANGLE_SENESCENT_DEG      extra angle from the tiller axis at health 0
   SHRIVEL_FRACTION         final fraction of health over which a leaf shrivels to DECLINE_RESIDUAL and droops
+                           (1: gradually over the whole decline, from health 1 to 0)
   SHRIVEL_ANGLE_DEG, SHRIVEL_ARCH_RAD      extra angle and arch reached at the end of the shrivel
   DECLINE_RESIDUAL         size of a dead leaf relative to its healthy size
   V_DEAD                   vitality at which every leaf is dead; below it the plant fades and cannot revive
@@ -98,6 +103,8 @@ extern(
     LIVE_LEAVES = 3,
     MAX_TILLERS = 4,
     TILLER_DELAY = 3,
+    TILLER_EMERGENCE_JITTER = 0.6,
+    TILLER_PHYLLOCHRON_JITTER = 0.15,
     TILLER_SIZE_SCALE = 0.9,
     CROWN_RADIUS_M = 0.004,
     TILLER_SPLAY_DEG = 12.0,
@@ -130,12 +137,13 @@ extern(
     ARCH_OLD_RAD = 0.9,
     ARCH_AGE = 3.0,
     SENESCENCE_DURATION = 2.0,
-    SHRIVEL_FRACTION = 0.3,
+    SENESCENCE_JITTER = 0.2,
+    SHRIVEL_FRACTION = 1.0,
     SHRIVEL_ANGLE_DEG = 25.0,
     SHRIVEL_ARCH_RAD = 0.8,
     FADE_DURATION = 0.5,
-    PREVIEW_DECLINE = 4.0,
-    DECLINE_RESIDUAL = 0.5,
+    PREVIEW_DECLINE = 6.0,
+    DECLINE_RESIDUAL = 0.7,
     V_DEAD = 0.15,
     DECLINE_AGE_SPREAD = 0.4,
     DECLINE_AGE_REF = 3.0,
@@ -143,12 +151,18 @@ extern(
     DECLINE_SPLAY_DEG = 25.0,
 )
 
-PHYLLOCHRON = 1.0  # time is measured in phyllochrons, so the interval between two leaves is 1 by definition
+PHYLLOCHRON = 1.0  # time is measured in main-shoot phyllochrons, so its interval between two leaves is 1
 UP = (0.0, 0.0, 1.0)
 EPS = 1e-9
 for _name in ("DT", "SENESCENCE_DURATION", "FADE_DURATION"):
     if not globals()[_name] > 0:
         raise ValueError("%s must be positive, got %r" % (_name, globals()[_name]))
+for _name in ("TILLER_EMERGENCE_JITTER", "TILLER_PHYLLOCHRON_JITTER", "SENESCENCE_JITTER"):
+    if not globals()[_name] >= 0:
+        raise ValueError("%s must be >= 0, got %r" % (_name, globals()[_name]))
+for _name in ("TILLER_PHYLLOCHRON_JITTER", "SENESCENCE_JITTER"):
+    if not globals()[_name] < 1:
+        raise ValueError("%s must be < 1 so every duration stays positive, got %r" % (_name, globals()[_name]))
 DECLINE = decline.DeclineParams.from_mapping(globals())
 
 
@@ -173,7 +187,8 @@ def jitter(rel):
 # Birth state outside the L-string, fixed once drawn. Reset in Start() so a GUI rewind replays the same plant.
 RNG = random.Random(SEED)
 TILLER_O = {}     # tiller id -> its organ fields (fixed at birth)
-LEAF_DRAWS = {}   # leaf id -> random draws made at birth
+LEAF_DRAWS = {}   # leaf id -> random draws and birth time, fixed at birth
+TILLER_DRAWS = {}  # tiller id -> emergence delay and phyllochron, drawn once from the tiller's own streams
 NEWEST_RANK = {}  # tiller id -> rank of its newest leaf once this step's emissions are done (see EndEach)
 STATE_TIME = 0.0  # time of the current L-string, read by the decline preview (set in EndEach)
 
@@ -184,6 +199,7 @@ def reset():
     STATE_TIME = 0.0
     TILLER_O.clear()
     LEAF_DRAWS.clear()
+    TILLER_DRAWS.clear()
     NEWEST_RANK.clear()
     TILLER_O[0] = {"base": [0.0, 0.0, 0.0], "direction": list(UP), "azimuth_rad": BASE_AZIMUTH_RAD,
                    "splay_rad": 0.0}
@@ -237,6 +253,39 @@ def leaf_id(tiller, rank):
     return "L%d.%d" % (tiller, rank)
 
 
+def tiller_draws(tiller):
+    """A tiller's emergence delay and phyllochron (G20), each from its own seeded stream, so RNG is untouched."""
+    if tiller not in TILLER_DRAWS:
+        if tiller == 0:
+            TILLER_DRAWS[0] = {"emergence_delay": 0.0, "phyllochron": PHYLLOCHRON}
+        else:
+            TILLER_DRAWS[tiller] = {
+                "emergence_delay": random.Random("emergence:%d:T%d" % (SEED, tiller)).uniform(
+                    0.0, TILLER_EMERGENCE_JITTER),
+                "phyllochron": PHYLLOCHRON * (1.0 + random.Random("phyllochron:%d:T%d" % (SEED, tiller)).uniform(
+                    -TILLER_PHYLLOCHRON_JITTER, TILLER_PHYLLOCHRON_JITTER)),
+            }
+    return TILLER_DRAWS[tiller]
+
+
+def trigger_time(rank):
+    """Birth time of the main-shoot leaf that triggers the bud in leaf rank's axil, or None while it is unborn.
+
+    In the step the trigger leaf appears, the bud's production runs before the main Apex's (buds sit left of it in
+    the string), so the leaf is not drawn yet and NEWEST_RANK tells that it appears now.
+    """
+    trigger = LEAF_DRAWS.get(leaf_id(0, rank + TILLER_DELAY))
+    if trigger is not None:
+        return trigger["birth_time"]
+    return now() if NEWEST_RANK.get(0, 0) >= rank + TILLER_DELAY else None
+
+
+def bud_emerges(rank):
+    """Whether the bud in main-shoot leaf rank's axil becomes a tiller in this step (trigger plus its delay)."""
+    t = trigger_time(rank)
+    return t is not None and now() >= t + tiller_draws(rank)["emergence_delay"] - DT / 2
+
+
 def new_leaf(tiller, rank):
     """Draw a new leaf's randomness and return its first Leaf parameters (age DT after this step)."""
     tiller_az = TILLER_O[tiller]["azimuth_rad"]
@@ -249,8 +298,11 @@ def new_leaf(tiller, rank):
         "sheath_m": rank_value(rank, SHEATH_RANK1_M, SHEATH_PLATEAU_M) * scale * jitter(SHEATH_JITTER),
         "blade_m": rank_value(rank, BLADE_RANK1_M, BLADE_PLATEAU_M) * scale * jitter(BLADE_JITTER),
         "width_m": rank_value(rank, WIDTH_RANK1_M, WIDTH_PLATEAU_M) * scale * jitter(WIDTH_JITTER),
-        # Own stream per leaf, seeded from SEED and the id, so adding it left every draw of RNG unchanged.
+        # Own streams per leaf, seeded from SEED and the id, so adding them left every draw of RNG unchanged.
         "decline_draw": random.Random("decline:%d:%s" % (SEED, lid)).uniform(-1.0, 1.0),
+        "senescence_duration": SENESCENCE_DURATION * (1.0 + random.Random("senescence:%d:%s" % (SEED, lid)).uniform(
+            -SENESCENCE_JITTER, SENESCENCE_JITTER)),
+        "birth_time": now(),
     }
     return lid, now(), DT, "growing", leaf_o(lid, tiller, DT, "growing", 0.0, 0.0)
 
@@ -295,12 +347,12 @@ def leaf_o(lid, tiller, age, state, sen, fade):
     }
 
 
-def next_state(tiller, rank, age, state, sen, fade):
+def next_state(lid, tiller, rank, age, state, sen, fade):
     """Leaf life cycle growing -> mature -> senescent (turnover) -> dead -> faded; returns state, senescence, fade."""
     if state in ("growing", "mature") and NEWEST_RANK.get(tiller, rank) - rank < LIVE_LEAVES:
         return ("mature" if age >= MATURE_AGE - EPS else "growing"), 0.0, 0.0
     if state != "dead":  # turning senescent this step (sen is 0) or already senescent
-        sen = min(sen + DT / SENESCENCE_DURATION, 1.0)
+        sen = min(sen + DT / LEAF_DRAWS[lid]["senescence_duration"], 1.0)
         return ("dead", 1.0, 0.0) if sen >= 1.0 - EPS else ("senescent", sen, 0.0)
     fade = min(fade + DT / FADE_DURATION, 1.0)
     return "dead", 1.0, (1.0 if fade >= 1.0 - EPS else fade)
@@ -389,24 +441,24 @@ Apex(tiller, rank, t_next):
     if emits(t_next):
         lid, birth, age, state, o = new_leaf(tiller, rank)
         if tiller == 0 and rank <= MAX_TILLERS:
-            produce Leaf(lid, tiller, rank, birth, age, state, o) Bud(tiller, rank, 0.0) Apex(tiller, rank + 1, t_next + PHYLLOCHRON - DT)
-        produce Leaf(lid, tiller, rank, birth, age, state, o) Apex(tiller, rank + 1, t_next + PHYLLOCHRON - DT)
+            produce Leaf(lid, tiller, rank, birth, age, state, o) Bud(tiller, rank, 0.0) Apex(tiller, rank + 1, t_next + tiller_draws(tiller)["phyllochron"] - DT)
+        produce Leaf(lid, tiller, rank, birth, age, state, o) Apex(tiller, rank + 1, t_next + tiller_draws(tiller)["phyllochron"] - DT)
     produce Apex(tiller, rank, t_next - DT)
 
 Bud(tiller, rank, age):
     if frozen():
         produce Bud(tiller, rank, age)
-    if NEWEST_RANK.get(0, 0) >= rank + TILLER_DELAY:
+    if bud_emerges(rank):
         o = new_tiller(rank, rank)
         lid, birth, leaf_age, state, leaf = new_leaf(rank, 1)
-        produce Tiller(rank, rank, now(), o) Leaf(lid, rank, 1, birth, leaf_age, state, leaf) Apex(rank, 2, PHYLLOCHRON - DT)
+        produce Tiller(rank, rank, now(), o) Leaf(lid, rank, 1, birth, leaf_age, state, leaf) Apex(rank, 2, tiller_draws(rank)["phyllochron"] - DT)
     produce Bud(tiller, rank, age + DT)
 
 Leaf(lid, tiller, rank, birth, age, state, o):
     if frozen():
         produce Leaf(lid, tiller, rank, birth, age, state, o)
     new_age = age + DT
-    new_state, sen, fade = next_state(tiller, rank, new_age, state, o["senescence"], o["fade"])
+    new_state, sen, fade = next_state(lid, tiller, rank, new_age, state, o["senescence"], o["fade"])
     produce Leaf(lid, tiller, rank, birth, new_age, new_state, leaf_o(lid, tiller, new_age, new_state, sen, fade))
 
 interpretation:

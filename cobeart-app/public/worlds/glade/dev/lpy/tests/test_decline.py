@@ -279,6 +279,7 @@ def vertex_inputs(leaf: dict[str, object], tiller: dict[str, object], kind: int,
     assert isinstance(tid, int)
     return dc.VertexInputs(
         kind=kind, s=s, collar=tuple(leaf["attach"]), side=leaf_side(az, axis),  # type: ignore[arg-type]
+        axis=tuple(leaf["direction"] if kind == dc.KIND_BLADE else axis),  # type: ignore[arg-type]
         tiller_base=tuple(tiller["base"]), tiller_axis=tuple(axis),  # type: ignore[arg-type]
         tiller_azimuth=t_az, tiller=tid, birth_time=BIRTH, decline_draw=draw, senescence=sen, fade=fade,
         arch_rad=arch)
@@ -404,11 +405,41 @@ def test_declined_vertex_bad_inputs_raise() -> None:
     ]:
         with pytest.raises(ValueError, match=message):
             replace(good, **{field: value})
-    with pytest.raises(ValueError, match="birth_time"):
-        dc.declined_vertex(leaf["attach"], good, BIRTH - 0.1, 1.0, P_DEFAULT)
+    with pytest.raises(ValueError, match="axis must be a unit vector"):
+        replace(good, axis=(0.0, 0.0, 2.0))
+    with pytest.raises(ValueError, match="time must be finite"):
+        dc.declined_vertex(leaf["attach"], good, math.nan, 1.0, P_DEFAULT)
     with pytest.raises(ValueError, match="v must be in"):
         dc.declined_vertex(leaf["attach"], good, TIME, 1.5, P_DEFAULT)
     with pytest.raises(ValueError, match="'position' must be 3 numbers"):
         dc.declined_vertex([0.0, 0.0], good, TIME, 1.0, P_DEFAULT)
     with pytest.raises(ValueError, match="beyond the chord approximation"):
         dc.chord_factor(5.0, 1.0)
+
+
+@pytest.mark.parametrize("tiller", [0, 2])
+def test_declined_vertex_wind_pivot_and_axis_match_declined_leaf(tiller: int) -> None:
+    for sen in (0.0, 0.5, 1.0):
+        leaf, t = dict(leaf_fields(tiller), senescence=sen), tiller_fields(tiller)
+        base = t["base"]
+        assert isinstance(base, list)
+        for v in (1.0, 0.7, 0.4, 0.2):
+            dl = dc.declined_leaf(leaf, t, v, P_DEFAULT)
+            for s in FRACTIONS:
+                blade = dc.declined_vertex(healthy_midrib(leaf, t, s), vertex_inputs(leaf, t, dc.KIND_BLADE, s),
+                                           TIME, v, P_DEFAULT)
+                assert close(blade.pivot, dl.attach) and close(blade.axis, dl.direction), (sen, v, s)
+            sheath = dc.declined_vertex((0.001, 0.0, 0.02), vertex_inputs(leaf, t, dc.KIND_SHEATH, 0.4), TIME, v,
+                                        P_DEFAULT)
+            assert close(sheath.pivot, base) and close(sheath.axis, dl.tiller_axis), (sen, v)
+
+
+def test_declined_vertex_before_birth_is_age_zero() -> None:
+    """An unborn leaf of a fixed-topology build has a later birth_time; its age clamps at 0."""
+    leaf, t = leaf_fields(1), tiller_fields(1)
+    vin = vertex_inputs(leaf, t, dc.KIND_BLADE, 1.0)
+    point = healthy_midrib(leaf, t, 1.0)
+    for v in (1.0, 0.6, 0.3):
+        early = dc.declined_vertex(point, vin, BIRTH - 2.0, v, P_DEFAULT)
+        at_birth = dc.declined_vertex(point, vin, BIRTH, v, P_DEFAULT)
+        assert early == at_birth

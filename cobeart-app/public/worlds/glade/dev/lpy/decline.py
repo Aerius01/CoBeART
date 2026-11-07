@@ -88,7 +88,6 @@ class DeclinedLeaf:
 
 
 KIND_SHEATH, KIND_BLADE = 0, 1
-TIME_TOLERANCE = 1e-6  # sample times and birth times are rounded, so a leaf born at the sample time may be "early"
 UNIT_TOLERANCE = 1e-6
 
 
@@ -99,6 +98,7 @@ class VertexInputs:
     s: float                # 0..1 along the organ, base to tip
     collar: Vec3            # the leaf's healthy collar (its attach)
     side: Vec3              # unit axis of the leaf's angle and arch, through the collar (healthy frame)
+    axis: Vec3              # unit _AXIS: the healthy leaf direction for a blade, the tiller axis for a sheath
     tiller_base: Vec3
     tiller_axis: Vec3       # unit healthy tiller axis
     tiller_azimuth: float   # the tiller's azimuth_rad; it leans about (-sin az, cos az, 0)
@@ -118,9 +118,9 @@ class VertexInputs:
             raise ValueError(f"vertex kind must be {KIND_SHEATH} (sheath) or {KIND_BLADE} (blade), got {self.kind}")
         if self.tiller < 0:
             raise ValueError(f"vertex tiller must be >= 0, got {self.tiller}")
-        for name in ("collar", "side", "tiller_base", "tiller_axis"):
+        for name in ("collar", "side", "axis", "tiller_base", "tiller_axis"):
             object.__setattr__(self, name, _vec3("vertex", {name: getattr(self, name)}, name))
-        for name in ("side", "tiller_axis"):
+        for name in ("side", "axis", "tiller_axis"):
             n = math.sqrt(sum(c * c for c in getattr(self, name)))
             if abs(n - 1.0) > UNIT_TOLERANCE:
                 raise ValueError(f"vertex {name} must be a unit vector, got {getattr(self, name)} (length {n})")
@@ -135,6 +135,8 @@ class VertexInputs:
 @dataclass(frozen=True)
 class DeclinedVertex:
     position: Vec3
+    pivot: Vec3      # wind pivot: blade, the declined collar; sheath, the tiller base
+    axis: Vec3       # wind axis: blade, the declined leaf direction; sheath, the leaned tiller axis
     browning: float  # 0 green, 1 brown
     opacity: float   # 1 opaque, 0 gone
 
@@ -229,7 +231,7 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return min(max(x, lo), hi)
 
 
-def _smoothstep(x: float) -> float:
+def smoothstep(x: float) -> float:
     x = _clamp(x, 0.0, 1.0)
     return x * x * (3.0 - 2.0 * x)
 
@@ -263,7 +265,7 @@ def health(senescence: float, v: float, age: float, decline_draw: float, p: Decl
 def look(h: float, p: DeclineParams) -> Look:
     """Deformation of a leaf's healthy shape at health h; identity at h = 1."""
     _unit("h", h)
-    shrivel = _smoothstep(1.0 - h / p.SHRIVEL_FRACTION)
+    shrivel = smoothstep(1.0 - h / p.SHRIVEL_FRACTION)
     return Look(
         size_scale=1.0 + (p.DECLINE_RESIDUAL - 1.0) * shrivel,
         extra_angle_rad=math.radians(p.ANGLE_SENESCENT_DEG * (1.0 - h) + p.SHRIVEL_ANGLE_DEG * shrivel),
@@ -281,7 +283,7 @@ def plant_fade(v: float, p: DeclineParams) -> float:
 def tiller_lean_rad(v: float, p: DeclineParams) -> float:
     """Extra outward splay of a tiller (not the main shoot), full at V_DEAD."""
     _unit("v", v)
-    return math.radians(p.DECLINE_SPLAY_DEG) * _smoothstep((1.0 - v) / (1.0 - p.V_DEAD))
+    return math.radians(p.DECLINE_SPLAY_DEG) * smoothstep((1.0 - v) / (1.0 - p.V_DEAD))
 
 
 def opacity(leaf_fade: float, v: float, p: DeclineParams) -> float:
@@ -330,7 +332,8 @@ def chord_factor(arch: float, s: float) -> float:
     """Chord length from the collar to fraction s of a blade bent by arch * u^2, relative to the arc length.
 
     Second order in the bend: 1 - 2 arch^2 s^4 / 45 (the variance of the bend angle over [0, s] is
-    4 arch^2 s^4 / 45). Accurate to well under 1% for arch up to about 2 rad.
+    4 arch^2 s^4 / 45). Accurate to well under 1% for arch up to about 2 rad. It raises where the factor is not
+    positive (arch above about 4.7 rad at the tip); the GLSL port clamps it to a small positive value instead.
     """
     f = 1.0 - 2.0 * arch * arch * s ** 4 / 45.0
     if f <= 0.0:
@@ -346,23 +349,33 @@ def declined_vertex(position: Sequence[float], vin: VertexInputs, time: float, v
     vertex moves with the scaled collar, and its offset from the collar is scaled by the size scale and by the
     chord shortening of the extra arch, then rotated about `side` through the collar by the extra angle plus
     extra_arch * s^2 / 3 (the mean extra bend up to s). A tiller other than the main shoot then leans rigidly
-    about its base, as in declined_leaf.
+    about its base, as in declined_leaf. The age is time - birth_time, clamped at 0 (an unborn leaf of a
+    fixed-topology build has a later birth_time; the GLSL clamps the same way).
+
+    Notes for the GLSL port: each blade row turns rigidly by the mean extra bend up to its s rather than by the
+    local bend, so the cross-section shears slightly against the midrib (by design; the arch error stays within
+    the tested 2% bound). Normals are not transformed here; the shader rotates them itself.
     """
     pos = _vec3("vertex", {"position": position}, "position")
-    if not math.isfinite(time) or time < vin.birth_time - TIME_TOLERANCE:
-        raise ValueError(f"time must be finite and >= the leaf's birth_time {vin.birth_time}, got {time}")
+    if not math.isfinite(time):
+        raise ValueError(f"time must be finite, got {time}")
     age = max(time - vin.birth_time, 0.0)
     lk = look(health(vin.senescence, v, age, vin.decline_draw, p), p)
-    base, axis = vin.tiller_base, vin.tiller_axis
-    rel = _sub(pos, base)
+    base, tiller_axis = vin.tiller_base, vin.tiller_axis
     if vin.kind == KIND_SHEATH:
-        drawn = _add(pos, _scaled(axis, _dot(rel, axis) * (lk.size_scale - 1.0)))
+        drawn = _add(pos, _scaled(tiller_axis, _dot(_sub(pos, base), tiller_axis) * (lk.size_scale - 1.0)))
+        pivot, axis = base, tiller_axis
     else:
         collar = _add(base, _scaled(_sub(vin.collar, base), lk.size_scale))
         k = lk.size_scale * chord_factor(vin.arch_rad + lk.extra_arch_rad, vin.s) / chord_factor(vin.arch_rad, vin.s)
         offset = _scaled(_sub(pos, vin.collar), k)
         drawn = _add(collar, rotate(offset, vin.side, lk.extra_angle_rad + lk.extra_arch_rad * vin.s ** 2 / 3.0))
+        pivot, axis = collar, rotate(vin.axis, vin.side, lk.extra_angle_rad)
     if vin.tiller != 0:
         lean_axis = (-math.sin(vin.tiller_azimuth), math.cos(vin.tiller_azimuth), 0.0)
-        drawn = _add(base, rotate(_sub(drawn, base), lean_axis, tiller_lean_rad(v, p)))
-    return DeclinedVertex(position=drawn, browning=lk.browning, opacity=opacity(vin.fade, v, p))
+        lean = tiller_lean_rad(v, p)
+        drawn = _add(base, rotate(_sub(drawn, base), lean_axis, lean))
+        pivot = _add(base, rotate(_sub(pivot, base), lean_axis, lean))
+        axis = rotate(axis, lean_axis, lean)
+    return DeclinedVertex(position=drawn, pivot=pivot, axis=axis, browning=lk.browning,
+                          opacity=opacity(vin.fade, v, p))

@@ -1,12 +1,13 @@
-"""Decline rule of the Glade grass (GP roadmap, Phase 2, G10 to G14; per vertex, Phase 3, G23 and G32): pure
-functions, stdlib only.
+"""Decline rule of the Glade grass (GP roadmap, Phase 2, G10 to G14; per vertex, Phase 3, G23, G32 and G35):
+pure functions, stdlib only.
 
 A plant has a vitality v (1 healthy, 0 gone), independent of its growth. Each leaf has a health h (1 healthy,
 0 dead) from its turnover senescence and from v, and one look maps h onto the leaf's healthy shape. The same
 rule runs in grass.lpy's preview, in Phase 3's Blender generator and, mirrored in GLSL, in Phase 5's shader.
 declined_leaf is the whole composition for one leaf, so consumers call it rather than rebuilding it.
 declined_vertex is the same rule applied to one vertex of the healthy mesh, the Python reference of the shader:
-exact for the collar, sizes, angle and tiller lean, and a closed-form approximation of the extra arch.
+exact for the collar, the sheath, the sizes and the tiller lean, and a closed-form approximation of the blade's
+extra bend (the collar bend toward the leaf angle plus the arch, G35).
 The field names of DeclineParams are the extern names of grass.lpy, so an export's `params` builds it.
 """
 from __future__ import annotations
@@ -328,33 +329,93 @@ def declined_leaf(leaf: Mapping[str, object], tiller: Mapping[str, object], v: f
     )
 
 
-def chord_factor(arch: float, s: float) -> float:
-    """Chord length from the collar to fraction s of a blade bent by arch * u^2, relative to the arc length.
+SMOOTHSTEP_POLY: tuple[float, ...] = (0.0, 0.0, 3.0, -2.0)  # smoothstep(x) = 3 x^2 - 2 x^3 on [0, 1]
 
-    Second order in the bend: 1 - 2 arch^2 s^4 / 45 (the variance of the bend angle over [0, s] is
-    4 arch^2 s^4 / 45). Accurate to well under 1% for arch up to about 2 rad. It raises where the factor is not
-    positive (arch above about 4.7 rad at the tip); the GLSL port clamps it to a small positive value instead.
+
+def _poly_mul(a: Sequence[float], b: Sequence[float]) -> tuple[float, ...]:
+    out = [0.0] * (len(a) + len(b) - 1)
+    for i, x in enumerate(a):
+        for j, y in enumerate(b):
+            out[i + j] += x * y
+    return tuple(out)
+
+
+def _profile_moment(i: int, j: int, s: float, collar_bend: float) -> float:
+    """Mean over u in [0, s] of b(u)^i u^(2 j), with b(u) = smoothstep(u / collar_bend) (polynomial integrals)."""
+    c = collar_bend
+    poly: tuple[float, ...] = (1.0,)
+    for _ in range(i):
+        poly = _poly_mul(poly, SMOOTHSTEP_POLY)
+    poly = _poly_mul(poly, (0.0,) * (2 * j) + (1.0,))
+    x_top = min(s, c) / c
+    total = c ** (2 * j + 1) * sum(coef * x_top ** (k + 1) / (k + 1) for k, coef in enumerate(poly))
+    if s > c:
+        total += (s ** (2 * j + 1) - c ** (2 * j + 1)) / (2 * j + 1)
+    return total / s
+
+
+def _check_bend_args(s: float, collar_bend: float) -> None:
+    if not (math.isfinite(s) and 0.0 <= s <= 1.0):
+        raise ValueError(f"s must be in [0, 1], got {s}")
+    if not (math.isfinite(collar_bend) and collar_bend > 0.0):
+        raise ValueError(f"collar_bend must be a finite number > 0, got {collar_bend}; pass GeometryParams.collar_bend")
+
+
+def bend_mean(s: float, collar_bend: float) -> float:
+    """Mean of smoothstep(u / collar_bend) over u in [0, s] (0 at s = 0): the collar bend's share of the mean angle."""
+    _check_bend_args(s, collar_bend)
+    return 0.0 if s == 0.0 else _profile_moment(1, 0, s, collar_bend)
+
+
+def bend_cumulants(angle: float, arch: float, s: float, collar_bend: float) -> tuple[float, float, float]:
+    """Mean, variance and third central moment of the midrib angle over u in [0, s] (G35).
+
+    The midrib angle from the tiller axis at blade fraction u is angle * smoothstep(u / collar_bend) + arch * u^2,
+    with u uniform on [0, s]; all three are polynomial integrals, so the GLSL port can expand them. (0, 0, 0) at s = 0.
     """
-    f = 1.0 - 2.0 * arch * arch * s ** 4 / 45.0
-    if f <= 0.0:
-        raise ValueError(f"arch {arch} at s = {s} is beyond the chord approximation (factor {f})")
-    return f
+    _check_bend_args(s, collar_bend)
+    if s == 0.0:
+        return 0.0, 0.0, 0.0
+
+    def m(i: int, j: int) -> float:
+        return _profile_moment(i, j, s, collar_bend)
+
+    a, b = angle, arch
+    e1 = a * m(1, 0) + b * m(0, 1)
+    e2 = a * a * m(2, 0) + 2.0 * a * b * m(1, 1) + b * b * m(0, 2)
+    e3 = a ** 3 * m(3, 0) + 3.0 * a * a * b * m(2, 1) + 3.0 * a * b * b * m(1, 2) + b ** 3 * m(0, 3)
+    return e1, e2 - e1 * e1, e3 - 3.0 * e1 * e2 + 2.0 * e1 ** 3
 
 
-def declined_vertex(position: Sequence[float], vin: VertexInputs, time: float, v: float,
-                    p: DeclineParams) -> DeclinedVertex:
-    """One healthy-mesh vertex as drawn at vitality v and growth time `time` (G32, G23).
+def chord_change(angle: float, arch: float, extra_angle: float, extra_arch: float, s: float,
+                 collar_bend: float) -> tuple[float, float]:
+    """Turn (rad) and length factor of the midrib chord from the collar to fraction s when the bend grows (G35).
 
-    A sheath vertex scales its component along the tiller axis, from the tiller base, by the size scale. A blade
-    vertex moves with the scaled collar, and its offset from the collar is scaled by the size scale and by the
-    chord shortening of the extra arch, then rotated about `side` through the collar by the extra angle plus
-    extra_arch * s^2 / 3 (the mean extra bend up to s). A tiller other than the main shoot then leans rigidly
-    about its base, as in declined_leaf. The age is time - birth_time, clamped at 0 (an unborn leaf of a
-    fixed-topology build has a later birth_time; the GLSL clamps the same way).
+    For a bend angle spread with mean mu, variance k2 and third central moment k3 over [0, s], the chord points at
+    about mu - k3 / 6 and is shortened by about exp(-k2 / 2) relative to the arc; the change from the healthy to the
+    declined profile is returned. Within 1.4% of the blade length at the defaults' extremes (tested).
+    """
+    mu_h, k2_h, k3_h = bend_cumulants(angle, arch, s, collar_bend)
+    mu_d, k2_d, k3_d = bend_cumulants(angle + extra_angle, arch + extra_arch, s, collar_bend)
+    return (mu_d - k3_d / 6.0) - (mu_h - k3_h / 6.0), math.exp(-(k2_d - k2_h) / 2.0)
 
-    Notes for the GLSL port: each blade row turns rigidly by the mean extra bend up to its s rather than by the
-    local bend, so the cross-section shears slightly against the midrib (by design; the arch error stays within
-    the tested 2% bound). Normals are not transformed here; the shader rotates them itself.
+
+def declined_vertex(position: Sequence[float], vin: VertexInputs, time: float, v: float, p: DeclineParams,
+                    collar_bend: float) -> DeclinedVertex:
+    """One healthy-mesh vertex as drawn at vitality v and growth time `time` (G32, G35).
+
+    A sheath vertex scales uniformly about the tiller base by the size scale, so the sheath's radius shrinks with
+    its length and its top row stays the blade's first row. A blade vertex moves with the scaled collar; its offset
+    from the collar is scaled by the size scale and by the chord change of the grown bend, then turned about `side`
+    through the collar by the chord turn (chord_change: the extra angle enters through the collar bend over
+    collar_bend of the blade, the extra arch along the whole blade; both are 0 at s = 0, so the collar row equals
+    the scaled sheath top). The leaf's healthy angle from its tiller axis is acos(axis . tiller_axis). A tiller other
+    than the main shoot then leans rigidly about its base, as in declined_leaf. The age is time - birth_time,
+    clamped at 0 (an unborn leaf of a fixed-topology build has a later birth_time; the GLSL clamps the same way).
+
+    Notes for the GLSL port: each blade row turns rigidly by its chord turn rather than by the local bend, so the
+    cross-section shears slightly against the midrib (by design; the tip stays within the tested 2% bound).
+    collar_bend is a uniform (GeometryParams.collar_bend). Normals are not transformed here; the shader rotates them.
     """
     pos = _vec3("vertex", {"position": position}, "position")
     if not math.isfinite(time):
@@ -363,13 +424,14 @@ def declined_vertex(position: Sequence[float], vin: VertexInputs, time: float, v
     lk = look(health(vin.senescence, v, age, vin.decline_draw, p), p)
     base, tiller_axis = vin.tiller_base, vin.tiller_axis
     if vin.kind == KIND_SHEATH:
-        drawn = _add(pos, _scaled(tiller_axis, _dot(_sub(pos, base), tiller_axis) * (lk.size_scale - 1.0)))
+        drawn = _add(base, _scaled(_sub(pos, base), lk.size_scale))
         pivot, axis = base, tiller_axis
     else:
         collar = _add(base, _scaled(_sub(vin.collar, base), lk.size_scale))
-        k = lk.size_scale * chord_factor(vin.arch_rad + lk.extra_arch_rad, vin.s) / chord_factor(vin.arch_rad, vin.s)
-        offset = _scaled(_sub(pos, vin.collar), k)
-        drawn = _add(collar, rotate(offset, vin.side, lk.extra_angle_rad + lk.extra_arch_rad * vin.s ** 2 / 3.0))
+        angle = math.acos(_clamp(_dot(vin.axis, tiller_axis), -1.0, 1.0))
+        turn, shorten = chord_change(angle, vin.arch_rad, lk.extra_angle_rad, lk.extra_arch_rad, vin.s, collar_bend)
+        offset = _scaled(_sub(pos, vin.collar), lk.size_scale * shorten)
+        drawn = _add(collar, rotate(offset, vin.side, turn))
         pivot, axis = collar, rotate(vin.axis, vin.side, lk.extra_angle_rad)
     if vin.tiller != 0:
         lean_axis = (-math.sin(vin.tiller_azimuth), math.cos(vin.tiller_azimuth), 0.0)

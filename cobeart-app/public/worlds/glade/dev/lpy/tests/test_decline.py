@@ -238,7 +238,7 @@ def test_declined_leaf_bad_fields_raise() -> None:
         dc.declined_leaf(dict(leaf_fields(1), blade_width_m=math.nan), tiller_fields(1), 1.0, P)
 
 
-# Per-vertex rule (G23, G32), checked against declined_leaf on a blade built the way G22 builds it.
+# Per-vertex rule (G23, G32, G35), checked against declined_leaf on a leaf built the way G35 builds it.
 
 P_DEFAULT = dc.DeclineParams(  # grass.lpy's defaults
     V_DEAD=0.15, DECLINE_AGE_SPREAD=0.4, DECLINE_AGE_REF=3.0, DECLINE_JITTER=0.1, DECLINE_RESIDUAL=0.7,
@@ -246,25 +246,32 @@ P_DEFAULT = dc.DeclineParams(  # grass.lpy's defaults
     ANGLE_SENESCENT_DEG=12.0, SHRIVEL_ANGLE_DEG=25.0, SHRIVEL_ARCH_RAD=0.8, DECLINE_SPLAY_DEG=25.0,
 )
 BIRTH, TIME = 4.0, 6.5  # leaf_fields has age 2.5
-ARCH_BOUND = 0.02  # tip error relative to the declined blade length (G23 amendment)
+COLLAR_BEND = 0.15  # GeometryParams.collar_bend (G35)
+RADIUS = 0.002  # sheath radius at the collar; the midrib starts on the outer wall
+ARCH_BOUND = 0.02  # tip error relative to the declined blade length (G23, G35)
 MIDRIB_STEPS = 2000
-FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
+FRACTIONS = (0.0, 0.1, 0.25, 0.5, 0.75, 1.0)
 Vec = tuple[float, float, float]
 
 
-def leaf_side(azimuth: float, tiller_axis: object) -> Vec:
+def leaf_frame(azimuth: float, tiller_axis: object) -> tuple[Vec, Vec]:
+    """The leaf's side (bend) axis and its outward direction, both in the tiller's frame."""
     assert isinstance(tiller_axis, (list, tuple))
-    return dc.unit(dc.to_tiller_frame((-math.sin(azimuth), math.cos(azimuth), 0.0), tiller_axis))
+    side = dc.unit(dc.to_tiller_frame((-math.sin(azimuth), math.cos(azimuth), 0.0), tiller_axis))
+    out = dc.unit(dc.to_tiller_frame((math.cos(azimuth), math.sin(azimuth), 0.0), tiller_axis))
+    return side, out
 
 
-def midrib(collar: object, direction: object, side: Vec, length: float, arch: float, s: float) -> Vec:
-    """Exact (midpoint rule) midrib point at fraction s: direction bent about side by arch * u^2 (G22)."""
-    assert isinstance(collar, (list, tuple)) and isinstance(direction, (list, tuple))
+def midrib(collar: object, tiller_axis: object, azimuth: float, radius: float, length: float, angle: float,
+           arch: float, s: float) -> Vec:
+    """Exact (fine midpoint rule) G35 midrib point at fraction s, from the outer wall at the collar."""
+    assert isinstance(collar, (list, tuple)) and isinstance(tiller_axis, (list, tuple))
+    side, out = leaf_frame(azimuth, tiller_axis)
     n = max(1, round(MIDRIB_STEPS * s))
-    point = [float(c) for c in collar]
+    point = [float(collar[k]) + out[k] * radius for k in range(3)]
     for i in range(n):
         u = (i + 0.5) / n * s
-        d = dc.rotate(direction, side, arch * u * u)
+        d = dc.rotate(tiller_axis, side, angle * dc.smoothstep(u / COLLAR_BEND) + arch * u * u)
         point = [point[k] + d[k] * length * s / n for k in range(3)]
     return (point[0], point[1], point[2])
 
@@ -278,7 +285,7 @@ def vertex_inputs(leaf: dict[str, object], tiller: dict[str, object], kind: int,
     tid = leaf["tiller"]
     assert isinstance(tid, int)
     return dc.VertexInputs(
-        kind=kind, s=s, collar=tuple(leaf["attach"]), side=leaf_side(az, axis),  # type: ignore[arg-type]
+        kind=kind, s=s, collar=tuple(leaf["attach"]), side=leaf_frame(az, axis)[0],  # type: ignore[arg-type]
         axis=tuple(leaf["direction"] if kind == dc.KIND_BLADE else axis),  # type: ignore[arg-type]
         tiller_base=tuple(tiller["base"]), tiller_axis=tuple(axis),  # type: ignore[arg-type]
         tiller_azimuth=t_az, tiller=tid, birth_time=BIRTH, decline_draw=draw, senescence=sen, fade=fade,
@@ -286,22 +293,58 @@ def vertex_inputs(leaf: dict[str, object], tiller: dict[str, object], kind: int,
 
 
 def healthy_midrib(leaf: dict[str, object], tiller: dict[str, object], s: float) -> Vec:
-    length, arch, az = leaf["blade_length_m"], leaf["arch_rad"], leaf["azimuth_rad"]
-    assert isinstance(length, float) and isinstance(arch, float) and isinstance(az, float)
-    return midrib(leaf["attach"], leaf["direction"], leaf_side(az, tiller["direction"]), length, arch, s)
+    length, angle, arch, az = leaf["blade_length_m"], leaf["angle_from_axis_rad"], leaf["arch_rad"], leaf["azimuth_rad"]
+    assert isinstance(length, float) and isinstance(angle, float) and isinstance(arch, float)
+    assert isinstance(az, float)
+    return midrib(leaf["attach"], tiller["direction"], az, RADIUS, length, angle, arch, s)
 
 
 def declined_midrib(leaf: dict[str, object], tiller: dict[str, object], v: float, p: dc.DeclineParams,
                     s: float) -> Vec:
-    """Exact midrib point of the leaf rebuilt from declined_leaf (the leaned frame's side axis)."""
+    """Exact midrib point of the leaf rebuilt from declined_leaf: leaned frame, radius scaled with the sheath."""
     dl = dc.declined_leaf(leaf, tiller, v, p)
-    az = leaf["azimuth_rad"]
-    assert isinstance(az, float)
-    return midrib(dl.attach, dl.direction, leaf_side(az, dl.tiller_axis), dl.blade_length_m, dl.arch_rad, s)
+    angle, az, sen, draw = leaf["angle_from_axis_rad"], leaf["azimuth_rad"], leaf["senescence"], leaf["decline_draw"]
+    assert isinstance(angle, float) and isinstance(az, float) and isinstance(sen, float) and isinstance(draw, float)
+    lk = dc.look(dc.health(sen, v, TIME - BIRTH, draw, p), p)
+    return midrib(dl.attach, dl.tiller_axis, az, RADIUS * lk.size_scale, dl.blade_length_m,
+                  angle + lk.extra_angle_rad, dl.arch_rad, s)
+
+
+def declined(position: Sequence[float], vin: dc.VertexInputs, v: float,
+             p: dc.DeclineParams = P_DEFAULT) -> dc.DeclinedVertex:
+    return dc.declined_vertex(position, vin, TIME, v, p, COLLAR_BEND)
 
 
 def distance(a: Sequence[float], b: Sequence[float]) -> float:
     return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
+def test_bend_mean() -> None:
+    assert dc.bend_mean(0.0, COLLAR_BEND) == 0.0
+    for s in (COLLAR_BEND, 0.3, 0.6, 1.0):
+        assert dc.bend_mean(s, COLLAR_BEND) == pytest.approx(1.0 - COLLAR_BEND / (2.0 * s), abs=1e-12)
+    values = [dc.bend_mean(i / 200, COLLAR_BEND) for i in range(201)]
+    assert all(b >= a for a, b in zip(values, values[1:]))
+    for s in (0.05, 0.1, 0.4):  # against a fine quadrature
+        n = 20000
+        quad = sum(dc.smoothstep((i + 0.5) / n * s / COLLAR_BEND) for i in range(n)) / n
+        assert dc.bend_mean(s, COLLAR_BEND) == pytest.approx(quad, abs=1e-8)
+    with pytest.raises(ValueError, match="collar_bend must be"):
+        dc.bend_mean(0.5, 0.0)
+    with pytest.raises(ValueError, match="s must be in"):
+        dc.bend_mean(1.5, COLLAR_BEND)
+
+
+def test_bend_cumulants_match_quadrature() -> None:
+    n = 20000
+    for angle, arch, s in ((0.5, 0.7, 1.0), (0.9, 1.7, 0.6), (0.3, 0.0, 0.1), (0.0, 0.9, 0.4)):
+        th = [angle * dc.smoothstep((i + 0.5) / n * s / COLLAR_BEND) + arch * ((i + 0.5) / n * s) ** 2
+              for i in range(n)]
+        mean = sum(th) / n
+        k2 = sum((x - mean) ** 2 for x in th) / n
+        k3 = sum((x - mean) ** 3 for x in th) / n
+        assert dc.bend_cumulants(angle, arch, s, COLLAR_BEND) == pytest.approx((mean, k2, k3), abs=1e-7)
+    assert dc.bend_cumulants(0.5, 0.7, 0.0, COLLAR_BEND) == (0.0, 0.0, 0.0)
 
 
 @pytest.mark.parametrize("tiller", [0, 2])
@@ -309,11 +352,10 @@ def test_declined_vertex_healthy_is_identity(tiller: int) -> None:
     leaf, t = leaf_fields(tiller), tiller_fields(tiller)
     for s in FRACTIONS:
         point = healthy_midrib(leaf, t, s)
-        dv = dc.declined_vertex(point, vertex_inputs(leaf, t, dc.KIND_BLADE, s), TIME, 1.0, P_DEFAULT)
+        dv = declined(point, vertex_inputs(leaf, t, dc.KIND_BLADE, s), 1.0)
         assert close(dv.position, point) and dv.browning == 0.0 and dv.opacity == 1.0
     sheath_point = [0.001, -0.002, 0.03]
-    dv = dc.declined_vertex(sheath_point, vertex_inputs(leaf, t, dc.KIND_SHEATH, 0.5), TIME, 1.0, P_DEFAULT)
-    assert close(dv.position, sheath_point)
+    assert close(declined(sheath_point, vertex_inputs(leaf, t, dc.KIND_SHEATH, 0.5), 1.0).position, sheath_point)
 
 
 @pytest.mark.parametrize("tiller", [0, 2])
@@ -322,37 +364,62 @@ def test_declined_vertex_collar_and_look_match_declined_leaf(tiller: int) -> Non
         leaf, t = dict(leaf_fields(tiller), senescence=sen, fade=0.3 if sen == 1.0 else 0.0), tiller_fields(tiller)
         for v in VS[::10]:
             dl = dc.declined_leaf(leaf, t, v, P_DEFAULT)
-            dv = dc.declined_vertex(leaf["attach"], vertex_inputs(leaf, t, dc.KIND_BLADE, 0.0), TIME, v, P_DEFAULT)
+            dv = declined(leaf["attach"], vertex_inputs(leaf, t, dc.KIND_BLADE, 0.0), v)
             assert close(dv.position, dl.attach), (sen, v)
             assert dv.browning == dl.browning and dv.opacity == dl.opacity
 
 
 @pytest.mark.parametrize("tiller", [0, 2])
-def test_declined_blade_within_arch_bound(tiller: int) -> None:
-    """Every midrib point of the declined blade is within ARCH_BOUND of the declined length from the exact one."""
+def test_collar_row_is_the_scaled_sheath_top(tiller: int) -> None:
+    """A collar-row vertex (s = 0) lands where the same point does as a sheath vertex: no tear at the collar (G35)."""
+    leaf, t = dict(leaf_fields(tiller), senescence=0.6), tiller_fields(tiller)
+    collar, az = leaf["attach"], leaf["azimuth_rad"]
+    assert isinstance(collar, list) and isinstance(az, float)
+    side, out = leaf_frame(az, t["direction"])
+    for phi in (0.0, 0.8, 2.0, -2.5):
+        point = [collar[k] + RADIUS * (math.cos(phi) * out[k] + math.sin(phi) * side[k]) for k in range(3)]
+        for v in (1.0, 0.7, 0.4, 0.2):
+            blade = declined(point, vertex_inputs(leaf, t, dc.KIND_BLADE, 0.0), v).position
+            sheath = declined(point, vertex_inputs(leaf, t, dc.KIND_SHEATH, 1.0), v).position
+            assert distance(blade, sheath) <= TOL, (phi, v)
+
+
+def worst_tip_error(tiller: int, angles: Sequence[float], arches: Sequence[float],
+                    extra_arches: Sequence[float], vs: Sequence[float], sen: float = 0.0) -> float:
+    """Largest midrib error over the sweep, relative to the declined blade length."""
     t = tiller_fields(tiller)
-    for arch in (0.0, 0.4, 0.65, 0.9):
-        for extra_arch in (0.2, 0.4, 0.8):
-            p = replace(P_DEFAULT, SHRIVEL_ARCH_RAD=extra_arch)
-            leaf = dict(leaf_fields(tiller), arch_rad=arch, blade_length_m=0.20)
-            for v in (0.8, 0.5, 0.3, P_DEFAULT.V_DEAD):
-                length = dc.declined_leaf(leaf, t, v, p).blade_length_m
-                for s in FRACTIONS:
-                    vin = vertex_inputs(leaf, t, dc.KIND_BLADE, s)
-                    dv = dc.declined_vertex(healthy_midrib(leaf, t, s), vin, TIME, v, p)
-                    error = distance(dv.position, declined_midrib(leaf, t, v, p, s))
-                    assert error < ARCH_BOUND * length, (arch, extra_arch, v, s, error / length)
+    worst = 0.0
+    for angle in angles:
+        for arch in arches:
+            for extra_arch in extra_arches:
+                p = replace(P_DEFAULT, SHRIVEL_ARCH_RAD=extra_arch)
+                leaf = dict(leaf_fields(tiller), angle_from_axis_rad=angle, arch_rad=arch, blade_length_m=0.20,
+                            senescence=sen)
+                axis = t["direction"]
+                assert isinstance(axis, list)
+                leaf["direction"] = list(dc.unit(dc.to_tiller_frame(dc.dir_from(2.0, angle), axis)))
+                for v in vs:
+                    length = dc.declined_leaf(leaf, t, v, p).blade_length_m
+                    for s in FRACTIONS:
+                        dv = declined(healthy_midrib(leaf, t, s), vertex_inputs(leaf, t, dc.KIND_BLADE, s), v, p)
+                        worst = max(worst, distance(dv.position, declined_midrib(leaf, t, v, p, s)) / length)
+    return worst
 
 
-def test_arch_bound_at_the_default_extremes() -> None:
-    """Healthy arch 0.9 plus the full SHRIVEL_ARCH_RAD on a 20 cm blade at health 0 (G23)."""
-    t = tiller_fields(2)
-    leaf = dict(leaf_fields(2), arch_rad=0.9, blade_length_m=0.20, senescence=1.0)
-    dl = dc.declined_leaf(leaf, t, 1.0, P_DEFAULT)
-    assert dl.arch_rad == pytest.approx(0.9 + P_DEFAULT.SHRIVEL_ARCH_RAD)
-    dv = dc.declined_vertex(healthy_midrib(leaf, t, 1.0), vertex_inputs(leaf, t, dc.KIND_BLADE, 1.0), TIME, 1.0,
-                            P_DEFAULT)
-    assert distance(dv.position, declined_midrib(leaf, t, 1.0, P_DEFAULT, 1.0)) < ARCH_BOUND * dl.blade_length_m
+@pytest.mark.parametrize("tiller", [0, 2])
+def test_declined_blade_within_bend_bound(tiller: int) -> None:
+    """Every midrib point of the declined blade is within ARCH_BOUND of the declined length from the exact one."""
+    worst = worst_tip_error(tiller, (0.14, 0.5, 0.92), (0.0, 0.4, 0.65, 0.9), (0.2, 0.4, 0.8),
+                            (0.8, 0.5, 0.3, P_DEFAULT.V_DEAD))
+    print(f"tiller {tiller}: worst midrib error {worst:.4f} of the declined blade length")
+    assert worst < ARCH_BOUND
+
+
+def test_bend_bound_at_the_default_extremes() -> None:
+    """Health 0: the full extra angle (37 deg) and SHRIVEL_ARCH_RAD on a 20 cm blade at the oldest angle and arch."""
+    worst = worst_tip_error(2, (0.92,), (0.9,), (P_DEFAULT.SHRIVEL_ARCH_RAD,), (1.0, P_DEFAULT.V_DEAD), sen=1.0)
+    print(f"default extremes: worst midrib error {worst:.4f} of the declined blade length")
+    assert worst < ARCH_BOUND
 
 
 def test_main_shoot_vertices_never_lean_and_tillers_lean_rigidly() -> None:
@@ -364,8 +431,8 @@ def test_main_shoot_vertices_never_lean_and_tillers_lean_rigidly() -> None:
         points = [(healthy_midrib(leaf, t, s), vertex_inputs(leaf, t, dc.KIND_BLADE, s)) for s in FRACTIONS]
         points.append(((0.001, 0.0, 0.02), vertex_inputs(leaf, t, dc.KIND_SHEATH, 0.4)))
         for v in (0.7, 0.3, 0.1):
-            leaned = [dc.declined_vertex(pt, vin, TIME, v, P_DEFAULT).position for pt, vin in points]
-            upright = [dc.declined_vertex(pt, vin, TIME, v, no_lean).position for pt, vin in points]
+            leaned = [declined(pt, vin, v).position for pt, vin in points]
+            upright = [declined(pt, vin, v, no_lean).position for pt, vin in points]
             if tiller == 0:
                 assert all(close(a, b) for a, b in zip(leaned, upright))
                 continue
@@ -377,20 +444,24 @@ def test_main_shoot_vertices_never_lean_and_tillers_lean_rigidly() -> None:
 
 
 @pytest.mark.parametrize("tiller", [0, 2])
-def test_sheath_vertices_scale_along_the_leaned_axis(tiller: int) -> None:
+def test_sheath_vertices_scale_uniformly_about_the_base(tiller: int) -> None:
+    """The sheath shrinks in length and radius alike (G35); its axis points stay on the leaned axis."""
     leaf, t = dict(leaf_fields(tiller), senescence=0.7), tiller_fields(tiller)
     base, axis = t["base"], t["direction"]
     assert isinstance(base, list) and isinstance(axis, list)
     sheath = 0.05
     vin = vertex_inputs(leaf, t, dc.KIND_SHEATH, 1.0)
+    off_axis = [base[i] + axis[i] * 0.02 + (0.002, -0.001, 0.0)[i] for i in range(3)]
     for v in (1.0, 0.6, 0.2):
         dl = dc.declined_leaf(leaf, t, v, P_DEFAULT)
-        top = dc.declined_vertex([base[i] + axis[i] * sheath for i in range(3)], vin, TIME, v, P_DEFAULT)
-        assert close(top.position, dl.attach)
-        mid = dc.declined_vertex([base[i] + axis[i] * 0.02 for i in range(3)], vin, TIME, v, P_DEFAULT).position
+        scale = dl.sheath_length_m / sheath
+        assert close(declined([base[i] + axis[i] * sheath for i in range(3)], vin, v).position, dl.attach)
+        mid = declined([base[i] + axis[i] * 0.02 for i in range(3)], vin, v).position
         rel = [mid[i] - base[i] for i in range(3)]
         assert close(dc.cross(rel, dl.tiller_axis), (0.0, 0.0, 0.0))  # still on the axis line through the base
-        assert math.sqrt(sum(c * c for c in rel)) == pytest.approx(0.02 * dl.sheath_length_m / sheath)
+        assert math.sqrt(sum(c * c for c in rel)) == pytest.approx(0.02 * scale)
+        moved = declined(off_axis, vin, v).position
+        assert distance(moved, base) == pytest.approx(distance(off_axis, base) * scale, abs=1e-12)
 
 
 def test_declined_vertex_bad_inputs_raise() -> None:
@@ -408,13 +479,14 @@ def test_declined_vertex_bad_inputs_raise() -> None:
     with pytest.raises(ValueError, match="axis must be a unit vector"):
         replace(good, axis=(0.0, 0.0, 2.0))
     with pytest.raises(ValueError, match="time must be finite"):
-        dc.declined_vertex(leaf["attach"], good, math.nan, 1.0, P_DEFAULT)
+        dc.declined_vertex(leaf["attach"], good, math.nan, 1.0, P_DEFAULT, COLLAR_BEND)
     with pytest.raises(ValueError, match="v must be in"):
-        dc.declined_vertex(leaf["attach"], good, TIME, 1.5, P_DEFAULT)
+        declined(leaf["attach"], good, 1.5)
     with pytest.raises(ValueError, match="'position' must be 3 numbers"):
-        dc.declined_vertex([0.0, 0.0], good, TIME, 1.0, P_DEFAULT)
-    with pytest.raises(ValueError, match="beyond the chord approximation"):
-        dc.chord_factor(5.0, 1.0)
+        declined([0.0, 0.0], good, 1.0)
+    for bad in (0.0, -0.1, math.nan):
+        with pytest.raises(ValueError, match="collar_bend must be"):
+            dc.declined_vertex(leaf["attach"], good, TIME, 0.5, P_DEFAULT, bad)
 
 
 @pytest.mark.parametrize("tiller", [0, 2])
@@ -426,11 +498,9 @@ def test_declined_vertex_wind_pivot_and_axis_match_declined_leaf(tiller: int) ->
         for v in (1.0, 0.7, 0.4, 0.2):
             dl = dc.declined_leaf(leaf, t, v, P_DEFAULT)
             for s in FRACTIONS:
-                blade = dc.declined_vertex(healthy_midrib(leaf, t, s), vertex_inputs(leaf, t, dc.KIND_BLADE, s),
-                                           TIME, v, P_DEFAULT)
+                blade = declined(healthy_midrib(leaf, t, s), vertex_inputs(leaf, t, dc.KIND_BLADE, s), v)
                 assert close(blade.pivot, dl.attach) and close(blade.axis, dl.direction), (sen, v, s)
-            sheath = dc.declined_vertex((0.001, 0.0, 0.02), vertex_inputs(leaf, t, dc.KIND_SHEATH, 0.4), TIME, v,
-                                        P_DEFAULT)
+            sheath = declined((0.001, 0.0, 0.02), vertex_inputs(leaf, t, dc.KIND_SHEATH, 0.4), v)
             assert close(sheath.pivot, base) and close(sheath.axis, dl.tiller_axis), (sen, v)
 
 
@@ -440,6 +510,6 @@ def test_declined_vertex_before_birth_is_age_zero() -> None:
     vin = vertex_inputs(leaf, t, dc.KIND_BLADE, 1.0)
     point = healthy_midrib(leaf, t, 1.0)
     for v in (1.0, 0.6, 0.3):
-        early = dc.declined_vertex(point, vin, BIRTH - 2.0, v, P_DEFAULT)
-        at_birth = dc.declined_vertex(point, vin, BIRTH, v, P_DEFAULT)
+        early = dc.declined_vertex(point, vin, BIRTH - 2.0, v, P_DEFAULT, COLLAR_BEND)
+        at_birth = dc.declined_vertex(point, vin, BIRTH, v, P_DEFAULT, COLLAR_BEND)
         assert early == at_birth

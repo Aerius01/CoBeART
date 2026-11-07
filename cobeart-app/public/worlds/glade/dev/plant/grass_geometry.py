@@ -570,7 +570,8 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
     `time` are built. `_ORGAN` is the leaf's index in lifetime_leaves(table) plus 1 either way.
 
     STATIC_ATTRIBUTES come from the leaf's first-seen record, so they are identical at every build time. A degenerate
-    leaf has fade 1 (opacity 0) and its collar and blade pivot at its anchor, so decline and wind keep it collapsed.
+    leaf has fade 1 (opacity 0) and its collar and blade pivot at its anchor, so decline and wind keep it collapsed;
+    otherwise both are the midrib vertex of blade row 0 (the emergence row, on the outer wall of the wrap, G37).
     """
     sample = sample_at(table, time)
     order = lifetime_leaves(table)
@@ -600,10 +601,11 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
         anchor = first_leaf.attach if degenerate else None
         axis = unit(first_tiller.direction)
         emergence_m = leaf.sheath_length_m if degenerate else emergence[lid]
-        # The collar attribute is the emergence point (G36): decline scales everything below it uniformly.
-        collar = anchor or _add(leaf.attach, axis, min(emergence_m - leaf.sheath_length_m, leaf.blade_length_m))
         twist, phase = _leaf_draws(table.seed, lid, p)
         grid = leaf_rows(leaf, tiller, sheath_radius(leaf.age, elongation_age, p), twist, p, anchor, emergence_m)
+        # The collar attribute is the blade's midrib start at the emergence row, on the wrap wall (G36, G37): decline
+        # turns the blade about it and scales everything below it uniformly.
+        collar = grid.blade[0][p.cross_segments // 2]
         direction = unit(leaf.direction)
         shared_vectors = {"collar": collar, "side": leaf_side(first_leaf, first_tiller),
                           "tiller_base": first_tiller.base, "tiller_axis": axis}

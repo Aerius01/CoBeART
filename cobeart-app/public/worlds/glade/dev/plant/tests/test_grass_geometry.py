@@ -174,8 +174,10 @@ def test_first_blade_row_is_the_wrap_at_the_emergence_point(
                 h, r = radial(q, tiller.base, axis)
                 assert abs(h - (leaf.sheath_length_m + e)) < 1e-9 and abs(r - rc) < 1e-9, leaf.id
             emergence = add(leaf.attach, axis, e)
-            assert dist(first[P.cross_segments // 2], add(emergence, out_dir(leaf, tiller), rc)) < 1e-12
-            assert dist(mesh.vectors["collar"][rng.blade[0]], emergence) < 1e-12
+            wall = add(emergence, out_dir(leaf, tiller), rc)  # the midrib start on the wrap wall (G37)
+            assert dist(first[P.cross_segments // 2], wall) < 1e-12
+            assert dist(mesh.vectors["collar"][rng.blade[0]], wall) < 1e-12
+            assert dist(mesh.vectors["pivot"][rng.blade[0]], wall) < 1e-12
             theta = gg.wrap_angle(rc, leaf.blade_width_m, P)
             assert abs(dist(first[0], first[-1]) - 2 * rc * math.sin(theta / 2)) < 1e-9
             checked += 1
@@ -495,7 +497,9 @@ def test_attributes_follow_the_table(table: gg.OrganTable, meshes: dict[float, g
         v = rng.blade[0]
         tiller = sample.tillers[leaf.tiller]
         emergence = add(leaf.attach, unit(tiller.direction), enclosed_length(leaf, sample))
-        assert dist(mesh.vectors["collar"][v], emergence) < 1e-12
+        rc = gg.sheath_radius(leaf.age, float(table.params["ELONGATION_AGE"]), P)  # type: ignore[arg-type]
+        wall = add(emergence, out_dir(leaf, tiller), rc)
+        assert dist(mesh.vectors["collar"][v], wall) < 1e-12
         assert mesh.vectors["tiller_base"][v] == tiller.base
         assert mesh.scalars["birth"][v] == leaf.birth_time
         assert mesh.scalars["draw"][v] == leaf.decline_draw

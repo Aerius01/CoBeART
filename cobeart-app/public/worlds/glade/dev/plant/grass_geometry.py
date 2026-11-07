@@ -1,9 +1,11 @@
 """Glade grass mesh from an organ table (GP roadmap, Phase 3): pure Python, stdlib only, no bpy.
 
 Builds the healthy plant at one sample time of an export of ../lpy/grass.lpy (export_organs.py, schema v2). Each
-leaf is a sheath tube from its tiller base to its collar along the tiller axis, then a curled blade from the collar
-along its direction, arched in its leaf plane (G22). The cross-section curl and the blade outline are copied from the
-approved reference, ../assets/build_grass_plant.py (G21), which stays frozen because the wind demo loads its GLB.
+leaf is one continuous surface (G35): its sheath wraps the tiller axis from the tiller base up to the collar, and its
+blade continues the wrap above the collar, leaves the collar along the tiller axis, turns to its angle and arches in
+its leaf plane (G22) while the wrap opens to the curled blade. The cross-section curl and the blade outline are copied
+from the approved reference, ../assets/build_grass_plant.py (G21), which stays frozen because the wind demo loads its
+GLB.
 Decline is not baked: every vertex carries what the shader (and decline.declined_vertex) needs to apply it (G29).
 
 Fixed topology (G28): every leaf has the same vertex count and order whatever its size and state, so builds at
@@ -55,10 +57,12 @@ class OrganTableError(ValueError):
 @dataclass(frozen=True)
 class GeometryParams:
     """Every constant of the mesh code; the curl and outline defaults are the reference plant's."""
-    blade_segments: int = 16             # quads along a blade (blade_segments + 1 vertex rows)
-    cross_segments: int = 4              # quads across a blade (cross_segments + 1 vertices per row)
-    tube_sides: int = 8                  # quads around a sheath (seam vertices doubled for UVs)
-    tube_rings: int = 2                  # vertex rings along a sheath
+    blade_segments: int = 16             # quads along a blade (blade_segments + 1 vertex rows, the first at the collar)
+    cross_segments: int = 8              # quads across a leaf (cross_segments + 1 vertices per row)
+    sheath_rows: int = 3                 # vertex rows of the sheath below the collar row (from the tiller base up)
+    sheath_taper: float = 1.2            # wrap radius at the tiller base relative to the collar radius
+    collar_open: float = 0.2             # blade fraction over which the collar wrap opens to the blade curl (G35)
+    collar_bend: float = 0.15            # blade fraction over which the midrib turns from the tiller axis to its angle
     curl_base_rad: float = 0.35          # cross-section arc at the tip: 0.35 + 2.6 * (1 - s)^1.5
     curl_gain_rad: float = 2.6
     curl_power: float = 1.5
@@ -66,7 +70,7 @@ class GeometryParams:
     outline_rise: float = 1.6
     outline_taper: float = 0.6
     min_width_m: float = 0.0004          # floor of the width profile near the tip
-    rolled_turn: float = 0.97            # a rolled blade is this fraction of a full turn
+    rolled_turn: float = 0.97            # the wrap (sheath, collar, rolled blade) is this fraction of a full turn
     roll_transition: float = 0.3         # blade fraction over which a rolled blade opens (G24)
     twist_range_rad: float = 0.5         # per-leaf cross-section twist at the tip, uniform in [-r, r]
     sheath_radius_min_m: float = 0.0008  # sheath radius at age 0 (before the size factor), G25
@@ -74,11 +78,14 @@ class GeometryParams:
     sheath_radius_max_m: float = 0.0025
 
     def __post_init__(self) -> None:
-        for name in ("blade_segments", "cross_segments", "tube_sides"):
+        for name in ("blade_segments", "cross_segments", "sheath_rows"):
             if getattr(self, name) < 1:
                 raise ValueError(f"GeometryParams.{name} must be >= 1, got {getattr(self, name)}")
-        if self.tube_rings < 2:
-            raise ValueError(f"GeometryParams.tube_rings must be >= 2, got {self.tube_rings}")
+        for name in ("collar_open", "collar_bend"):
+            if not 0.0 < getattr(self, name) <= 1.0:
+                raise ValueError(f"GeometryParams.{name} must be in (0, 1], got {getattr(self, name)}")
+        if self.sheath_taper < 1.0:
+            raise ValueError(f"GeometryParams.sheath_taper must be >= 1 (wider at the base), got {self.sheath_taper}")
         if not 0.0 < self.rolled_turn < 1.0:
             raise ValueError(f"GeometryParams.rolled_turn must be in (0, 1), got {self.rolled_turn}")
         if self.roll_transition <= 0.0:
@@ -95,7 +102,11 @@ class GeometryParams:
 
     @property
     def sheath_vertex_count(self) -> int:
-        return self.tube_rings * (self.tube_sides + 1)
+        return self.sheath_rows * (self.cross_segments + 1)
+
+    @property
+    def leaf_vertex_count(self) -> int:
+        return self.sheath_vertex_count + self.blade_vertex_count
 
 
 @dataclass(frozen=True)
@@ -157,7 +168,11 @@ class OrganTable:
 
 @dataclass(frozen=True)
 class LeafRange:
-    """Vertex index ranges [start, stop) of one leaf's sheath and blade in a PlantMesh."""
+    """Vertex index ranges [start, stop) of one leaf's sheath and blade in a PlantMesh.
+
+    The sheath range is the sheath_rows rows below the collar; the blade range starts with the collar row, which the
+    sheath's top faces share (one continuous surface, G35).
+    """
     id: str
     sheath: tuple[int, int]
     blade: tuple[int, int]
@@ -175,9 +190,9 @@ class PlantMesh:
       vertex (Blender 'POINT' domain, 'FLOAT_VECTOR' or 'FLOAT'); the glTF name is gltf_name(key).
     - leaves: per built leaf, in mesh order, its vertex ranges.
 
-    Vertex order per leaf: its sheath (tube_rings rings of tube_sides + 1 vertices, base to collar), then its blade
-    (blade_segments + 1 rows of cross_segments + 1 vertices, collar to tip). Blade faces are wound so their normals
-    point to the underside at rest, sheath faces so theirs point outward.
+    Vertex order per leaf: one grid of rows of cross_segments + 1 vertices, first the sheath_rows sheath rows from
+    the tiller base up, then the blade_segments + 1 blade rows from the collar to the tip. Faces are wound so their
+    normals point to the underside: outward on the sheath and the collar wrap, down on an arched blade at rest.
     """
     positions: tuple[Vec3, ...]
     faces: tuple[Quad, ...]
@@ -376,10 +391,94 @@ def _leaf_draws(seed: int, lid: str, p: GeometryParams) -> tuple[float, float]:
     return twist, phase
 
 
+def collar_open_blend(s: float, unroll: float, p: GeometryParams) -> float:
+    """How open the leaf is at blade fraction s (G35): 0 the wrap, 1 the reference curl and outline."""
+    return min(smoothstep(s / p.collar_open), unroll_blend(s, unroll, p))
+
+
+def midrib_direction(tiller_axis: Vec3, side: Vec3, angle: float, arch: float, s: float, p: GeometryParams) -> Vec3:
+    """Blade midrib tangent at fraction s (G35): along the tiller axis at the collar, turned to `angle` by
+    collar_bend, plus the arch: rotate(tiller_axis, side, angle * smoothstep(s / collar_bend) + arch * s^2)."""
+    return rotate(tiller_axis, side, angle * smoothstep(s / p.collar_bend) + arch * s * s)
+
+
 # Building.
+
+Row = list[Vec3]
+
 
 def _add(a: Sequence[float], b: Sequence[float], k: float = 1.0) -> Vec3:
     return (a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k)
+
+
+def _arc_row(midrib: Vec3, d: Vec3, wside: Vec3, theta: float, radius: float, p: GeometryParams) -> Row:
+    """One cross-section: an arc of angle theta and this radius through the midrib point, across the tangent d,
+    curling toward the upper side cross(wside, d); a wrap of rolled_turn turns is centred `radius` from the midrib."""
+    nrm = unit(cross(wside, d))
+    row = []
+    for j in range(p.cross_segments + 1):
+        phi = (j / p.cross_segments - 0.5) * theta
+        row.append(_add(_add(midrib, wside, radius * math.sin(phi)), nrm, radius * (1.0 - math.cos(phi))))
+    return row
+
+
+@dataclass(frozen=True)
+class LeafRows:
+    """One leaf's grid of positions: sheath rows (tiller base up, below the collar) and blade rows (collar to tip),
+    cross_segments + 1 positions each; the midrib is column cross_segments // 2."""
+    sheath: tuple[Row, ...]
+    blade: tuple[Row, ...]
+
+
+def leaf_rows(leaf: Leaf, tiller: Tiller, collar_radius: float, twist: float, p: GeometryParams,
+              degenerate_at: Vec3 | None = None) -> LeafRows:
+    """The continuous surface of one leaf (G35) from its organ-table values, its tiller and its collar wrap radius.
+
+    Reads leaf.attach (the collar on the tiller axis), sheath_length_m, azimuth_rad, angle_from_axis_rad,
+    blade_length_m, blade_width_m, unroll and arch_rad, and tiller.base and tiller.direction, so a declined leaf is
+    rebuilt by passing the declined values, its declined collar radius and the leaned tiller. Every row is an arc
+    through the midrib that curls toward the tiller axis:
+    - sheath row k (height fraction k / sheath_rows) is the wrap of radius collar_radius * lerp(sheath_taper, 1,
+      k / sheath_rows) around the tiller axis, its midrib on the outer wall at the leaf's azimuth;
+    - blade row i (s = i / blade_segments) starts with the same wrap at collar_radius (the collar row, shared with
+      the sheath's top faces); the midrib follows midrib_direction from the outer wall (midpoint rule), the
+      cross-section is twisted by twist * s and opens from the wrap to the reference curl and outline by
+      collar_open_blend b: the arc angle is lerp(wrap, curl, b) and the radius lerp(collar_radius, curl radius, b^2),
+      so the margins first slide around the stem and the blade reaches its own width only once open.
+    With degenerate_at every position is that point.
+    """
+    axis = unit(tiller.direction)
+    side = leaf_side(leaf, tiller)
+    out = cross(side, axis)  # toward the leaf's azimuth, perpendicular to the tiller axis
+    inward = (-side[0], -side[1], -side[2])  # the width direction at the collar (the reference's d x Z)
+    closed = 2.0 * math.pi * p.rolled_turn
+
+    def place(row: Row) -> Row:
+        return [degenerate_at] * len(row) if degenerate_at is not None else row
+
+    sheath = []
+    for k in range(p.sheath_rows):
+        f = k / p.sheath_rows
+        radius = collar_radius * lerp(p.sheath_taper, 1.0, f)
+        midrib = _add(_add(tiller.base, axis, leaf.sheath_length_m * f), out, radius)
+        sheath.append(place(_arc_row(midrib, axis, inward, closed, radius, p)))
+
+    path = _add(leaf.attach, out, collar_radius)
+    step = leaf.blade_length_m / p.blade_segments
+    blade = []
+    for i in range(p.blade_segments + 1):
+        s = i / p.blade_segments
+        d = midrib_direction(axis, side, leaf.angle_from_axis_rad, leaf.arch_rad, s, p)
+        wside = rotate(inward, d, twist * s)
+        blend = collar_open_blend(s, leaf.unroll, p)
+        theta = lerp(closed, curl_angle(s, p), blend)
+        open_radius = leaf_width(leaf.blade_width_m, s, p) / curl_angle(s, p)
+        # The radius eases late, so the opening margins first slide around the stem instead of flaring out.
+        radius = lerp(collar_radius, open_radius, blend * blend)
+        blade.append(place(_arc_row(path, d, wside, theta, radius, p)))
+        s_mid = (i + 0.5) / p.blade_segments  # midpoint rule: close to the exact integral at 16 rows
+        path = _add(path, midrib_direction(axis, side, leaf.angle_from_axis_rad, leaf.arch_rad, s_mid, p), step)
+    return LeafRows(sheath=tuple(sheath), blade=tuple(blade))
 
 
 @dataclass
@@ -400,70 +499,17 @@ class _Builder:
             self.scalars[name].append(scalars[name])
         return len(self.positions) - 1
 
-    def grid(self, rows: list[list[tuple[int, UV]]], material: int, along_first: bool) -> None:
-        """Quads over a grid of rows; along_first winds (a[j], c[j], c[j+1], a[j+1]) as the reference blade does,
-        otherwise (a[j], a[j+1], c[j+1], c[j]) as its tubes do."""
-        for a, c in zip(rows, rows[1:]):
-            for j in range(len(a) - 1):
-                quad = (a[j], c[j], c[j + 1], a[j + 1]) if along_first else (a[j], a[j + 1], c[j + 1], c[j])
-                self.faces.append((quad[0][0], quad[1][0], quad[2][0], quad[3][0]))
-                self.face_uvs.append((quad[0][1], quad[1][1], quad[2][1], quad[3][1]))
-                self.face_materials.append(material)
-
-
-def _sheath_rows(leaf: Leaf, tiller: Tiller, radius: float, degenerate_at: Vec3 | None,
-                 p: GeometryParams) -> list[list[tuple[Vec3, float, UV]]]:
-    """Ring vertices (position, s, uv) of the sheath tube, base to collar along the tiller axis."""
-    axis = unit(tiller.direction)
-    ref = (1.0, 0.0, 0.0) if abs(axis[0]) < 0.9 else (0.0, 1.0, 0.0)
-    n = unit(cross(axis, ref))
-    b = cross(axis, n)
-    rows = []
-    for i in range(p.tube_rings):
-        s = i / (p.tube_rings - 1)
-        centre = _add(tiller.base, axis, leaf.sheath_length_m * s)
-        row = []
-        for j in range(p.tube_sides + 1):
-            a = 2.0 * math.pi * j / p.tube_sides
-            pos = degenerate_at or _add(_add(centre, n, radius * math.cos(a)), b, radius * math.sin(a))
-            row.append((pos, s, (j / p.tube_sides, s)))
-        rows.append(row)
-    return rows
-
-
-def blade_rows(leaf: Leaf, side: Vec3, r0: float, twist: float, degenerate_at: Vec3 | None,
-               p: GeometryParams) -> list[list[tuple[Vec3, float, UV]]]:
-    """Row vertices (position, s, uv) of the curled blade from the collar (G22, G24).
-
-    The midrib starts at attach and follows rotate(direction, side, arch * s^2), integrated with one step per row
-    by the midpoint rule (the step from row i takes the direction at s = (i + 0.5) / blade_segments).
-    The width runs along -side (the reference's d x Z), twisted about the midrib by twist * s; the cross-section is
-    an arc of curl_angle(s) whose edges rise toward the upper side, and a rolled section is a closed arc of the sheath
-    radius r0 centred on the midrib.
-    """
-    d0 = unit(leaf.direction)
-    closed = 2.0 * math.pi * p.rolled_turn
-    path = leaf.attach
-    step = leaf.blade_length_m / p.blade_segments
-    rows = []
-    for i in range(p.blade_segments + 1):
-        s = i / p.blade_segments
-        d = rotate(d0, side, leaf.arch_rad * s * s)  # the local tangent orients the cross-section
-        wside = rotate((-side[0], -side[1], -side[2]), d, twist * s)
-        nrm = unit(cross(wside, d))  # the upper side of the blade
-        blend = unroll_blend(s, leaf.unroll, p)
-        theta = lerp(closed, curl_angle(s, p), blend)
-        radius = lerp(closed * r0, leaf_width(leaf.blade_width_m, s, p), blend) / theta
-        pos = _add(path, nrm, -radius * (1.0 - blend))
-        row = []
-        for j in range(p.cross_segments + 1):
-            phi = (j / p.cross_segments - 0.5) * theta
-            v = degenerate_at or _add(_add(pos, wside, radius * math.sin(phi)), nrm, radius * (1.0 - math.cos(phi)))
-            row.append((v, s, (j / p.cross_segments, s)))
-        rows.append(row)
-        s_mid = (i + 0.5) / p.blade_segments  # midpoint rule: close to the exact integral at 16 rows
-        path = _add(path, rotate(d0, side, leaf.arch_rad * s_mid * s_mid), step)
-    return rows
+    def grid(self, rows: Sequence[Sequence[int]], materials: Sequence[int]) -> None:
+        """Quads (a[j], c[j], c[j+1], a[j+1]) between successive rows, wound as the reference blade; the band from
+        row i to row i + 1 gets materials[i]. UVs run across the leaf (u) and along the whole leaf (v)."""
+        last = len(rows) - 1
+        for i, (a, c) in enumerate(zip(rows, rows[1:])):
+            n = len(a) - 1
+            for j in range(n):
+                self.faces.append((a[j], c[j], c[j + 1], a[j + 1]))
+                self.face_uvs.append(((j / n, i / last), (j / n, (i + 1) / last), ((j + 1) / n, (i + 1) / last),
+                                      ((j + 1) / n, i / last)))
+                self.face_materials.append(materials[i])
 
 
 def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryParams(),
@@ -490,6 +536,7 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
         raise OrganTableError(f"lifetime leaves {unknown} are not in the organ table; use lifetime_leaves(table)")
     elongation_age = _num("params ELONGATION_AGE", table.params.get("ELONGATION_AGE"))
     plateau = _num("params SHEATH_PLATEAU_M", table.params.get("SHEATH_PLATEAU_M"))
+    materials = [MATERIAL_SHEATH] * p.sheath_rows + [MATERIAL_BLADE] * p.blade_segments
     out = _Builder()
     ranges = []
     for lid in ids:
@@ -501,41 +548,32 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
         degenerate = lid not in sample.leaves or leaf.fade >= 1.0
         anchor = first_leaf.attach if degenerate else None
         collar = first_leaf.attach if degenerate else leaf.attach
-        side = leaf_side(first_leaf, first_tiller)
         twist, phase = _leaf_draws(table.seed, lid, p)
-        radius = sheath_radius(leaf.age, elongation_age, p)
+        grid = leaf_rows(leaf, tiller, sheath_radius(leaf.age, elongation_age, p), twist, p, anchor)
         axis = unit(first_tiller.direction)
         direction = unit(leaf.direction)
-        shared_vectors = {"collar": collar, "side": side, "tiller_base": first_tiller.base, "tiller_axis": axis}
+        shared_vectors = {"collar": collar, "side": leaf_side(first_leaf, first_tiller),
+                          "tiller_base": first_tiller.base, "tiller_axis": axis}
         shared_scalars = {"organ": float(organ_index[lid]), "phase": phase, "tiller_az": first_tiller.azimuth_rad,
                           "tiller": float(first_tiller.tiller), "birth": first_leaf.birth_time,
                           "draw": first_leaf.decline_draw, "sen": leaf.senescence,
                           "fade": 1.0 if degenerate else leaf.fade, "arch": leaf.arch_rad}
+        sheath_vectors = {**shared_vectors, "pivot": first_tiller.base, "axis": axis}
+        blade_vectors = {**shared_vectors, "pivot": collar, "axis": direction}
 
         start = len(out.positions)
-        rows = []
-        for ring in _sheath_rows(leaf, tiller, radius, anchor, p):
-            row = []
-            for pos, s, uv in ring:
-                height = leaf.sheath_length_m * s
-                index = out.vertex(pos, {**shared_vectors, "pivot": first_tiller.base, "axis": axis},
-                                   {**shared_scalars, "s": s, "stem_t": height / plateau,
-                                    "kind": float(KIND_SHEATH)})
-                row.append((index, uv))
-            rows.append(row)
-        out.grid(rows, MATERIAL_SHEATH, along_first=False)
+        rows: list[list[int]] = []
+        for k, row in enumerate(grid.sheath):
+            f = k / p.sheath_rows
+            scalars = {**shared_scalars, "s": f, "stem_t": leaf.sheath_length_m * f / plateau,
+                       "kind": float(KIND_SHEATH)}
+            rows.append([out.vertex(q, sheath_vectors, scalars) for q in row])
         mid = len(out.positions)
-
-        rows = []
-        for blade_row in blade_rows(leaf, side, radius, twist, anchor, p):
-            row = []
-            for pos, s, uv in blade_row:
-                index = out.vertex(pos, {**shared_vectors, "pivot": collar, "axis": direction},
-                                   {**shared_scalars, "s": s, "stem_t": leaf.sheath_length_m / plateau,
-                                    "kind": float(KIND_BLADE)})
-                row.append((index, uv))
-            rows.append(row)
-        out.grid(rows, MATERIAL_BLADE, along_first=True)
+        for i, row in enumerate(grid.blade):
+            scalars = {**shared_scalars, "s": i / p.blade_segments, "stem_t": leaf.sheath_length_m / plateau,
+                       "kind": float(KIND_BLADE)}
+            rows.append([out.vertex(q, blade_vectors, scalars) for q in row])
+        out.grid(rows, materials)
         ranges.append(LeafRange(id=lid, sheath=(start, mid), blade=(mid, len(out.positions))))
 
     return PlantMesh(positions=tuple(out.positions), faces=tuple(out.faces), face_uvs=tuple(out.face_uvs),

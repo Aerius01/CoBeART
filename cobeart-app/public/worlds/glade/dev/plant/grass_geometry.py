@@ -45,7 +45,7 @@ VECTOR_ATTRIBUTES: tuple[str, ...] = ("pivot", "axis", "collar", "side", "tiller
 SCALAR_ATTRIBUTES: tuple[str, ...] = ("s", "stem_t", "organ", "phase", "kind", "tiller_az", "tiller", "birth", "draw",
                                       "sen", "fade", "arch")
 # Attributes that change with the build time (per stage in a VAT) and those fixed for a leaf's lifetime (G34).
-STAGE_ATTRIBUTES: tuple[str, ...] = ("pivot", "axis", "collar", "stem_t", "arch", "sen", "fade")
+STAGE_ATTRIBUTES: tuple[str, ...] = ("pivot", "axis", "collar", "s", "stem_t", "arch", "sen", "fade")
 STATIC_ATTRIBUTES: tuple[str, ...] = tuple(n for n in (*VECTOR_ATTRIBUTES, *SCALAR_ATTRIBUTES)
                                            if n not in STAGE_ATTRIBUTES)
 
@@ -63,6 +63,8 @@ class GeometryParams:
     sheath_taper: float = 1.2            # wrap radius at the tiller base relative to the collar radius
     collar_open: float = 0.2             # blade fraction over which the collar wrap opens to the blade curl (G35)
     collar_bend: float = 0.15            # blade fraction over which the midrib turns from the tiller axis to its angle
+    sheath_width_factor: float = 1.3     # a wrap's arc length is at most this times the blade width (G36: split)
+    blade_row_power: float = 1.6         # blade row i sits at s = (i / blade_segments)^power, dense near emergence
     curl_base_rad: float = 0.35          # cross-section arc at the tip: 0.35 + 2.6 * (1 - s)^1.5
     curl_gain_rad: float = 2.6
     curl_power: float = 1.5
@@ -86,6 +88,9 @@ class GeometryParams:
                 raise ValueError(f"GeometryParams.{name} must be in (0, 1], got {getattr(self, name)}")
         if self.sheath_taper < 1.0:
             raise ValueError(f"GeometryParams.sheath_taper must be >= 1 (wider at the base), got {self.sheath_taper}")
+        for name in ("sheath_width_factor", "blade_row_power"):
+            if getattr(self, name) <= 0.0:
+                raise ValueError(f"GeometryParams.{name} must be positive, got {getattr(self, name)}")
         if not 0.0 < self.rolled_turn < 1.0:
             raise ValueError(f"GeometryParams.rolled_turn must be in (0, 1), got {self.rolled_turn}")
         if self.roll_transition <= 0.0:
@@ -424,34 +429,68 @@ def _arc_row(midrib: Vec3, d: Vec3, wside: Vec3, theta: float, radius: float, p:
 
 @dataclass(frozen=True)
 class LeafRows:
-    """One leaf's grid of positions: sheath rows (tiller base up, below the collar) and blade rows (collar to tip),
-    cross_segments + 1 positions each; the midrib is column cross_segments // 2."""
+    """One leaf's grid of positions: sheath rows (tiller base up, below the collar) and blade rows (emergence point to
+    tip), cross_segments + 1 positions each; the midrib is column cross_segments // 2."""
     sheath: tuple[Row, ...]
     blade: tuple[Row, ...]
 
 
+def blade_row_fractions(p: GeometryParams) -> tuple[float, ...]:
+    """Free-blade fraction s of each blade row (G36): (i / blade_segments)^blade_row_power, dense near emergence."""
+    return tuple((i / p.blade_segments) ** p.blade_row_power for i in range(p.blade_segments + 1))
+
+
+def wrap_angle(radius: float, blade_width: float, p: GeometryParams) -> float:
+    """Arc angle of a wrap of this radius (G36): rolled_turn of a full turn, or less (a split sheath) where that
+    arc would be longer than sheath_width_factor times the blade width."""
+    closed = 2.0 * math.pi * p.rolled_turn
+    cap = p.sheath_width_factor * blade_width
+    return closed if radius * closed <= cap else cap / radius
+
+
+def emergence_heights(sample: Sample) -> dict[str, float]:
+    """Height along its tiller axis at which each leaf's blade leaves the enclosing sheaths (G36).
+
+    h_e = max(own, max_k lerp(own, h_k, 1 - fade_k)) over the older leaves k of the same tiller that are not
+    collapsed, own and h_k being collar heights (sheath lengths); weighting by 1 - fade lets the emergence point ease
+    down while an enclosing leaf fades instead of jumping when it collapses.
+    """
+    heights: dict[str, float] = {}
+    for leaf in sample.leaves.values():
+        own = leaf.sheath_length_m
+        h = own
+        for older in sample.leaves.values():
+            if older.tiller == leaf.tiller and older.birth_time < leaf.birth_time and older.fade < 1.0:
+                h = max(h, lerp(own, older.sheath_length_m, 1.0 - older.fade))
+        heights[leaf.id] = h
+    return heights
+
+
 def leaf_rows(leaf: Leaf, tiller: Tiller, collar_radius: float, twist: float, p: GeometryParams,
-              degenerate_at: Vec3 | None = None) -> LeafRows:
-    """The continuous surface of one leaf (G35) from its organ-table values, its tiller and its collar wrap radius.
+              degenerate_at: Vec3 | None = None, emergence_m: float | None = None) -> LeafRows:
+    """The continuous surface of one leaf (G35, G36) from its organ-table values, its tiller and its collar wrap radius.
 
     Reads leaf.attach (the collar on the tiller axis), sheath_length_m, azimuth_rad, angle_from_axis_rad,
     blade_length_m, blade_width_m, unroll and arch_rad, and tiller.base and tiller.direction, so a declined leaf is
-    rebuilt by passing the declined values, its declined collar radius and the leaned tiller. Every row is an arc
-    through the midrib that curls toward the tiller axis:
-    - sheath row k (height fraction k / sheath_rows) is the wrap of radius collar_radius * lerp(sheath_taper, 1,
-      k / sheath_rows) around the tiller axis, its midrib on the outer wall at the leaf's azimuth;
-    - blade row i (s = i / blade_segments) starts with the same wrap at collar_radius (the collar row, shared with
-      the sheath's top faces); the midrib follows midrib_direction from the outer wall (midpoint rule), the
-      cross-section is twisted by twist * s and opens from the wrap to the reference curl and outline by
-      collar_open_blend b: the arc angle is lerp(wrap, curl, b) and the radius lerp(collar_radius, curl radius, b^2),
-      so the margins first slide around the stem and the blade reaches its own width only once open.
+    rebuilt by passing the declined values, its declined collar radius and the leaned tiller. emergence_m is the
+    emergence height along the tiller axis (emergence_heights; default the own collar). Every row is an arc through
+    the midrib that curls toward the tiller axis, of at most wrap_angle (a split sheath where the wrap would be wider
+    than the blade allows):
+    - sheath row k (height fraction k / sheath_rows of the own sheath) is the wrap of radius collar_radius *
+      lerp(sheath_taper, 1, k / sheath_rows) around the tiller axis, its midrib on the outer wall at the leaf's azimuth;
+    - the blade runs straight up the axis, wrapped at collar_radius, from the collar to the emergence point (the band
+      from the last sheath row to blade row 0, at most the blade's length), then over its free length: blade row i
+      sits at free fraction s_i (blade_row_fractions), the midrib follows midrib_direction(s) from the outer wall
+      (midpoint rule between rows), the cross-section is twisted by twist * s and opens from the wrap to the reference
+      curl and outline by collar_open_blend b: arc angle lerp(wrap, curl, b), radius lerp(collar_radius, curl radius,
+      b^2) (the margins first slide around the stem), the arc no wider than lerp(wrap width, blade width, b).
     With degenerate_at every position is that point.
     """
     axis = unit(tiller.direction)
     side = leaf_side(leaf, tiller)
     out = cross(side, axis)  # toward the leaf's azimuth, perpendicular to the tiller axis
     inward = (-side[0], -side[1], -side[2])  # the width direction at the collar (the reference's d x Z)
-    closed = 2.0 * math.pi * p.rolled_turn
+    width = leaf.blade_width_m
 
     def place(row: Row) -> Row:
         return [degenerate_at] * len(row) if degenerate_at is not None else row
@@ -461,23 +500,33 @@ def leaf_rows(leaf: Leaf, tiller: Tiller, collar_radius: float, twist: float, p:
         f = k / p.sheath_rows
         radius = collar_radius * lerp(p.sheath_taper, 1.0, f)
         midrib = _add(_add(tiller.base, axis, leaf.sheath_length_m * f), out, radius)
-        sheath.append(place(_arc_row(midrib, axis, inward, closed, radius, p)))
+        sheath.append(place(_arc_row(midrib, axis, inward, wrap_angle(radius, width, p), radius, p)))
 
-    path = _add(leaf.attach, out, collar_radius)
-    step = leaf.blade_length_m / p.blade_segments
+    own = leaf.sheath_length_m
+    enclosed = min(max((own if emergence_m is None else emergence_m) - own, 0.0), leaf.blade_length_m)
+    free = leaf.blade_length_m - enclosed
+    wrap = wrap_angle(collar_radius, width, p)
+    path = _add(_add(leaf.attach, axis, enclosed), out, collar_radius)
+    fractions = blade_row_fractions(p)
     blade = []
-    for i in range(p.blade_segments + 1):
-        s = i / p.blade_segments
+    for i, s in enumerate(fractions):
         d = midrib_direction(axis, side, leaf.angle_from_axis_rad, leaf.arch_rad, s, p)
         wside = rotate(inward, d, twist * s)
         blend = collar_open_blend(s, leaf.unroll, p)
-        theta = lerp(closed, curl_angle(s, p), blend)
-        open_radius = leaf_width(leaf.blade_width_m, s, p) / curl_angle(s, p)
-        # The radius eases late, so the opening margins first slide around the stem instead of flaring out.
-        radius = lerp(collar_radius, open_radius, blend * blend)
+        theta = lerp(wrap, curl_angle(s, p), blend)
+        blade_width = leaf_width(width, s, p)
+        # The radius eases late, so the opening margins first slide around the stem instead of flaring out, but the
+        # arc never gets wider than the straight blend from the wrap's width to the blade's.
+        radius = lerp(collar_radius, blade_width / curl_angle(s, p), blend * blend)
+        if theta > 0.0:  # a zero-width (collapsed) leaf has no arc to bound
+            radius = min(radius, lerp(wrap * collar_radius, blade_width, blend) / theta)
         blade.append(place(_arc_row(path, d, wside, theta, radius, p)))
-        s_mid = (i + 0.5) / p.blade_segments  # midpoint rule: close to the exact integral at 16 rows
-        path = _add(path, midrib_direction(axis, side, leaf.angle_from_axis_rad, leaf.arch_rad, s_mid, p), step)
+        if i < p.blade_segments:
+            s_mid = 0.5 * (s + fractions[i + 1])  # midpoint rule between rows
+            path = _add(path, midrib_direction(axis, side, leaf.angle_from_axis_rad, leaf.arch_rad, s_mid, p),
+                        free * (fractions[i + 1] - s))
+    if free <= 0.0:  # the whole blade is still inside older sheaths: it is the wrap at its tip, zero area
+        blade = [blade[0]] * len(blade)
     return LeafRows(sheath=tuple(sheath), blade=tuple(blade))
 
 
@@ -537,6 +586,8 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
     elongation_age = _num("params ELONGATION_AGE", table.params.get("ELONGATION_AGE"))
     plateau = _num("params SHEATH_PLATEAU_M", table.params.get("SHEATH_PLATEAU_M"))
     materials = [MATERIAL_SHEATH] * p.sheath_rows + [MATERIAL_BLADE] * p.blade_segments
+    emergence = emergence_heights(sample)
+    fractions = blade_row_fractions(p)
     out = _Builder()
     ranges = []
     for lid in ids:
@@ -547,10 +598,12 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
         first_leaf, first_tiller = first_seen[lid]
         degenerate = lid not in sample.leaves or leaf.fade >= 1.0
         anchor = first_leaf.attach if degenerate else None
-        collar = first_leaf.attach if degenerate else leaf.attach
-        twist, phase = _leaf_draws(table.seed, lid, p)
-        grid = leaf_rows(leaf, tiller, sheath_radius(leaf.age, elongation_age, p), twist, p, anchor)
         axis = unit(first_tiller.direction)
+        emergence_m = leaf.sheath_length_m if degenerate else emergence[lid]
+        # The collar attribute is the emergence point (G36): decline scales everything below it uniformly.
+        collar = anchor or _add(leaf.attach, axis, min(emergence_m - leaf.sheath_length_m, leaf.blade_length_m))
+        twist, phase = _leaf_draws(table.seed, lid, p)
+        grid = leaf_rows(leaf, tiller, sheath_radius(leaf.age, elongation_age, p), twist, p, anchor, emergence_m)
         direction = unit(leaf.direction)
         shared_vectors = {"collar": collar, "side": leaf_side(first_leaf, first_tiller),
                           "tiller_base": first_tiller.base, "tiller_axis": axis}
@@ -570,7 +623,7 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
             rows.append([out.vertex(q, sheath_vectors, scalars) for q in row])
         mid = len(out.positions)
         for i, row in enumerate(grid.blade):
-            scalars = {**shared_scalars, "s": i / p.blade_segments, "stem_t": leaf.sheath_length_m / plateau,
+            scalars = {**shared_scalars, "s": fractions[i], "stem_t": emergence_m / plateau,
                        "kind": float(KIND_BLADE)}
             rows.append([out.vertex(q, blade_vectors, scalars) for q in row])
         out.grid(rows, materials)

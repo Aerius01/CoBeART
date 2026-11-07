@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 
 import grass_geometry as gg
-from decline import DeclineParams, cross, declined_vertex, dir_from, rotate, unit
+from decline import DeclineParams, cross, declined_vertex, dir_from, health, look, rotate, unit
 
 TOL = 1e-9
 P = gg.GeometryParams()
+FRACTIONS = gg.blade_row_fractions(P)
 
 
 @pytest.fixture(scope="module")
@@ -72,6 +73,11 @@ def radial(q: tuple[float, ...], base: tuple[float, ...], axis: tuple[float, ...
 
 def out_dir(leaf: gg.Leaf, tiller: gg.Tiller) -> tuple[float, float, float]:
     return cross(gg.leaf_side(leaf, tiller), unit(tiller.direction))
+
+
+def enclosed_length(leaf: gg.Leaf, sample: gg.Sample) -> float:
+    """How far the leaf's blade runs inside older sheaths before it emerges (G36), capped at its length."""
+    return min(gg.emergence_heights(sample)[leaf.id] - leaf.sheath_length_m, leaf.blade_length_m)
 
 
 def present(sample: gg.Sample, mesh: gg.PlantMesh) -> list[tuple[gg.Leaf, gg.Tiller, gg.LeafRange]]:
@@ -152,23 +158,28 @@ def test_one_surface_per_leaf(meshes: dict[float, gg.PlantMesh]) -> None:
         assert leaf_faces.count(gg.MATERIAL_BLADE) == P.blade_segments * P.cross_segments
 
 
-def test_collar_row_is_the_wrap_at_the_collar(table: gg.OrganTable, meshes: dict[float, gg.PlantMesh]) -> None:
+def test_first_blade_row_is_the_wrap_at_the_emergence_point(
+        table: gg.OrganTable, meshes: dict[float, gg.PlantMesh]) -> None:
     elongation_age = float(table.params["ELONGATION_AGE"])  # type: ignore[arg-type]
-    checked = 0
+    checked = enclosed = 0
     for sample in table.samples:
-        for leaf, tiller, rng in present(sample, meshes[sample.time]):
+        mesh = meshes[sample.time]
+        for leaf, tiller, rng in present(sample, mesh):
             axis = unit(tiller.direction)
             rc = gg.sheath_radius(leaf.age, elongation_age, P)
-            collar_row = mesh_blade_rows(meshes[sample.time], rng)[0]
-            for q in collar_row:
+            e = enclosed_length(leaf, sample)
+            enclosed += e > 1e-6
+            first = mesh_blade_rows(mesh, rng)[0]
+            for q in first:
                 h, r = radial(q, tiller.base, axis)
-                assert abs(h - leaf.sheath_length_m) < 1e-9 and abs(r - rc) < 1e-9, leaf.id
-            midrib = collar_row[P.cross_segments // 2]
-            assert dist(midrib, add(leaf.attach, out_dir(leaf, tiller), rc)) < 1e-12
-            gap = dist(collar_row[0], collar_row[-1])
-            assert abs(gap - 2 * rc * math.sin(math.pi * (1 - P.rolled_turn))) < 1e-9
+                assert abs(h - (leaf.sheath_length_m + e)) < 1e-9 and abs(r - rc) < 1e-9, leaf.id
+            emergence = add(leaf.attach, axis, e)
+            assert dist(first[P.cross_segments // 2], add(emergence, out_dir(leaf, tiller), rc)) < 1e-12
+            assert dist(mesh.vectors["collar"][rng.blade[0]], emergence) < 1e-12
+            theta = gg.wrap_angle(rc, leaf.blade_width_m, P)
+            assert abs(dist(first[0], first[-1]) - 2 * rc * math.sin(theta / 2)) < 1e-9
             checked += 1
-    assert checked > 100
+    assert checked > 100 and enclosed > 20
 
 
 def test_midrib_leaves_along_the_axis_and_reaches_its_direction(
@@ -176,22 +187,118 @@ def test_midrib_leaves_along_the_axis_and_reaches_its_direction(
     checked = 0
     for sample in table.samples:
         for leaf, tiller, rng in present(sample, meshes[sample.time]):
+            free = leaf.blade_length_m - enclosed_length(leaf, sample)
+            if free < 1e-6:
+                continue
             mid = [row[P.cross_segments // 2] for row in mesh_blade_rows(meshes[sample.time], rng)]
             steps = [unit(sub(b, a)) for a, b in zip(mid, mid[1:])]
             axis = unit(tiller.direction)
             side = gg.leaf_side(leaf, tiller)
-            s0 = 0.5 / P.blade_segments
+            s0 = 0.5 * FRACTIONS[1]
             first_bound = leaf.angle_from_axis_rad * gg.smoothstep(s0 / P.collar_bend) + abs(leaf.arch_rad) * s0 * s0
             assert math.acos(min(1.0, dot(steps[0], axis))) <= first_bound + 1e-9, leaf.id
             for i, d in enumerate(steps):
-                s_mid = (i + 0.5) / P.blade_segments
+                s_mid = 0.5 * (FRACTIONS[i] + FRACTIONS[i + 1])
                 if s_mid >= P.collar_bend:
                     assert dist(d, rotate(leaf.direction, side, leaf.arch_rad * s_mid * s_mid)) < 1e-9, leaf.id
-            # Rows are one midrib step apart, so the tip row sits at the full blade length.
-            length = sum(dist(a, b) for a, b in zip(mid, mid[1:]))
-            assert abs(length - leaf.blade_length_m) < 1e-9 * max(1.0, leaf.blade_length_m)
+            # Each row step is its share of the free blade, so the tip sits at the free length.
+            for i, (a, b) in enumerate(zip(mid, mid[1:])):
+                assert abs(dist(a, b) - free * (FRACTIONS[i + 1] - FRACTIONS[i])) < 1e-12
             checked += 1
     assert checked > 100
+
+
+def test_blade_rows_are_dense_near_emergence(meshes: dict[float, gg.PlantMesh]) -> None:
+    assert FRACTIONS[0] == 0.0 and FRACTIONS[-1] == 1.0
+    assert all(abs(f - (i / P.blade_segments) ** P.blade_row_power) < 1e-15 for i, f in enumerate(FRACTIONS))
+    rows_in_bend = sum(1 for f in FRACTIONS if f <= P.collar_bend)
+    even_rows_in_bend = sum(1 for i in range(P.blade_segments + 1) if i / P.blade_segments <= P.collar_bend)
+    assert rows_in_bend >= 5 and even_rows_in_bend == 3
+    mesh = meshes[12.0]
+    n = P.cross_segments + 1
+    for rng in mesh.leaves:
+        blade_s = mesh.scalars["s"][rng.blade[0]:rng.blade[1]]
+        assert [blade_s[i * n] for i in range(P.blade_segments + 1)] == list(FRACTIONS)
+
+
+def test_enclosed_blades_stay_inside_the_enclosing_wraps(table: gg.OrganTable,
+                                                         meshes: dict[float, gg.PlantMesh]) -> None:
+    """Until its midrib passes the emergence point, no blade vertex reaches past the wraps of the older leaves around
+    it (G36), both as built and as drawn by declined_vertex at v = 1 (turnover senescence shrinks some enclosing
+    leaves). Rows after that have emerged; a drooping blade may hang below an older collar outside its sheath."""
+    n = P.cross_segments + 1
+    elongation_age = float(table.params["ELONGATION_AGE"])  # type: ignore[arg-type]
+    decline = DeclineParams.from_mapping(table.params)
+    worst = -1.0
+    checked = 0
+    for sample in table.samples:
+        mesh = meshes[sample.time]
+        visible = present(sample, mesh)
+        for leaf, tiller, rng in visible:
+            if enclosed_length(leaf, sample) <= 1e-6:
+                continue
+            axis = unit(tiller.direction)
+            for declined in (False, True):
+                def scale(lf: gg.Leaf) -> float:
+                    if not declined:
+                        return 1.0
+                    return look(health(lf.senescence, 1.0, lf.age, lf.decline_draw, decline), decline).size_scale
+                emerge_h = scale(leaf) * gg.emergence_heights(sample)[leaf.id]
+                wraps = [(scale(o) * o.sheath_length_m, scale(o) * gg.sheath_radius(o.age, elongation_age, P))
+                         for o, tl, _ in visible
+                         if tl.tiller == leaf.tiller and o.birth_time < leaf.birth_time and o.fade < 1.0]
+                for row_start in range(rng.blade[0], rng.blade[1], n):
+                    row = []
+                    for i in range(row_start, row_start + n):
+                        q = mesh.positions[i]
+                        if declined:
+                            q = declined_vertex(q, gg.vertex_inputs(mesh, i), sample.time, 1.0, decline,
+                                                collar_bend=P.collar_bend).position
+                        row.append(radial(q, tiller.base, axis))
+                    if row[P.cross_segments // 2][0] > emerge_h + 1e-9:
+                        break  # the midrib has emerged
+                    for h, r in row:
+                        around = [rk for hk, rk in wraps if hk >= h]
+                        if around:
+                            worst = max(worst, r - min(around))
+                            assert r <= min(around) + 1e-9, (sample.time, leaf.id, declined, r, min(around))
+                            checked += 1
+    assert checked > 1000
+    assert worst <= 0.0
+
+
+def test_emergence_point_eases_down_as_enclosing_leaves_fade(table: gg.OrganTable) -> None:
+    """Between samples the emergence height drops only by what the fading weights of the enclosing leaves allow."""
+    for s0, s1 in zip(table.samples, table.samples[1:]):
+        h0, h1 = gg.emergence_heights(s0), gg.emergence_heights(s1)
+        for lid, leaf0 in s0.leaves.items():
+            leaf1 = s1.leaves.get(lid)
+            if leaf1 is None or leaf0.fade >= 1.0 or leaf1.fade >= 1.0:
+                continue
+            allowed = 0.0
+            for older in s0.leaves.values():
+                if older.tiller != leaf0.tiller or older.birth_time >= leaf0.birth_time or older.fade >= 1.0:
+                    continue
+                after = s1.leaves.get(older.id)
+                w1 = 1.0 - after.fade if after is not None and after.fade < 1.0 else 0.0
+                allowed += max(older.sheath_length_m - leaf0.sheath_length_m, 0.0) * max((1.0 - older.fade) - w1, 0.0)
+            assert h0[lid] - h1[lid] <= allowed + 1e-9, (s0.time, lid, h0[lid] - h1[lid], allowed)
+
+
+def test_split_wraps_never_exceed_the_width_cap(table: gg.OrganTable, meshes: dict[float, gg.PlantMesh]) -> None:
+    split = 0
+    for sample in table.samples:
+        mesh = meshes[sample.time]
+        for leaf, tiller, rng in present(sample, mesh):
+            cap = P.sheath_width_factor * leaf.blade_width_m
+            for row in (*sheath_rows(mesh, rng), *mesh_blade_rows(mesh, rng)):
+                arc = sum(dist(a, b) for a, b in zip(row, row[1:]))
+                assert arc <= cap + 1e-9, (sample.time, leaf.id, arc, cap)
+            rc = gg.sheath_radius(leaf.age, float(table.params["ELONGATION_AGE"]), P)  # type: ignore[arg-type]
+            split += gg.wrap_angle(rc, leaf.blade_width_m, P) < 2 * math.pi * P.rolled_turn
+    assert split > 20
+    assert gg.wrap_angle(0.002, 0.01, P) == pytest.approx(2 * math.pi * P.rolled_turn)
+    assert gg.wrap_angle(0.002, 0.003, P) == pytest.approx(P.sheath_width_factor * 0.003 / 0.002)
 
 
 def test_sheath_wraps_nest_by_age(table: gg.OrganTable, meshes: dict[float, gg.PlantMesh]) -> None:
@@ -256,8 +363,7 @@ def test_rolled_blade_stays_a_wrap_of_the_collar_radius() -> None:
     leaf, tiller = synthetic(unroll=0.0, arch=0.6)
     rc = 0.002
     rows = gg.leaf_rows(leaf, tiller, rc, 0.3, P).blade
-    for i, row in enumerate(rows):
-        s = i / P.blade_segments
+    for s, row in zip(FRACTIONS, rows):
         d = tangent(leaf, tiller, s)
         mid = row[P.cross_segments // 2]
         wside = rotate(neg(gg.leaf_side(leaf, tiller)), d, 0.3 * s)
@@ -284,12 +390,25 @@ def test_midpoint_midrib_close_to_exact() -> None:
     assert dist(tip, exact_tip(leaf, tiller, rows[0][P.cross_segments // 2])) < 0.002 * leaf.blade_length_m
 
 
+def test_emergence_keeps_the_enclosed_blade_on_the_axis() -> None:
+    leaf, tiller = synthetic(unroll=1.0, arch=0.6)
+    rc = 0.002
+    rows = gg.leaf_rows(leaf, tiller, rc, 0.0, P, emergence_m=leaf.sheath_length_m + 0.04).blade
+    first = rows[0][P.cross_segments // 2]
+    assert dist(first, add(add(leaf.attach, (0.0, 0.0, 1.0), 0.04), out_dir(leaf, tiller), rc)) < 1e-12
+    tip = rows[-1][P.cross_segments // 2]
+    free = replace(leaf, blade_length_m=leaf.blade_length_m - 0.04)
+    assert dist(tip, exact_tip(free, tiller, first)) < 0.002 * leaf.blade_length_m
+    whole = gg.leaf_rows(leaf, tiller, rc, 0.0, P, emergence_m=leaf.sheath_length_m + 1.0).blade
+    assert all(row == whole[0] for row in whole)  # still fully inside: zero area at the blade's tip height
+    assert all(abs(q[2] - (leaf.attach[2] + leaf.blade_length_m)) < 1e-12 for q in whole[0])
+
+
 def test_unrolled_blade_has_reference_curl_beyond_the_collar_opening() -> None:
     leaf, tiller = synthetic(unroll=1.0)
     rows = gg.leaf_rows(leaf, tiller, 0.002, 0.0, P).blade
     checked = 0
-    for i, row in enumerate(rows):
-        s = i / P.blade_segments
+    for s, row in zip(FRACTIONS, rows):
         if s < P.collar_open:
             continue
         theta = gg.curl_angle(s, P)
@@ -299,7 +418,7 @@ def test_unrolled_blade_has_reference_curl_beyond_the_collar_opening() -> None:
         assert abs(dist(row[0], row[-1]) - 2 * radius * math.sin(theta / 2)) < 1e-12
         assert all(abs(dist(q, add(mid, upper, radius)) - radius) < 1e-12 for q in row)
         checked += 1
-    assert checked >= 12
+    assert checked >= 10
 
 
 def test_collar_opening_blend() -> None:
@@ -375,7 +494,8 @@ def test_attributes_follow_the_table(table: gg.OrganTable, meshes: dict[float, g
             continue
         v = rng.blade[0]
         tiller = sample.tillers[leaf.tiller]
-        assert mesh.vectors["collar"][v] == leaf.attach
+        emergence = add(leaf.attach, unit(tiller.direction), enclosed_length(leaf, sample))
+        assert dist(mesh.vectors["collar"][v], emergence) < 1e-12
         assert mesh.vectors["tiller_base"][v] == tiller.base
         assert mesh.scalars["birth"][v] == leaf.birth_time
         assert mesh.scalars["draw"][v] == leaf.decline_draw
@@ -392,7 +512,7 @@ def test_attribute_split() -> None:
     names = (*gg.VECTOR_ATTRIBUTES, *gg.SCALAR_ATTRIBUTES)
     assert set(gg.STAGE_ATTRIBUTES) | set(gg.STATIC_ATTRIBUTES) == set(names)
     assert not set(gg.STAGE_ATTRIBUTES) & set(gg.STATIC_ATTRIBUTES)
-    assert set(gg.STAGE_ATTRIBUTES) == {"pivot", "axis", "collar", "stem_t", "arch", "sen", "fade"}
+    assert set(gg.STAGE_ATTRIBUTES) == {"pivot", "axis", "collar", "s", "stem_t", "arch", "sen", "fade"}
 
 
 def test_static_attributes_identical_across_samples(meshes: dict[float, gg.PlantMesh]) -> None:
@@ -451,6 +571,8 @@ def test_errors(table: gg.OrganTable) -> None:
         gg.GeometryParams(collar_bend=0.0)
     with pytest.raises(ValueError, match="sheath_taper"):
         gg.GeometryParams(sheath_taper=0.9)
+    with pytest.raises(ValueError, match="blade_row_power"):
+        gg.GeometryParams(blade_row_power=0.0)
 
 
 def test_loader_errors(organ_table_path: Path) -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import grass_geometry as gg
-from decline import cross, dir_from, rotate, unit
+from decline import DeclineParams, cross, declined_vertex, dir_from, rotate, unit
 
 TOL = 1e-9
 P = gg.GeometryParams()
@@ -103,7 +103,11 @@ def test_unborn_and_collapsed_leaves_are_degenerate_at_first_attach(
             if unborn or collapsed:
                 seen_unborn += unborn
                 seen_collapsed += collapsed
-                assert all(p == first_attach[rng.id] for p in pts), rng.id
+                anchor = first_attach[rng.id]
+                assert all(p == anchor for p in pts), rng.id
+                assert set(mesh.scalars["fade"][rng.sheath[0]:rng.blade[1]]) == {1.0}, rng.id
+                assert set(mesh.vectors["collar"][rng.sheath[0]:rng.blade[1]]) == {anchor}, rng.id
+                assert set(mesh.vectors["pivot"][rng.blade[0]:rng.blade[1]]) == {anchor}, rng.id
             else:
                 assert max(dist(p, pts[0]) for p in pts) > 1e-6, rng.id
     assert seen_unborn and seen_collapsed
@@ -193,15 +197,35 @@ def test_rolled_blade_is_closed_tube_of_sheath_radius() -> None:
     r0 = 0.002
     side = gg.leaf_side(leaf, tiller)
     path = leaf.attach
+    d0 = unit(leaf.direction)
     for i, row in enumerate(gg.blade_rows(leaf, side, r0, 0.3, None, P)):
         s = i / P.blade_segments
-        d = unit(rotate(unit(leaf.direction), side, leaf.arch_rad * s * s))
+        d = rotate(d0, side, leaf.arch_rad * s * s)
         for q, _, _ in row:
             assert abs(dist(q, path) - r0) < 1e-12
             assert abs(dot(sub(q, path), d)) < 1e-12  # in the plane across the midrib
         gap = dist(row[0][0], row[-1][0])
         assert abs(gap - 2 * r0 * math.sin(math.pi * (1 - P.rolled_turn))) < 1e-12
-        path = add(path, d, leaf.blade_length_m / P.blade_segments)
+        s_mid = (i + 0.5) / P.blade_segments
+        path = add(path, rotate(d0, side, leaf.arch_rad * s_mid * s_mid), leaf.blade_length_m / P.blade_segments)
+
+
+def exact_tip(leaf: gg.Leaf, side: tuple[float, float, float], steps: int = 20000) -> tuple[float, float, float]:
+    """The midrib tip integrated finely (midpoint rule with many steps), the reference for the mesh's 16 rows."""
+    path, d0 = leaf.attach, unit(leaf.direction)
+    for i in range(steps):
+        s = (i + 0.5) / steps
+        path = add(path, rotate(d0, side, leaf.arch_rad * s * s), leaf.blade_length_m / steps)
+    return path
+
+
+def test_midpoint_midrib_close_to_exact() -> None:
+    leaf, tiller = synthetic(unroll=1.0, arch=1.7)
+    leaf = replace(leaf, blade_length_m=0.2)
+    side = gg.leaf_side(leaf, tiller)
+    rows = gg.blade_rows(leaf, side, 0.002, 0.0, None, P)
+    tip = rows[-1][P.cross_segments // 2][0]
+    assert dist(tip, exact_tip(leaf, side)) < 0.002 * leaf.blade_length_m
 
 
 def test_unrolled_blade_has_reference_curl() -> None:
@@ -265,8 +289,8 @@ def test_every_attribute_present(meshes: dict[float, gg.PlantMesh]) -> None:
         per_leaf = {name: set(mesh.scalars[name][rng.sheath[0]:rng.blade[1]])
                     for name in ("organ", "phase", "birth", "draw", "sen", "fade", "arch", "tiller", "tiller_az")}
         assert all(len(v) == 1 for v in per_leaf.values()), rng.id
-        assert set(mesh.scalars["kind"][rng.sheath[0]:rng.sheath[1]]) == {gg.KIND_SHEATH}
-        assert set(mesh.scalars["kind"][rng.blade[0]:rng.blade[1]]) == {gg.KIND_BLADE}
+        assert set(mesh.scalars["kind"][rng.sheath[0]:rng.sheath[1]]) == {float(gg.KIND_SHEATH)}
+        assert set(mesh.scalars["kind"][rng.blade[0]:rng.blade[1]]) == {float(gg.KIND_BLADE)}
         assert set(mesh.vectors["collar"][rng.sheath[0]:rng.blade[1]]) == {mesh.vectors["collar"][rng.blade[0]]}
         assert set(mesh.vectors["pivot"][rng.blade[0]:rng.blade[1]]) == {mesh.vectors["collar"][rng.blade[0]]}
         assert set(mesh.vectors["pivot"][rng.sheath[0]:rng.sheath[1]]) == {mesh.vectors["tiller_base"][rng.sheath[0]]}
@@ -277,7 +301,7 @@ def test_attributes_follow_the_table(table: gg.OrganTable, meshes: dict[float, g
     mesh = meshes[8.0]
     for rng in mesh.leaves:
         leaf = sample.leaves.get(rng.id)
-        if leaf is None:
+        if leaf is None or leaf.fade >= 1.0:
             continue
         v = rng.blade[0]
         tiller = sample.tillers[leaf.tiller]
@@ -292,6 +316,46 @@ def test_attributes_follow_the_table(table: gg.OrganTable, meshes: dict[float, g
         assert mesh.scalars["tiller_az"][v] == tiller.azimuth_rad
         assert abs(dot(mesh.vectors["side"][v], leaf.direction)) < 1e-9
         assert abs(dot(mesh.vectors["side"][v], unit(tiller.direction))) < 1e-9
+
+
+def test_attribute_split() -> None:
+    names = (*gg.VECTOR_ATTRIBUTES, *gg.SCALAR_ATTRIBUTES)
+    assert set(gg.STAGE_ATTRIBUTES) | set(gg.STATIC_ATTRIBUTES) == set(names)
+    assert not set(gg.STAGE_ATTRIBUTES) & set(gg.STATIC_ATTRIBUTES)
+    assert set(gg.STAGE_ATTRIBUTES) == {"pivot", "axis", "collar", "stem_t", "arch", "sen", "fade"}
+
+
+def test_static_attributes_identical_across_samples(meshes: dict[float, gg.PlantMesh]) -> None:
+    first = next(iter(meshes.values()))
+    for mesh in meshes.values():
+        for name in gg.STATIC_ATTRIBUTES:
+            values = mesh.vectors[name] if name in gg.VECTOR_ATTRIBUTES else mesh.scalars[name]
+            first_values = first.vectors[name] if name in gg.VECTOR_ATTRIBUTES else first.scalars[name]
+            assert values == first_values, name
+
+
+def test_declined_vertex_runs_over_lifetime_builds(table: gg.OrganTable,
+                                                   meshes: dict[float, gg.PlantMesh]) -> None:
+    decline = DeclineParams.from_mapping(table.params)
+    for time, mesh in meshes.items():
+        for i, position in enumerate(mesh.positions):
+            vin = gg.vertex_inputs(mesh, i)
+            for v in (1.0, 0.5, 0.1):
+                dv = declined_vertex(position, vin, time, v, decline)
+                if v == 1.0 and vin.senescence == 0.0:
+                    assert dist(dv.position, position) < 1e-12, (time, i)
+            if vin.fade >= 1.0:
+                assert declined_vertex(position, vin, time, 1.0, decline).opacity == 0.0
+
+
+def test_vertex_inputs_rejects_non_integral(meshes: dict[float, gg.PlantMesh]) -> None:
+    mesh = meshes[12.0]
+    for name in ("kind", "tiller"):
+        values = list(mesh.scalars[name])
+        values[0] = 0.5
+        bad = replace(mesh, scalars={**mesh.scalars, name: tuple(values)})
+        with pytest.raises(ValueError, match=f"vertex 0: attribute '{name}' must be integral"):
+            gg.vertex_inputs(bad, 0)
 
 
 def test_deterministic(table: gg.OrganTable, lifetime: list[str], meshes: dict[float, gg.PlantMesh]) -> None:
@@ -313,3 +377,30 @@ def test_errors(table: gg.OrganTable) -> None:
         gg.parse_table({"schema_version": 1})
     with pytest.raises(ValueError, match="tube_rings"):
         gg.GeometryParams(tube_rings=1)
+
+
+def test_loader_errors(organ_table_path: Path) -> None:
+    import json
+    doc = json.loads(organ_table_path.read_text(encoding="utf-8"))
+
+    def broken(edit: object) -> dict[str, object]:
+        d = json.loads(json.dumps(doc))
+        edit(d)  # type: ignore[operator]
+        return d
+
+    with pytest.raises(gg.OrganTableError, match="each organ table sample must be an object"):
+        gg.parse_table(broken(lambda d: d["samples"].__setitem__(0, 3)))
+    with pytest.raises(gg.OrganTableError, match="each organ must be an object"):
+        gg.parse_table(broken(lambda d: d["samples"][0]["organs"].__setitem__(0, "x")))
+
+    def tiller_organ(d: dict[str, object]) -> dict[str, object]:
+        return next(o for o in d["samples"][0]["organs"] if o["kind"] == "tiller")  # type: ignore[index]
+
+    with pytest.raises(gg.OrganTableError, match=r"organ 'T0' at t=0.0: field 'base' is missing"):
+        gg.parse_table(broken(lambda d: tiller_organ(d).pop("base")))
+    with pytest.raises(gg.OrganTableError, match="tiller must be an integer"):
+        gg.parse_table(broken(lambda d: tiller_organ(d).__setitem__("tiller", 0.5)))
+    last = doc["samples"][-1]["organs"]
+    leaf_index = next(i for i, o in enumerate(last) if o["kind"] == "leaf")
+    with pytest.raises(gg.OrganTableError, match="rank must be an integer"):
+        gg.parse_table(broken(lambda d: d["samples"][-1]["organs"][leaf_index].__setitem__("rank", 1.5)))

@@ -26,22 +26,26 @@ _LPY_DIR = str(Path(__file__).resolve().parent.parent / "lpy")  # decline.py, th
 if _LPY_DIR not in sys.path:
     sys.path.insert(0, _LPY_DIR)
 
-from decline import cross, rotate, to_tiller_frame, unit  # noqa: E402
+from decline import (  # noqa: E402
+    KIND_BLADE, KIND_SHEATH, VertexInputs, cross, rotate, smoothstep, to_tiller_frame, unit)
 
 SCHEMA_VERSION = 2
-TIME_TOLERANCE = 1e-6
+SAMPLE_TIME_TOLERANCE = 1e-6  # how close a requested time must be to a sample time
 
 Vec3 = tuple[float, float, float]
 UV = tuple[float, float]
 Quad = tuple[int, int, int, int]
 
 MATERIAL_SHEATH, MATERIAL_BLADE = 0, 1
-KIND_SHEATH, KIND_BLADE = 0.0, 1.0
 
 # Per-vertex attributes (G29), by their names in PlantMesh; the glTF name is gltf_name(name), e.g. "_TILLER_AZ".
 VECTOR_ATTRIBUTES: tuple[str, ...] = ("pivot", "axis", "collar", "side", "tiller_base", "tiller_axis")
 SCALAR_ATTRIBUTES: tuple[str, ...] = ("s", "stem_t", "organ", "phase", "kind", "tiller_az", "tiller", "birth", "draw",
                                       "sen", "fade", "arch")
+# Attributes that change with the build time (per stage in a VAT) and those fixed for a leaf's lifetime (G34).
+STAGE_ATTRIBUTES: tuple[str, ...] = ("pivot", "axis", "collar", "stem_t", "arch", "sen", "fade")
+STATIC_ATTRIBUTES: tuple[str, ...] = tuple(n for n in (*VECTOR_ATTRIBUTES, *SCALAR_ATTRIBUTES)
+                                           if n not in STAGE_ATTRIBUTES)
 
 
 class OrganTableError(ValueError):
@@ -207,6 +211,14 @@ def _num(where: str, value: object) -> float:
     return float(value)  # type: ignore[arg-type]
 
 
+def _int(where: str, value: object) -> int:
+    """An integral number (an int, or a float with no fractional part) as an int; anything else raises."""
+    number = _num(where, value)
+    if not number.is_integer():
+        raise OrganTableError(f"{where} must be an integer, got {value!r}")
+    return int(number)
+
+
 def _field(organ: Mapping[str, object], name: str, time: float) -> object:
     if name not in organ:
         raise OrganTableError(f"organ {organ.get('id')!r} at t={time}: field {name!r} is missing")
@@ -220,7 +232,10 @@ def _leaf(organ: Mapping[str, object], time: float) -> Leaf:
     def vec(name: str) -> Vec3:
         return _vec(f"leaf {organ.get('id')!r} at t={time}: {name}", _field(organ, name, time))
 
-    return Leaf(id=str(_field(organ, "id", time)), tiller=int(num("tiller")), rank=int(num("rank")),
+    def integer(name: str) -> int:
+        return _int(f"leaf {organ.get('id')!r} at t={time}: {name}", _field(organ, name, time))
+
+    return Leaf(id=str(_field(organ, "id", time)), tiller=integer("tiller"), rank=integer("rank"),
                 birth_time=num("birth_time"), age=num("age"), state=str(_field(organ, "state", time)),
                 attach=vec("attach"), direction=vec("direction"), azimuth_rad=num("azimuth_rad"),
                 angle_from_axis_rad=num("angle_from_axis_rad"), sheath_length_m=num("sheath_length_m"),
@@ -233,9 +248,14 @@ def _tiller(organ: Mapping[str, object], time: float) -> Tiller:
     def num(name: str) -> float:
         return _num(f"tiller {organ.get('id')!r} at t={time}: {name}", _field(organ, name, time))
 
-    return Tiller(id=str(_field(organ, "id", time)), tiller=int(num("tiller")), rank=int(num("rank")),
-                  birth_time=num("birth_time"), base=_vec(f"tiller {organ.get('id')!r}: base", organ.get("base")),
-                  direction=_vec(f"tiller {organ.get('id')!r}: direction", organ.get("direction")),
+    def integer(name: str) -> int:
+        return _int(f"tiller {organ.get('id')!r} at t={time}: {name}", _field(organ, name, time))
+
+    def vec(name: str) -> Vec3:
+        return _vec(f"tiller {organ.get('id')!r} at t={time}: {name}", _field(organ, name, time))
+
+    return Tiller(id=str(_field(organ, "id", time)), tiller=integer("tiller"), rank=integer("rank"),
+                  birth_time=num("birth_time"), base=vec("base"), direction=vec("direction"),
                   azimuth_rad=num("azimuth_rad"), splay_rad=num("splay_rad"))
 
 
@@ -258,10 +278,17 @@ def parse_table(document: Mapping[str, object]) -> OrganTable:
         raise OrganTableError("organ table field 'samples' must be a non-empty list")
     samples = []
     for raw in raw_samples:
+        if not isinstance(raw, dict):
+            raise OrganTableError(f"each organ table sample must be an object, got {type(raw).__name__}")
         time = _num("sample time", raw.get("time"))
+        organs = raw.get("organs", [])
+        if not isinstance(organs, list):
+            raise OrganTableError(f"sample at t={time}: 'organs' must be a list, got {type(organs).__name__}")
         leaves: dict[str, Leaf] = {}
         tillers: dict[int, Tiller] = {}
-        for organ in raw.get("organs", []):
+        for organ in organs:
+            if not isinstance(organ, dict):
+                raise OrganTableError(f"sample at t={time}: each organ must be an object, got {type(organ).__name__}")
             kind = organ.get("kind")
             if kind == "leaf":
                 leaf = _leaf(organ, time)
@@ -296,20 +323,15 @@ def lifetime_leaves(table: OrganTable) -> list[str]:
 
 
 def sample_at(table: OrganTable, time: float) -> Sample:
-    """The sample at this time (within TIME_TOLERANCE); the error names the nearest sample times otherwise."""
+    """The sample at this time (within SAMPLE_TIME_TOLERANCE); the error names the nearest sample times otherwise."""
     for sample in table.samples:
-        if abs(sample.time - time) <= TIME_TOLERANCE:
+        if abs(sample.time - time) <= SAMPLE_TIME_TOLERANCE:
             return sample
     nearest = sorted(table.sample_times, key=lambda t: abs(t - time))[:2]
     raise OrganTableError(f"time {time} is not a sample time of the organ table; nearest samples: {sorted(nearest)}")
 
 
 # Profiles (copied from the reference, build_grass_plant.py).
-
-def smoothstep(x: float) -> float:
-    x = min(max(x, 0.0), 1.0)
-    return x * x * (3.0 - 2.0 * x)
-
 
 def lerp(a: float, b: float, f: float) -> float:
     return a + (b - a) * f
@@ -413,7 +435,8 @@ def blade_rows(leaf: Leaf, side: Vec3, r0: float, twist: float, degenerate_at: V
                p: GeometryParams) -> list[list[tuple[Vec3, float, UV]]]:
     """Row vertices (position, s, uv) of the curled blade from the collar (G22, G24).
 
-    The midrib starts at attach and follows rotate(direction, side, arch * s^2), integrated with one step per row.
+    The midrib starts at attach and follows rotate(direction, side, arch * s^2), integrated with one step per row
+    by the midpoint rule (the step from row i takes the direction at s = (i + 0.5) / blade_segments).
     The width runs along -side (the reference's d x Z), twisted about the midrib by twist * s; the cross-section is
     an arc of curl_angle(s) whose edges rise toward the upper side, and a rolled section is a closed arc of the sheath
     radius r0 centred on the midrib.
@@ -425,8 +448,8 @@ def blade_rows(leaf: Leaf, side: Vec3, r0: float, twist: float, degenerate_at: V
     rows = []
     for i in range(p.blade_segments + 1):
         s = i / p.blade_segments
-        d = unit(rotate(d0, side, leaf.arch_rad * s * s))
-        wside = unit(rotate((-side[0], -side[1], -side[2]), d, twist * s))
+        d = rotate(d0, side, leaf.arch_rad * s * s)  # the local tangent orients the cross-section
+        wside = rotate((-side[0], -side[1], -side[2]), d, twist * s)
         nrm = unit(cross(wside, d))  # the upper side of the blade
         blend = unroll_blend(s, leaf.unroll, p)
         theta = lerp(closed, curl_angle(s, p), blend)
@@ -438,7 +461,8 @@ def blade_rows(leaf: Leaf, side: Vec3, r0: float, twist: float, degenerate_at: V
             v = degenerate_at or _add(_add(pos, wside, radius * math.sin(phi)), nrm, radius * (1.0 - math.cos(phi)))
             row.append((v, s, (j / p.cross_segments, s)))
         rows.append(row)
-        path = _add(path, d, step)
+        s_mid = (i + 0.5) / p.blade_segments  # midpoint rule: close to the exact integral at 16 rows
+        path = _add(path, rotate(d0, side, leaf.arch_rad * s_mid * s_mid), step)
     return rows
 
 
@@ -449,6 +473,9 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
     With `lifetime` (leaf ids, e.g. lifetime_leaves(table)) every listed leaf is built in that order, and leaves not
     born at `time` or collapsed are degenerate at their first-seen attach (G28); without it, the leaves present at
     `time` are built. `_ORGAN` is the leaf's index in lifetime_leaves(table) plus 1 either way.
+
+    STATIC_ATTRIBUTES come from the leaf's first-seen record, so they are identical at every build time. A degenerate
+    leaf has fade 1 (opacity 0) and its collar and blade pivot at its anchor, so decline and wind keep it collapsed.
     """
     sample = sample_at(table, time)
     order = lifetime_leaves(table)
@@ -470,16 +497,20 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
             leaf, tiller = sample.leaves[lid], sample.tillers[sample.leaves[lid].tiller]
         else:
             leaf, tiller = first_seen[lid]
+        first_leaf, first_tiller = first_seen[lid]
         degenerate = lid not in sample.leaves or leaf.fade >= 1.0
-        anchor = first_seen[lid][0].attach if degenerate else None
-        side = leaf_side(leaf, tiller)
+        anchor = first_leaf.attach if degenerate else None
+        collar = first_leaf.attach if degenerate else leaf.attach
+        side = leaf_side(first_leaf, first_tiller)
         twist, phase = _leaf_draws(table.seed, lid, p)
         radius = sheath_radius(leaf.age, elongation_age, p)
-        axis = unit(tiller.direction)
-        shared_vectors = {"collar": leaf.attach, "side": side, "tiller_base": tiller.base, "tiller_axis": axis}
-        shared_scalars = {"organ": float(organ_index[lid]), "phase": phase, "tiller_az": tiller.azimuth_rad,
-                          "tiller": float(tiller.tiller), "birth": leaf.birth_time, "draw": leaf.decline_draw,
-                          "sen": leaf.senescence, "fade": leaf.fade, "arch": leaf.arch_rad}
+        axis = unit(first_tiller.direction)
+        direction = unit(leaf.direction)
+        shared_vectors = {"collar": collar, "side": side, "tiller_base": first_tiller.base, "tiller_axis": axis}
+        shared_scalars = {"organ": float(organ_index[lid]), "phase": phase, "tiller_az": first_tiller.azimuth_rad,
+                          "tiller": float(first_tiller.tiller), "birth": first_leaf.birth_time,
+                          "draw": first_leaf.decline_draw, "sen": leaf.senescence,
+                          "fade": 1.0 if degenerate else leaf.fade, "arch": leaf.arch_rad}
 
         start = len(out.positions)
         rows = []
@@ -487,8 +518,9 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
             row = []
             for pos, s, uv in ring:
                 height = leaf.sheath_length_m * s
-                index = out.vertex(pos, {**shared_vectors, "pivot": tiller.base, "axis": axis},
-                                   {**shared_scalars, "s": s, "stem_t": height / plateau, "kind": KIND_SHEATH})
+                index = out.vertex(pos, {**shared_vectors, "pivot": first_tiller.base, "axis": axis},
+                                   {**shared_scalars, "s": s, "stem_t": height / plateau,
+                                    "kind": float(KIND_SHEATH)})
                 row.append((index, uv))
             rows.append(row)
         out.grid(rows, MATERIAL_SHEATH, along_first=False)
@@ -498,9 +530,9 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
         for blade_row in blade_rows(leaf, side, radius, twist, anchor, p):
             row = []
             for pos, s, uv in blade_row:
-                index = out.vertex(pos, {**shared_vectors, "pivot": leaf.attach, "axis": unit(leaf.direction)},
+                index = out.vertex(pos, {**shared_vectors, "pivot": collar, "axis": direction},
                                    {**shared_scalars, "s": s, "stem_t": leaf.sheath_length_m / plateau,
-                                    "kind": KIND_BLADE})
+                                    "kind": float(KIND_BLADE)})
                 row.append((index, uv))
             rows.append(row)
         out.grid(rows, MATERIAL_BLADE, along_first=True)
@@ -510,3 +542,20 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
                      face_materials=tuple(out.face_materials),
                      vectors={k: tuple(v) for k, v in out.vectors.items()},
                      scalars={k: tuple(v) for k, v in out.scalars.items()}, leaves=tuple(ranges))
+
+
+def _integral(name: str, value: float, i: int) -> int:
+    if not (math.isfinite(value) and value.is_integer()):
+        raise ValueError(f"vertex {i}: attribute {name!r} must be integral, got {value!r}")
+    return int(value)
+
+
+def vertex_inputs(mesh: PlantMesh, i: int) -> VertexInputs:
+    """The decline inputs (decline.VertexInputs) of vertex i, read from its attributes (G29, G32)."""
+    sc, vc = mesh.scalars, mesh.vectors
+    return VertexInputs(kind=_integral("kind", sc["kind"][i], i), s=sc["s"][i], collar=vc["collar"][i],
+                        side=vc["side"][i], axis=vc["axis"][i], tiller_base=vc["tiller_base"][i],
+                        tiller_axis=vc["tiller_axis"][i], tiller_azimuth=sc["tiller_az"][i],
+                        tiller=_integral("tiller", sc["tiller"][i], i), birth_time=sc["birth"][i],
+                        decline_draw=sc["draw"][i], senescence=sc["sen"][i], fade=sc["fade"][i],
+                        arch_rad=sc["arch"][i])

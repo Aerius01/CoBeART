@@ -56,6 +56,20 @@ jobs:
         working-directory: cobeart-app
         run: npm test
 
+      - name: Glade plant chain (stdlib tests)
+        run: >-
+          python -m pytest
+          cobeart-app/public/worlds/glade/dev/vat/tests
+          cobeart-app/public/worlds/glade/dev/lpy/tests/test_decline.py
+          cobeart-app/public/worlds/glade/dev/plant/tests/test_shader_mirror.py
+
+      - name: flake8 (Glade plant chain)
+        run: >-
+          python -m flake8
+          cobeart-app/public/worlds/glade/dev/lpy
+          cobeart-app/public/worlds/glade/dev/vat
+          cobeart-app/public/worlds/glade/dev/plant
+
       - name: Fitness checks
         run: node scripts/fitness.mjs
 

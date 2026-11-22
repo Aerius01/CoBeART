@@ -1,8 +1,11 @@
 // Glade grass VAT helpers (public/worlds/glade/dev/grass/vat-textures.mjs, an ES module) on a synthetic grass Vat.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const load = () => import('../public/worlds/glade/dev/grass/vat-textures.mjs');
+const PROFILE = path.join(__dirname, '..', 'public', 'worlds', 'glade', 'dev', 'plant', 'grass_vat_profile.md');
 
 const NEVER = Math.fround(1.0e30);
 const STAGE_TIMES = [0, 0.5, 1.5, 3];
@@ -125,6 +128,33 @@ test('stagePair at and between stage times and at both ends', async () => {
   assert.deepEqual(stagePair(STAGE_TIMES, -1), { i0: 0, i1: 0, w: 0 });
   assert.deepEqual(stagePair([2], 5), { i0: 0, i1: 0, w: 0 });
   assert.throws(() => stagePair(STAGE_TIMES, NaN), /finite/);
+});
+
+test('GRASS_BLOCKS matches the block table of grass_vat_profile.md', async () => {
+  const { GRASS_BLOCKS } = await load();
+  const text = fs.readFileSync(PROFILE, 'utf8');
+  const rows = text.split('\n').filter((line) => /^\| `[a-z_]+` \|/.test(line));
+  const table = {};
+  for (const row of rows) {
+    const [name, domainTiming, components, storage] = row.split('|').slice(1, 5).map((cell) => cell.trim());
+    const [domain, timing] = domainTiming.split(',').map((part) => part.trim());
+    table[name.replaceAll('`', '')] = [domain, timing, components.split(',').length, storage];
+  }
+  assert.ok(rows.length > 0, `no block rows found in ${PROFILE}`);
+  assert.deepEqual(table, Object.fromEntries(Object.entries(GRASS_BLOCKS).map(([k, v]) => [k, [...v]])));
+});
+
+test('aliveMask marks organs with appear <= t < vanish', async () => {
+  const { aliveMask } = await load();
+  const vat = await syntheticVat();
+  const mask = aliveMask(vat, 0.5);
+  assert.ok(mask instanceof Uint8Array);
+  assert.deepEqual(Array.from(mask), [1, 1, 0]);
+  assert.deepEqual(Array.from(aliveMask(vat, -0.1)), [0, 0, 0]);
+  assert.deepEqual(Array.from(aliveMask(vat, 1.5)), [0, 1, 0]);
+  assert.deepEqual(Array.from(aliveMask(vat, 3)), [0, 1, 1]);
+  vat.blocks.delete('lifespan');
+  assert.throws(() => aliveMask(vat, 1), /block 'lifespan' is missing/);
 });
 
 test('aliveOrganCount counts appear <= t < vanish', async () => {

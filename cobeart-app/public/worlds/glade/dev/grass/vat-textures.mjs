@@ -154,19 +154,29 @@ export function stagePair(stageTimes, t) {
 }
 
 /**
+ * Per organ, 1 if it is alive at model time `t` (`appear <= t < vanish`), else 0.
+ * @param {Vat} vat
+ * @param {number} t
+ * @returns {Uint8Array}
+ */
+export function aliveMask(vat, t) {
+  const lifespan = vat.blocks.get('lifespan');
+  if (!lifespan) throw new Error(`grass vat: block 'lifespan' is missing; ${REBAKE}`);
+  const mask = new Uint8Array(vat.organCount);
+  for (let o = 0; o < vat.organCount; o++) {
+    mask[o] = lifespan.raw[2 * o] <= t && t < lifespan.raw[2 * o + 1] ? 1 : 0;
+  }
+  return mask;
+}
+
+/**
  * Number of organs alive at model time `t` (`appear <= t < vanish`).
  * @param {Vat} vat
  * @param {number} t
  * @returns {number}
  */
 export function aliveOrganCount(vat, t) {
-  const lifespan = /** @type {VatBlock} */ (vat.blocks.get('lifespan'));
-  if (!lifespan) throw new Error(`grass vat: block 'lifespan' is missing; ${REBAKE}`);
-  let alive = 0;
-  for (let o = 0; o < vat.organCount; o++) {
-    if (lifespan.raw[2 * o] <= t && t < lifespan.raw[2 * o + 1]) alive++;
-  }
-  return alive;
+  return aliveMask(vat, t).reduce((sum, alive) => sum + alive, 0);
 }
 
 /**

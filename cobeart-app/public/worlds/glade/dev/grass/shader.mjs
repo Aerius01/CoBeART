@@ -11,7 +11,7 @@ export const LOCATIONS = Object.freeze({
   s: 2, // float, fraction along the organ
   place: 3, // instance: x mm, y mm, rotation rad, mm per model metre
   motion: 4, // instance: lean x, lean y (arena axes, rad), wind x, wind y (arena axes, m/s)
-  growth: 5, // instance: g, v, 0, 0
+  growth: 5, // instance: g, v, i0 (stage index, as a float), w (blend weight of stage i0 + 1)
 });
 
 /** Texture units of the shader's samplers. */
@@ -20,7 +20,6 @@ export const TEXTURE_UNITS = Object.freeze({
   normal: 1,
   organStage: 2,
   organStatic: 3,
-  stageTimes: 4,
 });
 
 /** Transform feedback varyings of the capture program, interleaved: 11 floats per vertex. */
@@ -47,7 +46,6 @@ uniform int u_vertexRowWidth;        // texels per row (vertexCount when it fits
 uniform int u_vertexRowsPerStage;    // rows per stage (1 when vertexCount fits)
 uniform sampler2DArray u_organStage; // RGBA32F, x organ, y stage; layers: collar+arch, direction+sheath_length, emergence
 uniform sampler2D u_organStatic;     // RGBA32F, x organ, y row (vat-textures.mjs ORGAN_STATIC_ROWS)
-uniform sampler2D u_stageTimes;      // R32F, x stage
 uniform int u_stageCount;
 uniform float u_tEnd;                // P, last stage time
 uniform float u_fadeDuration;        // P
@@ -182,21 +180,41 @@ float profileMoment(int i, int j, float s, float c) {
   return total / s;
 }
 
-// bend_cumulants: mean, variance and third central moment of the midrib angle over [0, s].
-vec3 bendCumulants(float a, float b, float s, float c) {
-  if (s <= 0.0) return vec3(0.0);
-  float e1 = a * profileMoment(1, 0, s, c) + b * profileMoment(0, 1, s, c);
-  float e2 = a * a * profileMoment(2, 0, s, c) + 2.0 * a * b * profileMoment(1, 1, s, c)
-    + b * b * profileMoment(0, 2, s, c);
-  float e3 = a * a * a * profileMoment(3, 0, s, c) + 3.0 * a * a * b * profileMoment(2, 1, s, c)
-    + 3.0 * a * b * b * profileMoment(1, 2, s, c) + b * b * b * profileMoment(0, 3, s, c);
+// The nine profile moments m(i, j) that bend_cumulants uses, for one s; shared by the healthy and declined sets.
+struct Moments {
+  float m10;
+  float m01;
+  float m20;
+  float m11;
+  float m02;
+  float m30;
+  float m21;
+  float m12;
+  float m03;
+};
+
+Moments profileMoments(float s, float c) {
+  return Moments(
+    profileMoment(1, 0, s, c), profileMoment(0, 1, s, c),
+    profileMoment(2, 0, s, c), profileMoment(1, 1, s, c), profileMoment(0, 2, s, c),
+    profileMoment(3, 0, s, c), profileMoment(2, 1, s, c), profileMoment(1, 2, s, c), profileMoment(0, 3, s, c));
+}
+
+// bend_cumulants: mean, variance and third central moment of the midrib angle over [0, s], s > 0.
+vec3 bendCumulants(float a, float b, Moments m) {
+  float e1 = a * m.m10 + b * m.m01;
+  float e2 = a * a * m.m20 + 2.0 * a * b * m.m11 + b * b * m.m02;
+  float e3 = a * a * a * m.m30 + 3.0 * a * a * b * m.m21 + 3.0 * a * b * b * m.m12 + b * b * b * m.m03;
   return vec3(e1, e2 - e1 * e1, e3 - 3.0 * e1 * e2 + 2.0 * e1 * e1 * e1);
 }
 
 // chord_change: (turn rad, length factor) of the midrib chord from the collar to s when the bend grows.
+// (0, 1) at s = 0, as in Python (both cumulant sets are 0 there).
 vec2 chordChange(float angle, float arch, float extraAngle, float extraArch, float s, float c) {
-  vec3 h = bendCumulants(angle, arch, s, c);
-  vec3 d = bendCumulants(angle + extraAngle, arch + extraArch, s, c);
+  if (s <= 0.0) return vec2(0.0, 1.0);
+  Moments m = profileMoments(s, c);
+  vec3 h = bendCumulants(angle, arch, m);
+  vec3 d = bendCumulants(angle + extraAngle, arch + extraArch, m);
   return vec2((d.x - d.z / 6.0) - (h.x - h.z / 6.0), exp(-(d.y - h.y) / 2.0));
 }
 
@@ -227,17 +245,21 @@ Declined declinedVertex(vec3 position, vec3 normal, bool blade, float s, vec3 co
     outAxis = tillerAxis;
   } else {
     vec3 newCollar = tillerBase + (collar - tillerBase) * lk.sizeScale;
-    float angle = acos(clamp(dot(axis, tillerAxis), -1.0, 1.0));
-    vec2 chord = chordChange(angle, arch, lk.extraAngle, lk.extraArch, clamp(s, 0.0, 1.0), u_collarBend);
+    // A healthy leaf (no extra angle or arch) has chord change (0, 1) exactly; skip the moments.
+    vec2 chord = vec2(0.0, 1.0);
+    if (lk.extraAngle != 0.0 || lk.extraArch != 0.0) {
+      float angle = acos(clamp(dot(axis, tillerAxis), -1.0, 1.0));
+      chord = chordChange(angle, arch, lk.extraAngle, lk.extraArch, clamp(s, 0.0, 1.0), u_collarBend);
+    }
     vec3 offset = (position - collar) * (lk.sizeScale * chord.y);
     drawn = newCollar + rotateAbout(offset, side, chord.x);
     n = rotateAbout(n, side, chord.x);
     pivot = newCollar;
     outAxis = rotateAbout(axis, side, lk.extraAngle);
   }
-  if (leans) {
+  float lean = leans ? tillerLeanRad(v) : 0.0;
+  if (lean != 0.0) {
     vec3 leanAxis = vec3(-sin(tillerAz), cos(tillerAz), 0.0);
-    float lean = tillerLeanRad(v);
     drawn = tillerBase + rotateAbout(drawn - tillerBase, leanAxis, lean);
     pivot = tillerBase + rotateAbout(pivot - tillerBase, leanAxis, lean);
     outAxis = rotateAbout(outAxis, leanAxis, lean);
@@ -247,35 +269,6 @@ Declined declinedVertex(vec3 position, vec3 normal, bool blade, float s, vec3 co
 }
 
 // ==== END decline port ====
-
-float stageTime(int k) {
-  return texelFetch(u_stageTimes, ivec2(k, 0), 0).x;
-}
-
-// The two stages around t and the weight of the upper one (vat-textures.mjs stagePair).
-void stagePair(float t, out int i0, out int i1, out float w) {
-  int last = u_stageCount - 1;
-  i0 = 0;
-  i1 = 0;
-  w = 0.0;
-  if (t <= stageTime(0)) return;
-  if (t >= stageTime(last)) {
-    i0 = last;
-    i1 = last;
-    return;
-  }
-  int lo = 0;
-  int hi = last;
-  for (int k = 0; k < 32 && hi - lo > 1; k++) {
-    int mid = (lo + hi) / 2;
-    if (stageTime(mid) <= t) lo = mid;
-    else hi = mid;
-  }
-  float t0 = stageTime(lo);
-  i0 = lo;
-  i1 = hi;
-  w = (t - t0) / (stageTime(hi) - t0);
-}
 
 vec3 octDecode(ivec2 e) {
   vec2 f = max(vec2(e) / SNORM16, vec2(-1.0));
@@ -310,11 +303,29 @@ void main() {
 #else
   float t = clamp(i_growth.x, 0.0, 1.0) * u_tEnd;
 #endif
+  vec4 life = organStatic(organ, 0);        // appear, vanish, draw, phase
+  vec4 events = organStatic(organ, 1);      // senescent_time, senescence_duration, death_time, tiller
+  float fade = clamp((t - events.z) / u_fadeDuration, 0.0, 1.0);
 
-  int i0;
-  int i1;
-  float w;
-  stagePair(t, i0, i1, w);
+#ifndef CAPTURE
+  // G53: a hidden organ's vertices go outside the clip volume before any other fetch, so its triangles are clipped
+  // away cheaply. The capture program keeps every vertex.
+  if (t < life.x || t >= life.y || leafOpacity(fade, v) <= 0.0) {
+    v_normal = vec3(0.0, 0.0, 1.0);
+    v_kind = 0.0;
+    v_s = 0.0;
+    v_browning = 0.0;
+    v_opacity = 0.0;
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+#endif
+
+  // The stage pair comes with the instance (vat-textures.mjs stagePair of t).
+  int last = u_stageCount - 1;
+  int i0 = clamp(int(i_growth.z + 0.5), 0, last);
+  int i1 = min(i0 + 1, last);
+  float w = clamp(i_growth.w, 0.0, 1.0);
   int vid = gl_VertexID;
   ivec2 at0 = vertexTexel(vid, i0);
   ivec2 at1 = vertexTexel(vid, i1);
@@ -326,8 +337,6 @@ void main() {
   vec4 collarArch = organStage(organ, 0, i0, i1, w);
   vec4 directionSheath = organStage(organ, 1, i0, i1, w);
   float emergence = organStage(organ, 2, i0, i1, w).x;
-  vec4 life = organStatic(organ, 0);        // appear, vanish, draw, phase
-  vec4 events = organStatic(organ, 1);      // senescent_time, senescence_duration, death_time, tiller
   vec4 baseAz = organStatic(organ, 2);      // tiller_base, tiller_az
   vec3 tillerAxis = organStatic(organ, 3).xyz;
   vec3 side = organStatic(organ, 4).xyz;
@@ -335,7 +344,6 @@ void main() {
   // Rebuild rules of the grass profile.
   float age = t - life.x;
   float sen = clamp((t - events.x) / events.y, 0.0, 1.0);
-  float fade = clamp((t - events.z) / u_fadeDuration, 0.0, 1.0);
   vec3 dir = directionSheath.xyz;
   vec3 axis = blade ? (length(dir) > 1e-6 ? normalize(dir) : tillerAxis) : tillerAxis;
   float stemT = blade ? emergence / u_stemHeight : directionSheath.w * s / u_stemHeight;
@@ -408,9 +416,7 @@ void main() {
   v_s = s;
   v_browning = dv.browning;
   v_opacity = dv.opacity;
-  bool hidden = t < life.x || t >= life.y || dv.opacity <= 0.0;
-  // G53: a hidden organ's vertices go outside the clip volume, so its triangles are clipped away.
-  gl_Position = hidden ? vec4(2.0, 2.0, 2.0, 1.0) : u_viewProj * vec4(world, 1.0);
+  gl_Position = u_viewProj * vec4(world, 1.0);
 }
 `;
 

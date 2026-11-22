@@ -1,21 +1,27 @@
 // Grass VAT renderer (GP roadmap, Phase 5, G50 to G54 and G60): one instanced draw of a grass bake. Each instance
-// carries its growth g and vitality v; the vertex shader blends the bake stages around t = g * t_end, applies the
-// decline rule and the wind, and places the plant in the arena. `capture` reads the declined model-space values of
-// one instance back by transform feedback for the check against decline.py.
+// carries its growth g, vitality v and the stage pair around t = g * t_end; the vertex shader blends those stages,
+// applies the decline rule and the wind, and places the plant in the arena. `capture` reads the declined model-space
+// values of one instance back by transform feedback for the check against decline.py. The page owns the context,
+// the canvas size, the viewport and the clear.
 
 import {
   CAPTURE_FLOATS, CAPTURE_VARYINGS, GRASS_FRAGMENT_SHADER, LOCATIONS, TEXTURE_UNITS, grassVertexShader,
 } from './shader.mjs';
 import {
   DECLINE_PARAM_NAMES, ORGAN_STAGE_LAYERS, ORGAN_STATIC_ROWS, checkGrassVat, grassParams, packOrganStage,
-  packOrganStatic, padVertexStages, vertexTextureLayout,
+  packOrganStatic, padVertexStages, stagePair, vertexTextureLayout,
 } from './vat-textures.mjs';
 
 /** @typedef {import('../vat/vat.mjs').Vat} Vat */
 /** @typedef {import('../vat/vat.mjs').VatBlock} VatBlock */
 
-/** Floats per instance: place (x mm, y mm, rotation rad, mm per model metre), motion (lean x, lean y, wind x,
- * wind y), growth (g, v, 0, 0). */
+/**
+ * Floats per instance, three vec4s:
+ * - place: x mm, y mm, rotation rad, mm per model metre;
+ * - motion: lean x, lean y (arena axes, rad), wind x, wind y (arena axes, m/s);
+ * - growth: g, v, i0, w, where `{i0, w} = stagePair(vat.stageTimes, g * tEnd)` (vat-textures.mjs), filled by the
+ *   caller; the shader blends stage i0 with stage min(i0 + 1, last) by w.
+ */
 export const GRASS_INSTANCE_FLOATS = 12;
 
 /**
@@ -50,8 +56,9 @@ export const GRASS_INSTANCE_FLOATS = 12;
 
 /**
  * @typedef {object} GrassRenderer
- * @property {() => void} resize
- * @property {(instances: Float32Array, count: number, uniforms: GrassDrawUniforms) => void} draw
+ * @property {(instances: Float32Array, count: number, uniforms: GrassDrawUniforms) => void} draw binds its program,
+ *   textures and vertex array, enables the depth test and disables culling and blending; draws into the bound
+ *   framebuffer with the caller's viewport (no clear)
  * @property {(t: number, v: number) => Capture} capture
  * @property {GpuTimer | null} gpuTimer
  * @property {() => void} dispose
@@ -136,15 +143,16 @@ function createGpuTimer(gl) {
 }
 
 /**
- * @param {HTMLCanvasElement} canvas
+ * @param {WebGL2RenderingContext} gl the page's context
  * @param {Vat} vat a grass bake (checked with checkGrassVat)
  * @returns {GrassRenderer}
  */
-export function createGrassRenderer(canvas, vat) {
+export function createGrassRenderer(gl, vat) {
   checkGrassVat(vat);
   const params = grassParams(vat);
-  const gl = canvas.getContext('webgl2', { antialias: true });
-  if (!gl) throw new Error('grass renderer: WebGL2 is not available in this browser');
+  if (typeof WebGL2RenderingContext === 'undefined' || !(gl instanceof WebGL2RenderingContext)) {
+    throw new Error('grass renderer: createGrassRenderer needs a WebGL2 context, e.g. canvas.getContext(\'webgl2\')');
+  }
 
   const stageCount = vat.stageTimes.length;
   const { vertexCount, organCount } = vat;
@@ -163,6 +171,7 @@ export function createGrassRenderer(canvas, vat) {
   }
 
   const block = (/** @type {string} */ name) => /** @type {VatBlock} */ (vat.blocks.get(name));
+  const unpackAlignment = gl.getParameter(gl.UNPACK_ALIGNMENT);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   /** @type {WebGLTexture[]} */
   const textures = [];
@@ -192,11 +201,11 @@ export function createGrassRenderer(canvas, vat) {
     padVertexStages(block('normal').raw, vertexCount, stageCount, 2, layout));
   tex2d(TEXTURE_UNITS.organStatic, gl.RGBA32F, organCount, ORGAN_STATIC_ROWS.length, gl.RGBA, gl.FLOAT,
     packOrganStatic(vat));
-  tex2d(TEXTURE_UNITS.stageTimes, gl.R32F, stageCount, 1, gl.RED, gl.FLOAT, new Float32Array(vat.stageTimes));
   const organStage = texture(TEXTURE_UNITS.organStage, gl.TEXTURE_2D_ARRAY);
   gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA32F, organCount, stageCount, ORGAN_STAGE_LAYERS.length, 0, gl.RGBA,
     gl.FLOAT, packOrganStage(vat));
   bindings.push([TEXTURE_UNITS.organStage, gl.TEXTURE_2D_ARRAY, organStage]);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, unpackAlignment);
   const bindTextures = () => {
     for (const [unit, target, tex] of bindings) {
       gl.activeTexture(gl.TEXTURE0 + unit);
@@ -214,7 +223,7 @@ export function createGrassRenderer(canvas, vat) {
   const locations = (program) => {
     /** @type {Record<string, WebGLUniformLocation | null>} */
     const u = {};
-    for (const name of ['position', 'normal', 'organStage', 'organStatic', 'stageTimes', 'stageCount',
+    for (const name of ['position', 'normal', 'organStage', 'organStatic', 'stageCount',
       'vertexRowWidth', 'vertexRowsPerStage', 'tEnd',
       'fadeDuration', 'collarBend', 'viewProj', 'time', 'stemHeight', 'speedRef', 'leafBend', 'leafSwayHz', 'flutter',
       'flutterHz', 'flip', 'dryWindResponse', 'lightDir', 'captureT']) {
@@ -301,16 +310,7 @@ export function createGrassRenderer(canvas, vat) {
   const gpuTimer = createGpuTimer(gl);
 
   return {
-    resize() {
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(canvas.clientWidth * dpr);
-      canvas.height = Math.round(canvas.clientHeight * dpr);
-    },
-
     draw(instances, count, d) {
-      gl.viewport(0, 0, canvas.width, canvas.height);
-      gl.clearColor(0.03, 0.035, 0.025, 1);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       gl.enable(gl.DEPTH_TEST);
       gl.disable(gl.CULL_FACE);
       gl.disable(gl.BLEND);
@@ -337,9 +337,12 @@ export function createGrassRenderer(canvas, vat) {
         throw new Error(`grass renderer: capture needs finite t and v, got t ${t}, v ${v}`);
       }
       const instance = new Float32Array(GRASS_INSTANCE_FLOATS);
+      const { i0, w } = stagePair(vat.stageTimes, t);
       instance[3] = 1;
       instance[8] = t / params.tEnd;
       instance[9] = v;
+      instance[10] = i0;
+      instance[11] = w;
       gl.useProgram(captureProgram);
       bindTextures();
       gl.uniform1f(captureU.captureT, t);

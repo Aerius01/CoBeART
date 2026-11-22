@@ -81,9 +81,14 @@ out float tf_opacity;
 const float TAU = 6.2831853;
 const float SNORM16 = 32767.0;
 
+// Rodrigues rotation in half-angle form: 1 - cos(a) = 2 sin^2(a / 2) stays accurate for small angles even where
+// the GL's cos() is coarse, so the rotation stays norm-preserving.
 vec3 rotateAbout(vec3 v, vec3 k, float a) {
-  float c = cos(a);
-  return v * c + cross(k, v) * sin(a) + k * dot(k, v) * (1.0 - c);
+  float h = 0.5 * a;
+  float sh = sin(h);
+  float s = 2.0 * sh * cos(h);
+  float oneMinusC = 2.0 * sh * sh;
+  return v * (1.0 - oneMinusC) + cross(k, v) * s + k * dot(k, v) * oneMinusC;
 }
 
 // ==== BEGIN decline port: decline.py declined_vertex (look, health, death_point, plant_fade, tiller_lean_rad,

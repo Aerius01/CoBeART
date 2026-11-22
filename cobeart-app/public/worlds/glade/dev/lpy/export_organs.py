@@ -1,5 +1,11 @@
 """Sample an L-Py grass model into an organ table (JSON) validated against organ_table.schema.json.
 
+The model is derived one step at a time. Besides the samples, the table carries `organ_events` (schema v3, G38,
+G45): per leaf the time before its first senescent step, its senescence duration, its death time (first dead step)
+and its collapse time (first step with fade 1), null where the event does not happen by t_end. With those,
+senescence(t) = clamp((t - senescent_time) / senescence_duration, 0, 1) and
+fade(t) = clamp((t - death_time) / FADE_DURATION, 0, 1) at every step; the export checks that it holds.
+
 Usage: export_organs.py <model.lpy> <out.json> [--samples N] [--seed S]
 """
 from __future__ import annotations
@@ -9,9 +15,9 @@ import json
 import logging
 import math
 import sys
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Iterable, Literal, Sequence, get_type_hints
+from typing import Any, Iterable, Literal, Mapping, Sequence, get_type_hints
 
 import jsonschema
 from openalea.lpy import Lsystem
@@ -22,10 +28,11 @@ import decline  # noqa: E402
 
 LOG = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA_PATH = Path(__file__).with_name("organ_table.schema.json")
 DEFAULT_SAMPLES = 25
 TIME_DECIMALS = 9
+EVENT_TOLERANCE = 1e-6  # largest allowed gap between the track and the G38 closed forms
 
 Vec3 = tuple[float, float, float]
 LeafState = Literal["growing", "mature", "senescent", "dead"]
@@ -58,6 +65,7 @@ class LeafOrgan:
     senescence: float
     fade: float
     decline_draw: float
+    senescence_duration: float
 
 
 @dataclass(frozen=True)
@@ -99,12 +107,29 @@ class Sample:
 
 
 @dataclass(frozen=True)
+class LeafEvents:
+    """A leaf's G38 event times (None: not reached by t_end) and its senescence duration."""
+    senescent_time: float | None
+    senescence_duration: float
+    death_time: float | None
+    collapse_time: float | None
+
+
+@dataclass(frozen=True)
+class Track:
+    """The sampled organs and the event times of every leaf seen up to t_end, in (birth_time, id) order."""
+    samples: tuple[Sample, ...]
+    events: Mapping[str, LeafEvents]
+
+
+@dataclass(frozen=True)
 class ModelInfo:
     model: str
     seed: int
     params: dict[str, Any]
     dt: float
     t_end: float
+    fade_duration: float
 
 
 def _is_number(value: object) -> bool:
@@ -295,7 +320,7 @@ def read_model_info(lsystem: Lsystem, model_path: Path) -> ModelInfo:
     """Read the externs, DT, T_END and SEED from the loaded model."""
     names = lsystem.context().globals()
     externs = names["__externs__"]
-    for required in ("SEED", "DT", "T_END"):
+    for required in ("SEED", "DT", "T_END", "FADE_DURATION"):
         if required not in externs:
             raise OrganTableError(f"{model_path.name}: missing extern({required}=...) in the parameter block")
     params = {name: names[name] for name in sorted(externs)}
@@ -305,12 +330,15 @@ def read_model_info(lsystem: Lsystem, model_path: Path) -> ModelInfo:
     if not _is_int(params["SEED"]):
         raise OrganTableError(f"{model_path.name}: extern SEED must be an int, got {params['SEED']!r}")
     dt, t_end = _number("model", "DT", params["DT"]), _number("model", "T_END", params["T_END"])
-    if dt <= 0 or t_end <= 0:
-        raise OrganTableError(f"{model_path.name}: DT and T_END must be positive, got DT={dt}, T_END={t_end}")
+    fade_duration = _number("model", "FADE_DURATION", params["FADE_DURATION"])
+    if dt <= 0 or t_end <= 0 or fade_duration <= 0:
+        raise OrganTableError(f"{model_path.name}: DT, T_END and FADE_DURATION must be positive, got DT={dt}, "
+                              f"T_END={t_end}, FADE_DURATION={fade_duration}")
     steps = t_end / dt
     if abs(steps - round(steps)) > 1e-9:
         raise OrganTableError(f"{model_path.name}: T_END={t_end} is not an integer multiple of DT={dt}")
-    return ModelInfo(model=model_path.name, seed=params["SEED"], params=params, dt=dt, t_end=t_end)
+    return ModelInfo(model=model_path.name, seed=params["SEED"], params=params, dt=dt, t_end=t_end,
+                     fade_duration=fade_duration)
 
 
 def load_model(model_path: Path, seed: int | None) -> Lsystem:
@@ -321,22 +349,95 @@ def load_model(model_path: Path, seed: int | None) -> Lsystem:
     return lsystem
 
 
-def derive_samples(lsystem: Lsystem, info: ModelInfo, samples: int) -> list[Sample]:
-    """Derive incrementally and capture the organs at each sample step."""
+def step_time(step: int, dt: float) -> float:
+    """Time of the L-string after `step` derivation steps, rounded like every exported time."""
+    return round(step * dt, TIME_DECIMALS)
+
+
+def next_events(events: dict[str, LeafEvents], leaves: Iterable[LeafOrgan], step: int,
+                dt: float) -> dict[str, LeafEvents]:
+    """Events updated with the leaves of the L-string after `step` steps; the first step of each event wins.
+
+    senescent_time is the step before the first senescent (or dead) step, since the model already adds
+    DT / senescence_duration to senescence in that step.
+    """
+    updated = dict(events)
+    time = step_time(step, dt)
+    for leaf in leaves:
+        known = updated.get(leaf.id)
+        if known is None:
+            known = LeafEvents(None, leaf.senescence_duration, None, None)
+        elif known.senescence_duration != leaf.senescence_duration:
+            raise OrganTableError(
+                f"leaf {leaf.id}: field 'senescence_duration' changed from {known.senescence_duration} to "
+                f"{leaf.senescence_duration} at time {time}; it is a birth draw and must stay fixed"
+            )
+        if known.senescent_time is None and leaf.state in ("senescent", "dead"):
+            known = replace(known, senescent_time=step_time(step - 1, dt))
+        if known.death_time is None and leaf.state == "dead":
+            known = replace(known, death_time=time)
+        if known.collapse_time is None and leaf.fade == 1:
+            known = replace(known, collapse_time=time)
+        updated[leaf.id] = known
+    return updated
+
+
+def event_senescence(events: LeafEvents, time: float) -> float:
+    """G38: senescence at `time` from the leaf's events."""
+    if events.senescent_time is None:
+        return 0.0
+    return min(max((time - events.senescent_time) / events.senescence_duration, 0.0), 1.0)
+
+
+def event_fade(events: LeafEvents, time: float, fade_duration: float) -> float:
+    """G38: fade at `time` from the leaf's events."""
+    if events.death_time is None:
+        return 0.0
+    return min(max((time - events.death_time) / fade_duration, 0.0), 1.0)
+
+
+def check_event_formulas(leaves: Iterable[LeafOrgan], events: dict[str, LeafEvents], time: float,
+                         fade_duration: float) -> None:
+    """Raise unless the G38 closed forms reproduce every leaf's senescence and fade at this step."""
+    for leaf in leaves:
+        known = events[leaf.id]
+        for field, expected, actual in (("senescence", event_senescence(known, time), leaf.senescence),
+                                        ("fade", event_fade(known, time, fade_duration), leaf.fade)):
+            if abs(expected - actual) > EVENT_TOLERANCE:
+                raise OrganTableError(
+                    f"leaf {leaf.id}: field {field!r} is {actual} at time {time} but its events {known} give "
+                    f"{expected}; the model must change senescence by DT / senescence_duration per step from its "
+                    "first senescent step and fade by DT / FADE_DURATION per step from its first dead step"
+                )
+
+
+def derive_track(lsystem: Lsystem, info: ModelInfo, samples: int) -> Track:
+    """Derive one step at a time to t_end, recording leaf events at every step and the organs at sample steps."""
+    wanted = sample_steps(info.dt, info.t_end, samples)
+    sample_set = set(wanted)
     tree = lsystem.axiom
-    done = 0
+    events: dict[str, LeafEvents] = {}
     result: list[Sample] = []
-    for step in sample_steps(info.dt, info.t_end, samples):
-        if step > done:
-            tree = lsystem.derive(tree, done, step - done)
-            done = step
-        time = round(step * info.dt, TIME_DECIMALS)
-        result.append(Sample(time=time, organs=organs_from_modules(tree, time)))
-    return result
+    for step in range(wanted[-1] + 1):
+        if step > 0:
+            tree = lsystem.derive(tree, step - 1, 1)
+        time = step_time(step, info.dt)
+        organs = organs_from_modules(tree, time)
+        leaves = [o for o in organs if isinstance(o, LeafOrgan)]
+        events = next_events(events, leaves, step, info.dt)
+        check_event_formulas(leaves, events, time, info.fade_duration)
+        if step in sample_set:
+            result.append(Sample(time=time, organs=organs))
+    order = {o.id: (o.birth_time, o.id) for o in result[-1].organs}
+    missing = sorted(set(events) - set(order))
+    if missing:
+        raise OrganTableError(f"leaves {missing} are missing from the sample at t_end {result[-1].time}")
+    return Track(samples=tuple(result), events={lid: events[lid] for lid in sorted(events, key=order.__getitem__)})
 
 
-def build_document(info: ModelInfo, samples: Sequence[Sample]) -> dict[str, Any]:
+def build_document(info: ModelInfo, track: Track) -> dict[str, Any]:
     """Assemble the JSON-ready organ-table document."""
+    samples = track.samples
     return {
         "schema_version": SCHEMA_VERSION,
         "model": info.model,
@@ -345,6 +446,7 @@ def build_document(info: ModelInfo, samples: Sequence[Sample]) -> dict[str, Any]
         "dt": info.dt,
         "t_end": info.t_end,
         "sample_times": [s.time for s in samples],
+        "organ_events": {lid: asdict(e) for lid, e in track.events.items()},
         "samples": [{"time": s.time, "organs": [_organ_dict(o) for o in s.organs]} for s in samples],
     }
 
@@ -382,9 +484,9 @@ def export_organs(
         decline.DeclineParams.from_mapping(info.params)
     except ValueError as error:
         raise OrganTableError(f"{model_path.name}: {error}") from error
-    sampled = derive_samples(lsystem, info, samples)
-    check_stable_ids(sampled)
-    document = build_document(info, sampled)
+    track = derive_track(lsystem, info, samples)
+    check_stable_ids(track.samples)
+    document = build_document(info, track)
     validate_document(document)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")

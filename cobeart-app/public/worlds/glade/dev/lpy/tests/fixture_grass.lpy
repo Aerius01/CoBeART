@@ -1,8 +1,10 @@
 """Tiny deterministic model following the grass module interface, for exporter tests.
 
 Leaf(id, tiller, rank, birth_time, age, state, o): a leaf born in the step starting at time b first appears
-with age DT and birth_time b. A dead leaf keeps its size while its fade rises to 1 over FADE_DURATION,
-then collapses (zero sizes, attach at the tiller base). PREVIEW_DECLINE is unused (parity with grass.lpy); the
+with age DT and birth_time b. From age LIFE - 1 its senescence rises linearly over its senescence_duration (1 or
+1.5 P, drawn from its own stream), as in grass.lpy: by DT / senescence_duration per step, positive from the first
+senescent step. At senescence 1 it is dead and keeps its size while its fade rises to 1 over FADE_DURATION, then
+collapses (zero sizes, attach at the tiller base). PREVIEW_DECLINE is unused (parity with grass.lpy); the
 decline externs carry grass.lpy's defaults so the exporter accepts the model; decline_draw is a unit draw in [-1, 1].
 The axiom leaf is born at time 0 with age 0. Apex needs the module declaration below to bind its parameters.
 """
@@ -43,22 +45,30 @@ def birth_jitter(leaf_id):
     return jitter[leaf_id]
 
 
-def leaf_state(age):
-    if age < 1.0:
-        return "growing"
-    if age < LIFE - 1.0:
-        return "mature"
-    if age < LIFE:
+def senescence_duration(leaf_id):
+    return random.Random("senescence:%d:%s" % (SEED, leaf_id)).choice((1.0, 1.5))
+
+
+def senescence(leaf_id, age):
+    return min(1.0, max(0.0, (age - (LIFE - 1.0)) / senescence_duration(leaf_id)))
+
+
+def leaf_state(leaf_id, age):
+    sen = senescence(leaf_id, age)
+    if sen >= 1.0:
+        return "dead"
+    if sen > 0.0:
         return "senescent"
-    return "dead"
+    return "growing" if age < 1.0 else "mature"
 
 
 def leaf_o(leaf_id, tiller, rank, age):
     j = birth_jitter(leaf_id)
     az = math.pi * (rank % 2) + j
-    fade = min(1.0, max(0.0, (age - LIFE) / FADE_DURATION))
+    sen = senescence(leaf_id, age)
+    death_age = LIFE - 1.0 + senescence_duration(leaf_id)
+    fade = min(1.0, max(0.0, (age - death_age) / FADE_DURATION))
     size = 0.0 if fade >= 1.0 else min(1.0, age / 2.0)
-    sen = 1.0 if age >= LIFE else min(1.0, max(0.0, age - (LIFE - 1.0)))
     sheath = 0.05 * size
     return {
         "attach": [0.004 * tiller, 0.0, sheath],
@@ -73,6 +83,7 @@ def leaf_o(leaf_id, tiller, rank, age):
         "senescence": sen,
         "fade": fade,
         "decline_draw": decline_draw(leaf_id),
+        "senescence_duration": senescence_duration(leaf_id),
     }
 
 
@@ -93,7 +104,7 @@ module Apex, Leaf, Tiller
 
 derivation length: int(round(T_END / DT))
 
-Axiom: Tiller(0, 0, 0.0, tiller_o(0)) Leaf("L0.1", 0, 1, 0.0, 0.0, "growing", leaf_o("L0.1", 0, 1, 0.0)) Apex(0, 2, 1.0)
+Axiom: Tiller(0, 0, 0.0, tiller_o(0)) Leaf("L0.1", 0, 1, 0.0, 0.0, leaf_state("L0.1", 0.0), leaf_o("L0.1", 0, 1, 0.0)) Apex(0, 2, 1.0)
 
 production:
 
@@ -102,13 +113,13 @@ Apex(t, r, tn) :
     if tn2 > 1e-9:
         produce Apex(t, r, tn2)
     else:
-        nproduce Leaf(leaf_id_of(t, r), t, r, (r - 1) * 1.0 + 2.0 * t - DT, DT, leaf_state(DT), leaf_o(leaf_id_of(t, r), t, r, DT))
+        nproduce Leaf(leaf_id_of(t, r), t, r, (r - 1) * 1.0 + 2.0 * t - DT, DT, leaf_state(leaf_id_of(t, r), DT), leaf_o(leaf_id_of(t, r), t, r, DT))
         nproduce Apex(t, r + 1, 1.0)
         if t == 0 and r == 2:
             nproduce Tiller(1, r, (r - 1) * 1.0 - DT, tiller_o(1)) Apex(1, 1, 1.0)
 
 Leaf(i, t, r, b, a, s, o) :
     a2 = a + DT
-    produce Leaf(i, t, r, b, a2, leaf_state(a2), leaf_o(i, t, r, a2))
+    produce Leaf(i, t, r, b, a2, leaf_state(i, a2), leaf_o(i, t, r, a2))
 
 endlsystem

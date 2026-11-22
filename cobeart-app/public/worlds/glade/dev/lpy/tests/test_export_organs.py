@@ -33,7 +33,7 @@ def test_export_matches_schema_and_header(tmp_path: Path) -> None:
     doc = run_export(tmp_path, samples=7)
     schema = json.loads(eo.SCHEMA_PATH.read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator(schema).validate(doc)
-    assert doc["schema_version"] == 2
+    assert doc["schema_version"] == 3
     assert doc["model"] == "fixture_grass.lpy"
     assert doc["seed"] == 1
     assert set(doc["params"]) == {"SEED", "DT", "T_END", "LIFE", "FADE_DURATION", "PREVIEW_DECLINE"} | DECLINE_NAMES
@@ -131,7 +131,7 @@ def make_leaf(**changes: Any) -> eo.LeafOrgan:
         id="L0.1", kind="leaf", tiller=0, rank=1, birth_time=0.0, age=0.0, state="growing",
         attach=(0.0, 0.0, 0.0), direction=(0.0, 0.0, 1.0), azimuth_rad=0.0, angle_from_axis_rad=0.0,
         sheath_length_m=0.1, blade_length_m=0.1, blade_width_m=0.01, unroll=0.0, arch_rad=0.0, senescence=0.0,
-        fade=0.0, decline_draw=0.0,
+        fade=0.0, decline_draw=0.0, senescence_duration=2.0,
     )
     return dataclasses.replace(leaf, **changes)
 
@@ -273,10 +273,80 @@ def test_decline_draw_outside_unit_range_is_rejected(tmp_path: Path) -> None:
 
 
 def test_schema_required_fields_match_dataclasses() -> None:
-    defs = json.loads(eo.SCHEMA_PATH.read_text(encoding="utf-8"))["$defs"]
+    schema = json.loads(eo.SCHEMA_PATH.read_text(encoding="utf-8"))
+    defs = schema["$defs"]
+    assert "organ_events" in schema["required"]
+    assert set(defs["leafEvents"]["required"]) == {f.name for f in dataclasses.fields(eo.LeafEvents)}
+    assert set(defs["leafEvents"]["properties"]) == set(defs["leafEvents"]["required"])
     assert set(defs["leaf"]["required"]) == {f.name for f in dataclasses.fields(eo.LeafOrgan)}
     assert set(defs["tiller"]["required"]) == {f.name for f in dataclasses.fields(eo.TillerOrgan)}
     assert set(defs["leaf"]["properties"]) == set(defs["leaf"]["required"])
     assert set(defs["tiller"]["properties"]) == set(defs["tiller"]["required"])
     assert eo.LEAF_VECTOR_KEYS == ("attach", "direction")
     assert eo.TILLER_VECTOR_KEYS == ("base", "direction")
+
+
+def test_organ_events_of_the_fixture(tmp_path: Path) -> None:
+    """L0.1 turns senescent at age 3 + DT and lasts 1.5 P; late leaves miss events by T_END."""
+    doc = run_export(tmp_path, samples=25)
+    events = doc["organ_events"]
+    last = [o for o in doc["samples"][-1]["organs"] if o["kind"] == "leaf"]
+    assert list(events) == [o["id"] for o in last]
+    assert events["L0.1"] == {"senescent_time": 3.0, "senescence_duration": 1.5, "death_time": 4.5,
+                              "collapse_time": 5.5}
+    assert events["L0.9"]["death_time"] == 11.5 and events["L0.9"]["collapse_time"] is None
+    assert events["L0.10"]["senescent_time"] == 11.5 and events["L0.10"]["death_time"] is None
+    assert events["L1.11"] == {"senescent_time": None, "senescence_duration": 1.5, "death_time": None,
+                               "collapse_time": None}
+    for sample in doc["samples"]:
+        for leaf in (o for o in sample["organs"] if o["kind"] == "leaf"):
+            assert leaf["senescence_duration"] == events[leaf["id"]]["senescence_duration"]
+
+
+def test_events_do_not_depend_on_the_sample_count(tmp_path: Path) -> None:
+    assert run_export(tmp_path, "a.json", samples=2)["organ_events"] == \
+        run_export(tmp_path, "b.json", samples=25)["organ_events"]
+
+
+def test_senescence_breaking_the_closed_form_is_reported(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.lpy"
+    text = FIXTURE.read_text().replace(
+        "return min(1.0, max(0.0, (age - (LIFE - 1.0)) / senescence_duration(leaf_id)))",
+        "return min(1.0, max(0.0, (age - (LIFE - 1.0)) / senescence_duration(leaf_id))) ** 2",
+    )
+    assert text != FIXTURE.read_text()
+    broken.write_text(text, encoding="utf-8")
+    out = tmp_path / "out.json"
+    with pytest.raises(eo.OrganTableError, match=r"leaf L0\.1: field 'senescence' .* at time 3\.5"):
+        eo.export_organs(broken, out)
+    assert not out.exists()
+
+
+def test_changing_senescence_duration_is_reported(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.lpy"
+    text = FIXTURE.read_text().replace('"senescence_duration": senescence_duration(leaf_id),',
+                                       '"senescence_duration": senescence_duration(leaf_id) + age,')
+    assert text != FIXTURE.read_text()
+    broken.write_text(text, encoding="utf-8")
+    with pytest.raises(eo.OrganTableError, match=r"leaf L0\.1: field 'senescence_duration' changed"):
+        eo.export_organs(broken, tmp_path / "out.json")
+
+
+def test_missing_fade_duration_is_an_error(tmp_path: Path) -> None:
+    model = tmp_path / "nofade.lpy"
+    model.write_text(FIXTURE.read_text().replace("extern(FADE_DURATION=1.0)\n", "FADE_DURATION = 1.0\n"),
+                     encoding="utf-8")
+    with pytest.raises(eo.OrganTableError, match=r"nofade\.lpy.*FADE_DURATION"):
+        eo.export_organs(model, tmp_path / "out.json")
+
+
+def test_schema_rejects_bad_organ_events(tmp_path: Path) -> None:
+    doc = run_export(tmp_path, samples=3)
+    for edit in (lambda d: d.pop("organ_events"),
+                 lambda d: d["organ_events"]["L0.1"].pop("death_time"),
+                 lambda d: d["organ_events"]["L0.1"].__setitem__("senescence_duration", None),
+                 lambda d: d["organ_events"].__setitem__("T0", d["organ_events"]["L0.1"])):
+        bad = json.loads(json.dumps(doc))
+        edit(bad)
+        with pytest.raises(eo.OrganTableError):
+            eo.validate_document(bad)

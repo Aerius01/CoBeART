@@ -516,7 +516,8 @@ def test_attribute_split() -> None:
     names = (*gg.VECTOR_ATTRIBUTES, *gg.SCALAR_ATTRIBUTES)
     assert set(gg.STAGE_ATTRIBUTES) | set(gg.STATIC_ATTRIBUTES) == set(names)
     assert not set(gg.STAGE_ATTRIBUTES) & set(gg.STATIC_ATTRIBUTES)
-    assert set(gg.STAGE_ATTRIBUTES) == {"pivot", "axis", "collar", "s", "stem_t", "arch", "sen", "fade"}
+    assert set(gg.STAGE_ATTRIBUTES) == {"pivot", "axis", "collar", "stem_t", "arch", "sen", "fade"}
+    assert "s" in gg.STATIC_ATTRIBUTES
 
 
 def test_static_attributes_identical_across_samples(meshes: dict[float, gg.PlantMesh]) -> None:
@@ -567,7 +568,7 @@ def test_errors(table: gg.OrganTable) -> None:
         gg.build_plant(table, 6.2, P)
     with pytest.raises(gg.OrganTableError, match="not in the organ table"):
         gg.build_plant(table, 6.0, P, ["L9.9"])
-    with pytest.raises(gg.OrganTableError, match="schema_version must be 2"):
+    with pytest.raises(gg.OrganTableError, match="schema_version must be 3"):
         gg.parse_table({"schema_version": 1})
     with pytest.raises(ValueError, match="sheath_rows"):
         gg.GeometryParams(sheath_rows=0)
@@ -604,3 +605,48 @@ def test_loader_errors(organ_table_path: Path) -> None:
     leaf_index = next(i for i, o in enumerate(last) if o["kind"] == "leaf")
     with pytest.raises(gg.OrganTableError, match="rank must be an integer"):
         gg.parse_table(broken(lambda d: d["samples"][-1]["organs"][leaf_index].__setitem__("rank", 1.5)))
+
+
+def test_events_follow_the_table(table: gg.OrganTable, lifetime: list[str]) -> None:
+    """Every lifetime leaf has its events, and the G38 closed forms give its senescence and fade at every sample."""
+    assert list(table.events) == lifetime
+    fade_duration = float(table.params["FADE_DURATION"])  # type: ignore[arg-type]
+    for sample in table.samples:
+        for leaf in sample.leaves.values():
+            e = table.events[leaf.id]
+            sen = 0.0 if e.senescent_time is None else min(max(
+                (sample.time - e.senescent_time) / e.senescence_duration, 0.0), 1.0)
+            fade = 0.0 if e.death_time is None else min(max((sample.time - e.death_time) / fade_duration, 0.0), 1.0)
+            assert abs(sen - leaf.senescence) <= 1e-6, (leaf.id, sample.time)
+            assert abs(fade - leaf.fade) <= 1e-6, (leaf.id, sample.time)
+            assert (leaf.fade == 1.0) == (e.collapse_time is not None and e.collapse_time <= sample.time)
+    assert any(e.collapse_time is not None for e in table.events.values())
+    assert any(e.senescent_time is None for e in table.events.values())
+
+
+def test_event_loader_errors(organ_table_path: Path) -> None:
+    import json
+    doc = json.loads(organ_table_path.read_text(encoding="utf-8"))
+    leaf_id = next(iter(doc["organ_events"]))
+
+    def broken(edit: object) -> dict[str, object]:
+        d = json.loads(json.dumps(doc))
+        edit(d)  # type: ignore[operator]
+        return d
+
+    with pytest.raises(gg.OrganTableError, match="field 'organ_events' is missing"):
+        gg.parse_table(broken(lambda d: d.pop("organ_events")))
+    with pytest.raises(gg.OrganTableError, match=rf"missing \['{leaf_id}'\]"):
+        gg.parse_table(broken(lambda d: d["organ_events"].pop(leaf_id)))
+    with pytest.raises(gg.OrganTableError, match=r"not in any sample \['L9\.9'\]"):
+        gg.parse_table(broken(lambda d: d["organ_events"].__setitem__("L9.9", d["organ_events"][leaf_id])))
+    with pytest.raises(gg.OrganTableError, match=rf"organ_events '{leaf_id}': missing field\(s\) \['death_time'\]"):
+        gg.parse_table(broken(lambda d: d["organ_events"][leaf_id].pop("death_time")))
+    with pytest.raises(gg.OrganTableError, match=rf"organ_events '{leaf_id}': death_time must be a finite number"):
+        gg.parse_table(broken(lambda d: d["organ_events"][leaf_id].__setitem__("death_time", "soon")))
+    with pytest.raises(gg.OrganTableError, match=rf"organ_events '{leaf_id}': collapse_time must be >= 0"):
+        gg.parse_table(broken(lambda d: d["organ_events"][leaf_id].__setitem__("collapse_time", -1.0)))
+    with pytest.raises(gg.OrganTableError, match=rf"organ_events '{leaf_id}': senescence_duration must be a finite"):
+        gg.parse_table(broken(lambda d: d["organ_events"][leaf_id].__setitem__("senescence_duration", None)))
+    with pytest.raises(gg.OrganTableError, match=rf"organ_events '{leaf_id}': senescence_duration must be positive"):
+        gg.parse_table(broken(lambda d: d["organ_events"][leaf_id].__setitem__("senescence_duration", 0.0)))

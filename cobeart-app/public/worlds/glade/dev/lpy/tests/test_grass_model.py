@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,11 +22,26 @@ GRASS = LPY_DIR / "grass.lpy"
 MAX_UNROLLED_TILT_DEG = 25.0
 ROLLED_UNROLL = 0.2
 EXPECTED_TILLERS = 5
+EVERY_STEP_SAMPLES = 241  # T_END / DT + 1 with the defaults: a sample at every step
+EXPORT_TIMEOUT_S = 120
+EVENT_TOLERANCE = 1e-6
 
 
 @pytest.fixture(scope="module")
 def doc25(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     return export(tmp_path_factory.mktemp("grass25"), "out.json", samples=25)
+
+
+@pytest.fixture(scope="module")
+def doc241(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """A sample at every step, exported in a subprocess so no Lsystem outlives its tree in this process."""
+    out = tmp_path_factory.mktemp("grass241") / "out.json"
+    result = subprocess.run([sys.executable, str(LPY_DIR / "export_organs.py"), str(GRASS), str(out),
+                             "--samples", str(EVERY_STEP_SAMPLES)], capture_output=True, text=True,
+                            timeout=EXPORT_TIMEOUT_S)
+    if result.returncode != 0:
+        raise RuntimeError(f"export_organs.py failed ({result.returncode}): {result.stderr.strip()}")
+    return json.loads(out.read_text(encoding="utf-8"))
 
 
 def export(directory: Path, name: str, **kwargs: Any) -> dict[str, Any]:
@@ -125,10 +141,11 @@ def leaf_histories(doc: dict[str, Any]) -> dict[str, list[tuple[float, dict[str,
 
 
 def test_schema_version_and_new_leaf_fields(doc25: dict[str, Any]) -> None:
-    assert doc25["schema_version"] == 2
+    assert doc25["schema_version"] == 3
     leaves = [o for o in doc25["samples"][-1]["organs"] if o["kind"] == "leaf"]
     assert leaves and all("fade" in o and "decline_draw" in o for o in leaves)
     assert len({o["decline_draw"] for o in leaves}) > 1
+    assert len({o["senescence_duration"] for o in leaves}) > 1
 
 
 def test_senescence_one_iff_dead_and_fade_only_when_dead(doc25: dict[str, Any]) -> None:
@@ -155,14 +172,12 @@ def test_fade_never_decreases_and_fade_one_is_collapsed(doc25: dict[str, Any]) -
     assert collapsed_seen > 0
 
 
-def test_dead_leaves_reach_fade_one_within_fade_duration(tmp_path: Path) -> None:
+def test_dead_leaves_reach_fade_one_within_fade_duration(doc241: dict[str, Any]) -> None:
     """With a sample at every step, a leaf dead for FADE_DURATION (plus half a step) is collapsed."""
-    lsystem = Lsystem(str(GRASS))
-    reference = lsystem.context().globals()
-    dt, fade_duration = reference["DT"], reference["FADE_DURATION"]
-    every_step = export(tmp_path, "all_steps.json", samples=round(reference["T_END"] / dt) + 1)
+    dt, fade_duration = doc241["dt"], doc241["params"]["FADE_DURATION"]
+    assert len(doc241["samples"]) == round(doc241["t_end"] / dt) + 1
     checked = 0
-    for leaf_id, history in leaf_histories(every_step).items():
+    for leaf_id, history in leaf_histories(doc241).items():
         first_dead = next((time for time, leaf in history if leaf["state"] == "dead"), None)
         for time, leaf in history:
             if first_dead is not None and time >= first_dead + fade_duration + dt / 2:
@@ -202,3 +217,49 @@ def test_export_params_build_the_model_decline_and_declined_leaf_runs(doc25: dic
                 assert 0.0 <= drawn.opacity <= 1.0, (leaf["id"], sample["time"], v)
                 checked += 1
     assert checked > 0
+
+
+def clamp01(x: float) -> float:
+    return min(max(x, 0.0), 1.0)
+
+
+def test_organ_events_reproduce_senescence_and_fade(doc241: dict[str, Any]) -> None:
+    """G38: the closed forms of the events give every leaf's senescence and fade at every step."""
+    events = doc241["organ_events"]
+    fade_duration = doc241["params"]["FADE_DURATION"]
+    histories = leaf_histories(doc241)
+    assert set(events) == set(histories)
+    checked = 0
+    for leaf_id, history in histories.items():
+        e = events[leaf_id]
+        for time, leaf in history:
+            sen = 0.0 if e["senescent_time"] is None else clamp01(
+                (time - e["senescent_time"]) / e["senescence_duration"])
+            fade = 0.0 if e["death_time"] is None else clamp01((time - e["death_time"]) / fade_duration)
+            assert abs(sen - leaf["senescence"]) <= EVENT_TOLERANCE, (leaf_id, time, sen, leaf["senescence"])
+            assert abs(fade - leaf["fade"]) <= EVENT_TOLERANCE, (leaf_id, time, fade, leaf["fade"])
+            if leaf["fade"] == 1:
+                assert e["collapse_time"] is not None and e["collapse_time"] <= time, (leaf_id, time)
+            else:
+                assert e["collapse_time"] is None or e["collapse_time"] > time, (leaf_id, time)
+            assert leaf["senescence_duration"] == e["senescence_duration"], (leaf_id, time)
+            checked += 1
+    assert checked > 0
+
+
+def test_organ_events_are_ordered_and_reached(doc241: dict[str, Any]) -> None:
+    events = doc241["organ_events"]
+    fade_duration = doc241["params"]["FADE_DURATION"]
+    reached = {name: sum(e[name] is not None for e in events.values())
+               for name in ("senescent_time", "death_time", "collapse_time")}
+    assert reached["senescent_time"] >= reached["death_time"] >= reached["collapse_time"] > 0, reached
+    for leaf_id, e in events.items():
+        if e["death_time"] is not None:
+            assert e["senescent_time"] is not None and e["senescent_time"] < e["death_time"], leaf_id
+        if e["collapse_time"] is not None:
+            assert e["death_time"] is not None, leaf_id
+            assert abs(e["collapse_time"] - e["death_time"] - fade_duration) <= EVENT_TOLERANCE, leaf_id
+
+
+def test_organ_events_independent_of_sample_count(doc25: dict[str, Any], doc241: dict[str, Any]) -> None:
+    assert doc25["organ_events"] == doc241["organ_events"]

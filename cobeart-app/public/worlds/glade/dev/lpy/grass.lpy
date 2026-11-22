@@ -1,8 +1,8 @@
-"""Glade grass: a bushy vegetative grass clump (GP roadmap, Phases 1 and 2).
+"""Glade grass: a bushy vegetative grass clump (GP roadmap, Phases 1, 2 and 4).
 
 Structure and timing only (P5): which leaves and tillers exist, where they attach, and their age, size, angles
 and state. Each Leaf and Tiller module carries `o`, a dict with exactly the organ-table fields of the roadmap's
-format (G2, G15), recomputed every step; the exporter (export_organs.py) copies them. The viewer draws a skeleton.
+format (G2, G15, G45), recomputed every step; the exporter (export_organs.py) copies them. The viewer draws a skeleton.
 
 The track is the healthy plant (G15): a leaf's sizes, angle and arch are its healthy baseline at its age, while
 senescence (turnover), fade (removal after a turnover death) and decline_draw carry the rest. Decline is a second
@@ -28,6 +28,10 @@ little after their trigger and keep their own phyllochron (G20), so shoots do no
 A leaf's azimuth_rad and angle_from_axis_rad are spherical angles in its tiller's frame: the pole is the tiller
 direction and the frame is the minimal rotation taking +Z onto it (identity for the main shoot). direction is that
 rotation applied to those angles, in world space, and is the authoritative field.
+
+A leaf's senescence_duration (its birth draw, see SENESCENCE_JITTER) is in `o` too (G45): once a leaf turns
+senescent its senescence rises by DT / senescence_duration per step, so the exporter can write its event times and a
+consumer can rebuild senescence and fade in closed form (G38).
 
 Use one Lsystem instance, derived forward only; birth draws live in module globals reset by Start(). Everything
 that changes after birth (age, state, senescence, fade) is carried in the modules.
@@ -344,6 +348,7 @@ def leaf_o(lid, tiller, age, state, sen, fade):
         "senescence": sen,
         "fade": fade,
         "decline_draw": d["decline_draw"],
+        "senescence_duration": d["senescence_duration"],
     }
 
 

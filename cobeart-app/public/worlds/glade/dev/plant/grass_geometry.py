@@ -1,6 +1,6 @@
 """Glade grass mesh from an organ table (GP roadmap, Phase 3): pure Python, stdlib only, no bpy.
 
-Builds the healthy plant at one sample time of an export of ../lpy/grass.lpy (export_organs.py, schema v2). Each
+Builds the healthy plant at one sample time of an export of ../lpy/grass.lpy (export_organs.py, schema v3). Each
 leaf is one continuous surface (G35): its sheath wraps the tiller axis from the tiller base up to the collar, and its
 blade continues the wrap above the collar, leaves the collar along the tiller axis, turns to its angle and arches in
 its leaf plane (G22) while the wrap opens to the curled blade. The cross-section curl and the blade outline are copied
@@ -31,7 +31,7 @@ if _LPY_DIR not in sys.path:
 from decline import (  # noqa: E402
     KIND_BLADE, KIND_SHEATH, VertexInputs, cross, rotate, smoothstep, to_tiller_frame, unit)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SAMPLE_TIME_TOLERANCE = 1e-6  # how close a requested time must be to a sample time
 
 Vec3 = tuple[float, float, float]
@@ -44,14 +44,14 @@ MATERIAL_SHEATH, MATERIAL_BLADE = 0, 1
 VECTOR_ATTRIBUTES: tuple[str, ...] = ("pivot", "axis", "collar", "side", "tiller_base", "tiller_axis")
 SCALAR_ATTRIBUTES: tuple[str, ...] = ("s", "stem_t", "organ", "phase", "kind", "tiller_az", "tiller", "birth", "draw",
                                       "sen", "fade", "arch")
-# Attributes that change with the build time (per stage in a VAT) and those fixed for a leaf's lifetime (G34).
-STAGE_ATTRIBUTES: tuple[str, ...] = ("pivot", "axis", "collar", "s", "stem_t", "arch", "sen", "fade")
+# Attributes that change with the build time (per stage in a VAT) and those fixed for a leaf's lifetime (G34, G40).
+STAGE_ATTRIBUTES: tuple[str, ...] = ("pivot", "axis", "collar", "stem_t", "arch", "sen", "fade")
 STATIC_ATTRIBUTES: tuple[str, ...] = tuple(n for n in (*VECTOR_ATTRIBUTES, *SCALAR_ATTRIBUTES)
                                            if n not in STAGE_ATTRIBUTES)
 
 
 class OrganTableError(ValueError):
-    """Raised when an organ table is not a valid schema v2 export or a build request does not fit it."""
+    """Raised when an organ table is not a valid schema v3 export or a build request does not fit it."""
 
 
 @dataclass(frozen=True)
@@ -158,6 +158,19 @@ class Sample:
 
 
 @dataclass(frozen=True)
+class LeafEvents:
+    """A leaf's event times (G38); None means the event does not happen by t_end.
+
+    senescence(t) = clamp((t - senescent_time) / senescence_duration, 0, 1) and
+    fade(t) = clamp((t - death_time) / FADE_DURATION, 0, 1); the leaf is hidden from collapse_time on.
+    """
+    senescent_time: float | None
+    senescence_duration: float
+    death_time: float | None
+    collapse_time: float | None
+
+
+@dataclass(frozen=True)
 class OrganTable:
     model: str
     seed: int
@@ -165,6 +178,7 @@ class OrganTable:
     dt: float
     t_end: float
     samples: tuple[Sample, ...]
+    events: Mapping[str, LeafEvents]  # every leaf id of the table, in (birth_time, id) order
 
     @property
     def sample_times(self) -> tuple[float, ...]:
@@ -279,12 +293,49 @@ def _tiller(organ: Mapping[str, object], time: float) -> Tiller:
                   azimuth_rad=num("azimuth_rad"), splay_rad=num("splay_rad"))
 
 
+def _events(leaf_id: str, raw: object) -> LeafEvents:
+    if not isinstance(raw, dict):
+        raise OrganTableError(f"organ_events {leaf_id!r} must be an object, got {type(raw).__name__}")
+    names = ("senescent_time", "senescence_duration", "death_time", "collapse_time")
+    missing = [n for n in names if n not in raw]
+    extra = sorted(set(raw) - set(names))
+    if missing or extra:
+        raise OrganTableError(f"organ_events {leaf_id!r}: missing field(s) {missing}, unexpected field(s) {extra}")
+
+    def time(name: str) -> float | None:
+        value = raw[name]
+        if value is None:
+            return None
+        number = _num(f"organ_events {leaf_id!r}: {name}", value)
+        if number < 0.0:
+            raise OrganTableError(f"organ_events {leaf_id!r}: {name} must be >= 0 or null, got {value!r}")
+        return number
+
+    duration = _num(f"organ_events {leaf_id!r}: senescence_duration", raw["senescence_duration"])
+    if duration <= 0.0:
+        raise OrganTableError(f"organ_events {leaf_id!r}: senescence_duration must be positive, got {duration!r}")
+    return LeafEvents(senescent_time=time("senescent_time"), senescence_duration=duration,
+                      death_time=time("death_time"), collapse_time=time("collapse_time"))
+
+
+def _organ_events(raw: object, leaf_ids: Sequence[str]) -> dict[str, LeafEvents]:
+    """The organ_events map, which must name exactly the leaves of the samples; in leaf_ids order."""
+    if not isinstance(raw, dict):
+        raise OrganTableError(f"organ table field 'organ_events' must be an object, got {type(raw).__name__}")
+    missing = [lid for lid in leaf_ids if lid not in raw]
+    extra = sorted(set(raw) - set(leaf_ids))
+    if missing or extra:
+        raise OrganTableError(f"organ table field 'organ_events' must list every leaf of the samples: missing "
+                              f"{missing}, not in any sample {extra}; re-export with lpy/export_organs.py")
+    return {lid: _events(lid, raw[lid]) for lid in leaf_ids}
+
+
 def parse_table(document: Mapping[str, object]) -> OrganTable:
     """An OrganTable from a decoded export; raises OrganTableError naming the bad field."""
     if document.get("schema_version") != SCHEMA_VERSION:
         raise OrganTableError(f"organ table schema_version must be {SCHEMA_VERSION}, got "
                               f"{document.get('schema_version')!r}; re-export with lpy/export_organs.py")
-    for key in ("model", "seed", "params", "dt", "t_end", "samples"):
+    for key in ("model", "seed", "params", "dt", "t_end", "organ_events", "samples"):
         if key not in document:
             raise OrganTableError(f"organ table field {key!r} is missing")
     params = document["params"]
@@ -325,21 +376,27 @@ def parse_table(document: Mapping[str, object]) -> OrganTable:
                 raise OrganTableError(f"leaf {leaf.id} at t={time}: its tiller {leaf.tiller} is not in the sample")
         samples.append(Sample(time=time, leaves=ordered, tillers=tillers))
     return OrganTable(model=str(document["model"]), seed=seed, params=dict(params),
-                      dt=_num("dt", document["dt"]), t_end=_num("t_end", document["t_end"]), samples=tuple(samples))
+                      dt=_num("dt", document["dt"]), t_end=_num("t_end", document["t_end"]), samples=tuple(samples),
+                      events=_organ_events(document["organ_events"], _leaf_order(samples)))
 
 
 def load_table(path: Path) -> OrganTable:
-    """Read an export of lpy/export_organs.py (schema v2)."""
+    """Read an export of lpy/export_organs.py (schema v3)."""
     return parse_table(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def _leaf_order(samples: Sequence[Sample]) -> list[str]:
+    """Every leaf id of the samples (their union), in (birth_time, id) order."""
+    births: dict[str, float] = {}
+    for sample in samples:
+        for leaf in sample.leaves.values():
+            births.setdefault(leaf.id, leaf.birth_time)
+    return sorted(births, key=lambda lid: (births[lid], lid))
 
 
 def lifetime_leaves(table: OrganTable) -> list[str]:
     """Every leaf id the plant ever has (union over samples), in (birth_time, id) order."""
-    births: dict[str, float] = {}
-    for sample in table.samples:
-        for leaf in sample.leaves.values():
-            births.setdefault(leaf.id, leaf.birth_time)
-    return sorted(births, key=lambda lid: (births[lid], lid))
+    return _leaf_order(table.samples)
 
 
 def sample_at(table: OrganTable, time: float) -> Sample:
@@ -569,7 +626,8 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
     born at `time` or collapsed are degenerate at their first-seen attach (G28); without it, the leaves present at
     `time` are built. `_ORGAN` is the leaf's index in lifetime_leaves(table) plus 1 either way.
 
-    STATIC_ATTRIBUTES come from the leaf's first-seen record, so they are identical at every build time. A degenerate
+    STATIC_ATTRIBUTES come from the leaf's first-seen record or the fixed row grid (`s`), so they are identical at
+    every build time. A degenerate
     leaf has fade 1 (opacity 0) and its collar and blade pivot at its anchor, so decline and wind keep it collapsed;
     otherwise both are the midrib vertex of blade row 0 (the emergence row, on the outer wall of the wrap, G37).
     """

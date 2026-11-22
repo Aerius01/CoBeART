@@ -4,9 +4,9 @@
   "description": "Organs of an L-Py grass model sampled at several times; the track is the healthy growth baseline, decline is applied by consumers. Lengths in metres, angles in radians, time in phyllochrons. Organs are sorted by (birth_time, id) within a sample; consumers must key organs by id, not by position.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "model", "seed", "params", "dt", "t_end", "sample_times", "samples"],
+  "required": ["schema_version", "model", "seed", "params", "dt", "t_end", "sample_times", "organ_events", "samples"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "model": {"type": "string", "minLength": 1, "description": "File name of the L-Py model."},
     "seed": {"type": "integer", "description": "Value of the SEED extern used for this export."},
     "params": {
@@ -17,6 +17,12 @@
     "dt": {"type": "number", "exclusiveMinimum": 0},
     "t_end": {"type": "number", "exclusiveMinimum": 0},
     "sample_times": {"type": "array", "minItems": 1, "items": {"type": "number", "minimum": 0}},
+    "organ_events": {
+      "type": "object",
+      "description": "Every leaf of the export by id (in (birth_time, id) order) to its event times (G38). A consumer rebuilds senescence(t) = clamp((t - senescent_time) / senescence_duration, 0, 1) and fade(t) = clamp((t - death_time) / FADE_DURATION, 0, 1), and hides the leaf for t >= collapse_time. null: the event does not happen by t_end.",
+      "propertyNames": {"pattern": "^L[0-9]+\\.[0-9]+$"},
+      "additionalProperties": {"$ref": "#/$defs/leafEvents"}
+    },
     "samples": {
       "type": "array",
       "minItems": 1,
@@ -35,6 +41,18 @@
     "vec3": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}},
     "unitInterval": {"type": "number", "minimum": 0, "maximum": 1},
     "nonNegative": {"type": "number", "minimum": 0},
+    "nullableTime": {"type": ["number", "null"], "minimum": 0},
+    "leafEvents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["senescent_time", "senescence_duration", "death_time", "collapse_time"],
+      "properties": {
+        "senescent_time": {"$ref": "#/$defs/nullableTime", "description": "Time of the step before the first senescent step (senescence is 0 there and rises by DT / senescence_duration per step)."},
+        "senescence_duration": {"type": "number", "exclusiveMinimum": 0, "description": "The leaf's senescence_duration field."},
+        "death_time": {"$ref": "#/$defs/nullableTime", "description": "Time of the first dead step (fade is 0 there and rises by DT / FADE_DURATION per step)."},
+        "collapse_time": {"$ref": "#/$defs/nullableTime", "description": "Time of the first step with fade 1."}
+      }
+    },
     "organ": {
       "oneOf": [{"$ref": "#/$defs/leaf"}, {"$ref": "#/$defs/tiller"}]
     },
@@ -44,7 +62,7 @@
       "required": [
         "id", "kind", "tiller", "rank", "birth_time", "age", "state", "attach", "direction", "azimuth_rad",
         "angle_from_axis_rad", "sheath_length_m", "blade_length_m", "blade_width_m", "unroll", "arch_rad",
-        "senescence", "fade", "decline_draw"
+        "senescence", "fade", "decline_draw", "senescence_duration"
       ],
       "properties": {
         "id": {"type": "string", "pattern": "^L[0-9]+\\.[0-9]+$"},
@@ -65,7 +83,8 @@
         "arch_rad": {"type": "number", "description": "Healthy baseline at the leaf age; senescence and decline are applied by consumers."},
         "senescence": {"$ref": "#/$defs/unitInterval", "description": "Turnover senescence: 0 green, 1 dead. Equals 1 if and only if state is dead."},
         "fade": {"$ref": "#/$defs/unitInterval", "description": "0 until the leaf dies, then rises to 1 (collapsed: zero sizes, attach at the tiller base). Positive only when dead, never decreases."},
-        "decline_draw": {"type": "number", "minimum": -1, "maximum": 1, "description": "Per-leaf unit draw in [-1, 1] made at birth; decline.py scales it by DECLINE_JITTER to shift the leaf's death point."}
+        "decline_draw": {"type": "number", "minimum": -1, "maximum": 1, "description": "Per-leaf unit draw in [-1, 1] made at birth; decline.py scales it by DECLINE_JITTER to shift the leaf's death point."},
+        "senescence_duration": {"type": "number", "exclusiveMinimum": 0, "description": "Time from turning senescent to dead, a per-leaf draw made at birth; senescence rises by DT / senescence_duration per step."}
       }
     },
     "tiller": {

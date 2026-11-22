@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GP`. Scope: the growth chain for Glade's first 3D plant, a bushy vegetative grass (no heading, no flowering), from an L-Py model to a growth slider on a dev page. Design input: the grill of 2026-11-01 (decisions P1 to P8 below) and the reference plant in `dev/assets/build_grass_plant.py`. The wind MVP (`dev/wind-demo.html`, `dev/wind/`) is a sibling prototype and not part of this roadmap; Phase 5 reuses its renderer.
 
-**Status (2026-11-22):** Phases 0 to 3 done and merged into `main`. Phase 4 runs on `gp-4-vat` from `1d0f3c7`.
+**Status (2026-11-22):** Phases 0 to 4 done and merged into `main`. Phase 5 is next; its base is the tip of `main` after the Phase 4 outcome commit.
 
 ## Project facts
 
@@ -296,10 +296,10 @@ Base: `1d0f3c7` (tip of `main` after the Phase 3 outcome commit). Bakes the full
 - `parseVat(arrayBuffer) -> Vat`: `{species, speciesParams, vertexCount, organCount, organIds, stageTimes, previewStage, never, indices: Uint32Array, blocks: Map<name, {domain, timing, components, storage, raw}>}` with `raw` the stored typed array (`Float32Array`, `Uint16Array` bits for `f16`, `Int16Array` for `oct16`, `Uint32Array`), ready for a GPU upload.
 - `decodeBlock(block) -> Float32Array | Uint32Array` (`f16` to floats, `oct16` to unit xyz triples) and `loadVat(url)` (fetch plus `parseVat`). Errors are `Error`s naming the block and what failed.
 
-**Grass blocks (`bake_grass_vat.py`, WP 4.3):**
+**Grass blocks (`bake_grass_vat.py`, WP 4.3; as first planned, superseded by G49: the authoritative list is `dev/plant/grass_vat_profile.md`):**
 - Vertex stage: `position` (3, `f16`), `normal` (3, `oct16`).
 - Vertex static: `organ` (`u32`, lifetime leaf index, 0-based), `kind` (`u32`, 0 sheath, 1 blade), `s` (`f32`), `uv` (2, `f32`, per vertex from the grid: u across, v along the leaf).
-- Organ static (`f32`): `birth`, `draw` (decline draw), `phase`, `tiller`, `tiller_az`, `tiller_base` (3), `tiller_axis` (3), `side` (3), `events` (4: `senescent_time`, `senescence_duration`, `death_time`, `collapse_time`, `NEVER` where null).
+- Organ static (`f32`): `birth`, `draw` (decline draw), `phase`, `tiller`, `tiller_az`, `tiller_base` (3), `tiller_axis` (3), `side` (3), `events` (4: `senescent_time`, `senescence_duration`, `death_time`, `collapse_time`, `NEVER` where null). G49 replaced `birth` and `events` with `lifespan` and `senescence` and made `tiller` `u32`.
 - Organ stage (`f32`): `collar` (3, the G37 emergence-row midrib point), `direction` (3, the healthy blade direction), `arch`, `sheath_length`, `emergence` (height along the tiller axis).
 - `species` `"grass"`; `species_params`: `model`, `seed`, `params` (every extern of the export), `geometry` (`dataclasses.asdict(GeometryParams())`, so `collar_bend` travels with it).
 - Preview stage: the last stage (`t_end`).
@@ -340,7 +340,7 @@ Base: `1d0f3c7` (tip of `main` after the Phase 3 outcome commit). Bakes the full
 
 ## Phase 5: Growth slider on a dev page (outline)
 
-A dev page, next to `wind-demo.html`, that draws instanced grass from the VAT with a per-instance growth value `g` and vitality `v`, blends the two stages around `g` and applies the `decline.py` look in GLSL, under the top-down camera, with the wind from `dev/wind/` applied on top. Sliders for `g` and `v` (global and randomised per instance). Measure frame rate against instance count, and decide on the P6 alternative from that. The GLSL mirror of `decline.py` hardcodes `MAX_DEATH_OFFSET` (0.95) and clamps where Python raises; Glade refuses revival once `v <= V_DEAD`. Open for its grill: whether the wind renderer is extended or a new renderer is written, culling of zero-size triangles, and level of detail.
+Base: the tip of `main` after the Phase 4 outcome commit. Inputs: a bake per `dev/plant/grass_vat_profile.md` (canonical commands there), loaded with `dev/vat/vat.mjs`; see the carry-over to Phase 5. A dev page, next to `wind-demo.html`, that draws instanced grass from the VAT with a per-instance growth value `g` and vitality `v`, blends the two stages around `g` and applies the `decline.py` look in GLSL, under the top-down camera, with the wind from `dev/wind/` applied on top. Sliders for `g` and `v` (global and randomised per instance). Measure frame rate against instance count, and decide on the P6 alternative from that. The GLSL mirror of `decline.py` hardcodes `MAX_DEATH_OFFSET` (0.95) and clamps where Python raises; Glade refuses revival once `v <= V_DEAD`. Open for its grill: whether the wind renderer is extended or a new renderer is written, culling of zero-size triangles, and level of detail.
 
 ## Deferred (not in this roadmap)
 
@@ -466,8 +466,32 @@ The tiller-state and time-varying-direction items were dropped by G10 to G15: ti
 - **Decline signature:** `declined_vertex(position, vin, time, v, p, collar_bend)`; `collar_bend` comes from `GeometryParams` and must travel with the export.
 - **Stage spacing:** the G36 emergence point eases with `fade`, and blade rows are dense near emergence, so shape changes fast while a leaf unrolls and while an old leaf fades; the outline's open question on sampling `FADE_DURATION` still applies.
 
+### Phase 4 (2026-11-22)
+
+- **Commits on `gp-4-vat` from `1d0f3c7`:**
+  - `f4cae40`: verified facts, grill outcomes (G38 to G48), the VAT format and the WPs.
+  - `b0236e8` [GP 4.1] organ events and schema v3 (Opus), `88e866a` [GP 4.2] the generic VAT writer, loader, spec and fixture (Sonnet), `a31dd56` [GP 4.3] the grass bake (Opus).
+  - `250615d`: the gate review (G49); `919cbd9` [GP 4.1], `c5d2f0c` [GP 4.2] and `82fc94c` [GP 4.3]: its fixes, plus `grass_vat_profile.md`.
+  - This outcome commit. Fast-forwarded into `main`.
+- **Gate:**
+  - lpy, plant and vat pytest: 219 passed, with the Blender smoke test and the `node` round trips run (Blender 5.3.0).
+  - `npm test` 144 passed (7 in `glade-vat.test.js`); flake8 on `dev/lpy/`, `dev/plant/` and `dev/vat/` clean; `node scripts/fitness.mjs` 0 violations.
+  - Default bake (seed 1, `--samples 49`): 8,280 vertices, 46 organs, 49 stages, 13,984 triangles, 4.75 MB, baked in 1.5 s. Worst f16 position error 0.12 mm.
+  - The preview imported into Blender stands upright (+Z to glTF +Y on the node), is double-sided, and shows the 29 leaves alive at t = 12 (17 collapsed leaves folded away).
+- **Model facts:** with seed 1, 31 leaves turn senescent, 22 die and 17 collapse by t = 12; senescence durations 1.60 to 2.37 P; schema v3 leaves every v2 value unchanged (checked on 241- and 25-sample exports).
+- **Lessons:**
+  - Measuring before the grill (attribute domains, blend error versus N, f16 error) turned the outline's 3 MB estimate and its open fade-sampling question into concrete numbers, and showed that most "stage attributes" were per leaf.
+  - The user's reuse goal arrived mid-grill and reshaped the format into a species-neutral container plus a per-species profile; the gate's architecture review was briefed with that goal and found the template gaps (frame, lifespan, meaning, versioning) while the format had no consumers.
+  - A required new field in a shared dataclass breaks the next wave's adapter by design; integrating the generic fixes first and then the adapter fix kept each step green except the one known test file.
+
 ### Carry-over to Phase 5
 
+- **VAT input:**
+  - Load with `dev/vat/vat.mjs` (`parseVat`, `decodeBlock`; `raw` arrays are ready for `texImage2D`, with `f16` as `HALF_FLOAT` bits and `oct16` as int16 pairs). The grass contract is `dev/plant/grass_vat_profile.md`; check `species` `grass` and `species_version` 1.
+  - Blend the two stages around `t` (model time in P; Glade's `g` maps onto `stage_times`). Senescence and fade are analytic from the `senescence` block and `FADE_DURATION` (G38); hide an organ for `t < lifespan.appear` or `t >= lifespan.vanish`. Age is `t - appear`.
+  - `never` is 1e30 stored as f32. Keep blocks that can hold it in f32 when packing textures (half floats would turn it into Inf).
+  - Organ-stage blocks are stage-major, so they map onto a `texelFetch(organ, stage)` texture; vertex-stage `position` and `normal` onto a per-stage layout of the implementer's choice.
+  - The blend error at N = 49 is up to 11 mm (6.6 mm 95th percentile) on young blades; a smooth morph, not a pop. Judge it on the page and re-bake with another `--samples` if needed.
 - **Wind renderer:** `wind-demo.html` and `dev/wind/` assume the frozen reference (`_ORGAN` 0 is the stem, a `Grass_Stalk` material, the stem's arc). The new mesh has no stem organ, one material, and tells sheath from blade by `_KIND`; the wind pivots each blade at its `collar` (emergence point on the wall) and each sheath at the tiller base.
-- **GLSL port of `decline.py`:** clamp where Python raises (age at 0 is already a clamp), mirror `bend_mean`, `bend_cumulants` and `chord_change` as polynomials, pass `collar_bend` as a uniform, and check float16 tolerances against the 2% bound if attributes are packed as half floats. Normals are not transformed.
+- **GLSL port of `decline.py`:** clamp where Python raises (age at 0 is already a clamp), mirror `bend_mean`, `bend_cumulants` and `chord_change` as polynomials, pass `collar_bend` (`species_params.geometry.collar_bend`) as a uniform, and check float16 tolerances against the 2% bound if attributes are packed as half floats. Python does not transform normals; the baked normals (underside) should be turned by the decline row rotation and the lean in the shader (G42).
 - **Resolution:** at close range a split old sheath shows a slightly jagged edge where the blade leaves it, and strongly arched tips show faint polygon corners; both are row-count effects, to settle with the frame-rate measurement (`GeometryParams`).

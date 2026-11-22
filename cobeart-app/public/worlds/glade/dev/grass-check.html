@@ -28,8 +28,11 @@
 // Sets window.__grassCheck = {ok, tolerance, cases} when done (or {ok: false, error}).
 import { loadVat, decodeBlock } from './vat/vat.mjs';
 import { createGrassRenderer } from './grass/renderer.mjs';
+import { aliveMask } from './grass/vat-textures.mjs';
 
 const TOLERANCE = 1e-5;
+const KIND_BLADE = 1; // lpy/decline.py: KIND_SHEATH, KIND_BLADE = 0, 1
+const BLEND_TARGET_TIMES = [6, 11];
 
 /**
  * @typedef {object} Worst
@@ -40,6 +43,7 @@ const TOLERANCE = 1e-5;
 
 /**
  * @typedef {object} CaseResult
+ * @property {'reference' | 'blend'} kind
  * @property {number} t
  * @property {number} v
  * @property {number} alive
@@ -92,13 +96,13 @@ async function fetchJson(url) {
  * @param {Worst} w
  * @returns {string}
  */
-const cell = (w) => `${w.max.toExponential(2)} (v${w.vertex} ${w.organ})`;
+const cell = (w) => !w ? '-' : `${w.max.toExponential(2)} (v${w.vertex} ${w.organ})`;
 
 /** @param {{ok: boolean, cases: CaseResult[]}} result */
 function render(result) {
   const names = Object.keys(QUANTITIES);
-  const head = `<tr><th>t</th><th>v</th><th>alive</th>${names.map((n) => `<th>${n}</th>`).join('')}<th>result</th></tr>`;
-  const rows = result.cases.map((c) => `<tr><td>${c.t}</td><td>${c.v}</td><td>${c.alive}</td>`
+  const head = `<tr><th>kind</th><th>t</th><th>v</th><th>alive</th>${names.map((n) => `<th>${n}</th>`).join('')}<th>result</th></tr>`;
+  const rows = result.cases.map((c) => `<tr><td>${c.kind}</td><td>${c.t}</td><td>${c.v}</td><td>${c.alive}</td>`
     + names.map((n) => `<td>${cell(c.errors[n])}</td>`).join('')
     + `<td class="${c.ok ? 'pass' : 'fail'}">${c.ok ? 'pass' : 'FAIL'}</td></tr>`).join('');
   document.getElementById('out').innerHTML = `<table>${head}${rows}</table>`;
@@ -120,35 +124,99 @@ async function run() {
   const bakeName = vatPath.split('/').pop();
   if (ref.vat !== bakeName) throw new Error(`reference was made from '${ref.vat}', but the bake is '${bakeName}'`);
 
-  const organBlock = vat.blocks.get('organ');
-  const lifeBlock = vat.blocks.get('lifespan');
-  if (!organBlock || !lifeBlock) throw new Error("the bake lacks the 'organ' or 'lifespan' block");
-  const organOf = /** @type {Uint32Array} */ (decodeBlock(organBlock));
-  const life = /** @type {Float32Array} */ (decodeBlock(lifeBlock));
+  const block = (name) => {
+    const b = vat.blocks.get(name);
+    if (!b) throw new Error(`the bake lacks the '${name}' block`);
+    return decodeBlock(b);
+  };
+  const organOf = /** @type {Uint32Array} */ (block('organ'));
+  const kind = /** @type {Uint32Array} */ (block('kind'));
+  const V = vat.vertexCount;
+  const O = vat.organCount;
+
+  /**
+   * Per vertex 1 where its organ is set in every one of the per-organ masks.
+   * @param {Uint8Array[]} masks
+   * @returns {Uint8Array}
+   */
+  const vertexMask = (masks) => Uint8Array.from(organOf, (o) => (masks.every((m) => m[o]) ? 1 : 0));
+
+  /**
+   * @param {Record<string, Worst>} errors
+   * @returns {boolean}
+   */
+  const passes = (errors) => Object.values(errors).every((w) => w.max < TOLERANCE);
+
+  /**
+   * Expected positions, pivots and axes at the midpoint of stages k and k+1: the linear blend of the decoded blocks.
+   * @param {number} k
+   * @returns {Record<string, number[]>}
+   */
+  const blendExpected = (k) => {
+    const position = /** @type {Float32Array} */ (block('position'));
+    const collar = /** @type {Float32Array} */ (block('collar'));
+    const direction = /** @type {Float32Array} */ (block('direction'));
+    const tillerBase = /** @type {Float32Array} */ (block('tiller_base'));
+    const tillerAxis = /** @type {Float32Array} */ (block('tiller_axis'));
+    /** @type {Record<string, number[]>} */
+    const out = { positions: [], pivots: [], axes: [] };
+    for (let i = 0; i < V; i++) {
+      const o = organOf[i];
+      for (let c = 0; c < 3; c++) {
+        out.positions.push(0.5 * (position[(k * V + i) * 3 + c] + position[((k + 1) * V + i) * 3 + c]));
+      }
+      if (kind[i] === KIND_BLADE) {
+        const d = [0, 1, 2].map((c) => 0.5 * (direction[(k * O + o) * 3 + c] + direction[((k + 1) * O + o) * 3 + c]));
+        const len = Math.hypot(d[0], d[1], d[2]);
+        for (let c = 0; c < 3; c++) {
+          out.pivots.push(0.5 * (collar[(k * O + o) * 3 + c] + collar[((k + 1) * O + o) * 3 + c]));
+          out.axes.push(d[c] / len);
+        }
+      } else {
+        for (let c = 0; c < 3; c++) {
+          out.pivots.push(tillerBase[o * 3 + c]);
+          out.axes.push(tillerAxis[o * 3 + c]);
+        }
+      }
+    }
+    return out;
+  };
 
   const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('view'));
-  const renderer = createGrassRenderer(canvas, vat);
+  const gl = canvas.getContext('webgl2');
+  if (!gl) throw new Error('this browser gave no WebGL2 context');
+  const renderer = createGrassRenderer(gl, vat);
   /** @type {CaseResult[]} */
   const cases = [];
   try {
     for (const c of ref.cases) {
-      const alive = new Uint8Array(vat.vertexCount);
-      let aliveCount = 0;
-      for (let i = 0; i < vat.vertexCount; i++) {
-        const o = organOf[i];
-        if (life[o * 2] <= c.t && c.t < life[o * 2 + 1]) {
-          alive[i] = 1;
-          aliveCount++;
-        }
-      }
+      const alive = vertexMask([aliveMask(vat, c.t)]);
       const cap = renderer.capture(c.t, c.v);
       /** @type {Record<string, Worst>} */
       const errors = {};
       for (const [name, comps] of Object.entries(QUANTITIES)) {
         errors[name] = worstError(cap[name], c[name], comps, alive, organOf, vat.organIds, `case t=${c.t} v=${c.v} ${name}`);
       }
-      const ok = Object.values(errors).every((w) => w.max < TOLERANCE);
-      cases.push({ t: c.t, v: c.v, alive: aliveCount, errors, ok });
+      cases.push({ kind: 'reference', t: c.t, v: c.v, alive: alive.reduce((a, b) => a + b, 0), errors, ok: passes(errors) });
+    }
+
+    // Mid-stage cases need no Python: at v 1, healthy organs alive at both stages are the blend of the two stages.
+    const senescence = /** @type {Float32Array} */ (block('senescence'));
+    const times = vat.stageTimes;
+    for (const target of BLEND_TARGET_TIMES) {
+      let k = 0;
+      for (let j = 0; j < times.length - 1; j++) if (Math.abs(times[j] - target) < Math.abs(times[k] - target)) k = j;
+      const t = (times[k] + times[k + 1]) / 2;
+      const healthy = Uint8Array.from({ length: O }, (_, o) => (t < senescence[o * 3] ? 1 : 0));
+      const alive = vertexMask([aliveMask(vat, times[k]), aliveMask(vat, times[k + 1]), healthy]);
+      const cap = renderer.capture(t, 1);
+      const want = blendExpected(k);
+      /** @type {Record<string, Worst>} */
+      const errors = {};
+      for (const name of ['positions', 'pivots', 'axes']) {
+        errors[name] = worstError(cap[name], want[name], 3, alive, organOf, vat.organIds, `blend t=${t} ${name}`);
+      }
+      cases.push({ kind: 'blend', t, v: 1, alive: alive.reduce((a, b) => a + b, 0), errors, ok: passes(errors) });
     }
   } finally {
     renderer.dispose();

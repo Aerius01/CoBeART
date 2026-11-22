@@ -35,7 +35,7 @@ function hash2(ix, iy) {
 }
 
 /** Smooth value noise in [0, 1]. */
-function valueNoise(x, y) {
+export function valueNoise(x, y) {
   const ix = Math.floor(x);
   const iy = Math.floor(y);
   const fx = x - ix;

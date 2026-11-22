@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glade grass demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 14px monospace; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 8px; top: 8px; background: rgba(0, 0, 0, 0.6); padding: 4px 8px; pointer-events: none;
+    white-space: pre; }
+  #error { position: fixed; inset: 0; color: #f66; padding: 1em; white-space: pre-wrap; background: #000; }
+  #bench { position: fixed; left: 8px; bottom: 8px; max-height: 70vh; overflow: auto; background: rgba(0, 0, 0, 0.85);
+    padding: 6px 10px; }
+  #bench pre { margin: 0 0 6px; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud"></div>
+<div id="bench" hidden><pre id="benchText"></pre><button id="benchCopy" type="button" hidden>copy</button></div>
+<div id="error" hidden></div>
+<script type="module">
+// Grass demo (GP roadmap, Phase 5): a field of the baked grass plant (a VAT, G58: out/grass.vat.glb, or ?vat=<path
+// relative to this folder>) with per-instance growth g and vitality v, under the wind of wind-demo.html. ?bench runs
+// the frame-rate sweep of G56. window.__gladeGrass exposes the params, growth field and bake for checks.
+import GUI from '../vendor/lil-gui.esm.min.js';
+import { aliveOrganCount, grassParams } from './grass/vat-textures.mjs';
+import { createGrowthField, fillGrowth } from './grass/instances.mjs';
+import { GRASS_INSTANCE_FLOATS, createGrassRenderer } from './grass/renderer.mjs';
+import { loadVat } from './vat/vat.mjs';
+import { obliqueMatrix, topDownMatrix } from './wind/renderer.mjs';
+import { createPlants, stepPlants } from './wind/wind.mjs';
+
+const PLANT_SEED = 7;
+const GROWTH_SEED = 11;
+const MAX_DT_S = 1 / 30;
+const DEG = Math.PI / 180;
+const DEFAULT_VAT = 'out/grass.vat.glb';
+const BAKE_COMMANDS = [
+  'cd cobeart-app/public/worlds/glade/dev',
+  'mkdir -p out',
+  '~/miniconda3/envs/lpy/bin/python lpy/export_organs.py lpy/grass.lpy out/grass.json --samples 49',
+  '~/miniconda3/envs/lpy/bin/python plant/bake_grass_vat.py out/grass.json out/grass.vat.glb',
+];
+const BENCH_COUNTS = [500, 1000, 2000, 5000, 10000, 20000];
+const BENCH_GROWTHS = [0.25, 0.5, 1];
+const BENCH_WARMUP_MS = 1000;
+const BENCH_MEASURE_MS = 3 * 1000;
+
+/** @param {unknown} err */
+function showError(err) {
+  console.error(err);
+  const box = /** @type {HTMLElement} */ (document.getElementById('error'));
+  box.hidden = false;
+  box.textContent = String(/** @type {Error} */ (err)?.stack ?? err);
+}
+
+/** @param {number[]} values @returns {number} */
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** @param {string} path @returns {Promise<import('./vat/vat.mjs').Vat>} */
+async function loadBake(path) {
+  try {
+    return await loadVat(new URL(path, import.meta.url).href);
+  } catch (err) {
+    throw new Error(`${/** @type {Error} */ (err).message}\n\nNo usable bake at '${path}'. Create the canonical bake ` +
+      `with:\n\n${BAKE_COMMANDS.join('\n')}`);
+  }
+}
+
+async function start() {
+  const arena = window.__COBEART_CONFIG__?.arena;
+  if (!arena) throw new Error('window.__COBEART_CONFIG__.arena is missing; open this page through the hub (npm run web)');
+  const query = new URLSearchParams(location.search);
+  const bench = query.has('bench');
+  const vatPath = query.get('vat') ?? DEFAULT_VAT;
+  const vat = await loadBake(vatPath);
+  const { tEnd } = grassParams(vat);
+  const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('view'));
+  const renderer = createGrassRenderer(canvas, vat);
+  const hud = /** @type {HTMLElement} */ (document.getElementById('hud'));
+
+  const params = {
+    // growth
+    g: 1,
+    g_spread: 0.2,
+    v: 1,
+    v_spread: 0.2,
+    spatial: false,
+    noise_scale_mm: 1500,
+    seed: GROWTH_SEED,
+    // wind field
+    speed_mps: 2,
+    direction_deg: 30,
+    gust_mps: 4,
+    gust_scale_mm: 1500,
+    gust_travel_mps: 3,
+    // plant response
+    max_lean_deg: 60,
+    speed_ref_mps: 8,
+    spring_hz: 0.9,
+    damping: 0.25,
+    leaf_bend_deg: 35,
+    leaf_sway_hz: 1.3,
+    flutter_deg: 12,
+    flutter_hz: 3,
+    flip_start_mps: 7,
+    flip_end_mps: 12,
+    dry_wind_response: 0.3,
+    // plants and view
+    count: 2000,
+    mm_per_model_m: 1000,
+    size_jitter: 0.25,
+    view: 'top',
+    zoom: 3,
+  };
+  if (bench) Object.assign(params, { v: 1, g_spread: 0, v_spread: 0, spatial: false, view: 'top' });
+
+  let field = createPlants(params.count, arena, params.size_jitter, PLANT_SEED);
+  let growthField = createGrowthField(params.count, params.seed);
+  let instances = new Float32Array(params.count * GRASS_INSTANCE_FLOATS);
+  let growth = new Float32Array(params.count * 2);
+  const rebuild = () => {
+    field = createPlants(params.count, arena, params.size_jitter, PLANT_SEED);
+    growthField = createGrowthField(params.count, params.seed);
+    instances = new Float32Array(params.count * GRASS_INSTANCE_FLOATS);
+    growth = new Float32Array(params.count * 2);
+  };
+
+  if (!bench) {
+    const gui = new GUI({ title: 'Grass' });
+    const grow = gui.addFolder('Growth');
+    grow.add(params, 'g', 0, 1, 0.001).name('growth g');
+    grow.add(params, 'g_spread', 0, 1, 0.01).name('g spread');
+    grow.add(params, 'v', 0, 1, 0.001).name('vitality v');
+    grow.add(params, 'v_spread', 0, 1, 0.01).name('v spread');
+    grow.add(params, 'spatial').name('spatial');
+    grow.add(params, 'noise_scale_mm', 100, 6000, 50).name('noise scale (mm)');
+    grow.add(params, 'seed', 0, 9999, 1).name('seed').onFinishChange(rebuild);
+    const wind = gui.addFolder('Wind');
+    wind.add(params, 'speed_mps', 0, 20, 0.1).name('speed (m/s)');
+    wind.add(params, 'direction_deg', 0, 360, 1).name('direction (deg)');
+    wind.add(params, 'gust_mps', 0, 30, 0.1).name('gust peak (m/s)');
+    wind.add(params, 'gust_scale_mm', 200, 6000, 50).name('gust size (mm)');
+    wind.add(params, 'gust_travel_mps', 0, 15, 0.1).name('gust travel (m/s)');
+    wind.add(params, 'max_lean_deg', 0, 85, 1).name('max lean (deg)');
+    wind.add(params, 'speed_ref_mps', 1, 30, 0.5).name('speed ref (m/s)');
+    wind.add(params, 'spring_hz', 0.2, 4, 0.05).name('sway freq (Hz)');
+    wind.add(params, 'damping', 0.05, 1.5, 0.01).name('damping ratio');
+    wind.add(params, 'leaf_bend_deg', 0, 90, 1).name('leaf bend (deg)');
+    wind.add(params, 'leaf_sway_hz', 0.1, 5, 0.05).name('leaf sway (Hz)');
+    wind.add(params, 'flutter_deg', 0, 60, 1).name('flutter (deg)');
+    wind.add(params, 'flutter_hz', 0.5, 10, 0.1).name('flutter (Hz)');
+    wind.add(params, 'flip_start_mps', 0, 30, 0.5).name('flip start (m/s)');
+    wind.add(params, 'flip_end_mps', 0.5, 40, 0.5).name('flip full (m/s)');
+    wind.add(params, 'dry_wind_response', 0, 1, 0.01).name('dry wind response');
+    const plants = gui.addFolder('Plants and view');
+    plants.add(params, 'count', 1, 50000, 1).name('plants').onFinishChange(rebuild);
+    plants.add(params, 'mm_per_model_m', 100, 5000, 10).name('size (mm per model m)');
+    plants.add(params, 'size_jitter', 0, 0.6, 0.01).name('size jitter').onFinishChange(rebuild);
+    plants.add(params, 'view', ['top', 'oblique']);
+    plants.add(params, 'zoom', 1, 20, 0.1);
+  }
+
+  // Benchmark state machine (G56): one step per (g, count), a warm-up then a measuring window.
+  const benchEl = /** @type {HTMLElement} */ (document.getElementById('bench'));
+  const benchText = /** @type {HTMLElement} */ (document.getElementById('benchText'));
+  const copyButton = /** @type {HTMLButtonElement} */ (document.getElementById('benchCopy'));
+  const steps = BENCH_GROWTHS.flatMap((g) => BENCH_COUNTS.map((count) => ({ g, count })));
+  /** @type {Array<{count: number, g: number, median_ms: number, fps: number, gpu_ms: number | null,
+   *   alive_fraction: number}>} */
+  const rows = [];
+  const bakeName = vatPath.split('/').pop();
+  let stepIndex = -1;
+  let stepStart = 0;
+  /** @type {number[]} */ let intervals = [];
+  /** @type {number[]} */ let gpuSamples = [];
+  let benchDone = false;
+  const beginStep = (now) => {
+    stepIndex++;
+    params.g = steps[stepIndex].g;
+    params.count = steps[stepIndex].count;
+    rebuild();
+    stepStart = now;
+    intervals = [];
+    gpuSamples = [];
+    benchEl.hidden = false;
+    benchText.textContent = `bench ${stepIndex + 1}/${steps.length}: ${params.count} plants, g ${params.g}`;
+  };
+  const finishBench = () => {
+    benchDone = true;
+    const header = ['plants', 'g', 'median ms', 'fps', 'gpu ms', 'alive leaf fraction'];
+    const lines = rows.map((r) => [r.count, r.g, r.median_ms.toFixed(2), r.fps.toFixed(1),
+      r.gpu_ms === null ? 'null' : r.gpu_ms.toFixed(2), r.alive_fraction.toFixed(3)]);
+    const title = `bake ${bakeName}, ${vat.vertexCount} vertices per plant`;
+    const tsv = [title, header.join('\t'), ...lines.map((l) => l.join('\t'))].join('\n');
+    const pad = (cell, w) => String(cell).padStart(w);
+    const widths = header.map((h, i) => Math.max(h.length, ...lines.map((l) => String(l[i]).length)));
+    benchText.textContent = [title, header.map((h, i) => pad(h, widths[i])).join('  '),
+      ...lines.map((l) => l.map((c, i) => pad(c, widths[i])).join('  '))].join('\n');
+    console.log(title);
+    console.table(rows);
+    window.__gladeGrassBench = { vat, vertexCount: vat.vertexCount, rows };
+    copyButton.hidden = false;
+    copyButton.onclick = () => {
+      navigator.clipboard.writeText(tsv).then(() => { copyButton.textContent = 'copied'; }, showError);
+    };
+  };
+
+  const resize = () => renderer.resize();
+  window.addEventListener('resize', resize);
+  resize();
+
+  let last = performance.now();
+  let time = 0;
+  let fps = 60;
+  const frame = (now) => {
+    const rawMs = now - last;
+    const dt = Math.min(rawMs / 1000, MAX_DT_S);
+    fps += ((1000 / Math.max(rawMs, 1e-3)) - fps) * 0.05;
+    last = now;
+    time += dt;
+    if (params.flip_end_mps <= params.flip_start_mps) params.flip_end_mps = params.flip_start_mps + 0.5;
+
+    if (bench && !benchDone) {
+      if (stepIndex < 0) beginStep(now);
+      else if (now - stepStart > BENCH_WARMUP_MS) intervals.push(rawMs);
+      if (stepIndex >= 0 && now - stepStart >= BENCH_WARMUP_MS + BENCH_MEASURE_MS) {
+        const ms = median(intervals);
+        rows.push({
+          count: params.count, g: params.g, median_ms: ms, fps: 1000 / ms,
+          gpu_ms: gpuSamples.length ? median(gpuSamples) : null,
+          alive_fraction: aliveOrganCount(vat, params.g * tEnd) / vat.organCount,
+        });
+        if (stepIndex + 1 < steps.length) beginStep(now);
+        else finishBench();
+      }
+    }
+
+    stepPlants(field, params, time, dt);
+    fillGrowth(growthField, params, field.x, field.y, growth);
+    for (let i = 0; i < field.count; i++) {
+      const o = i * GRASS_INSTANCE_FLOATS;
+      instances[o] = field.x[i];
+      instances[o + 1] = field.y[i];
+      instances[o + 2] = field.rotation[i];
+      instances[o + 3] = params.mm_per_model_m * field.scale[i];
+      instances[o + 4] = field.leanX[i];
+      instances[o + 5] = field.leanY[i];
+      instances[o + 6] = field.windX[i];
+      instances[o + 7] = field.windY[i];
+      instances[o + 8] = growth[2 * i];
+      instances[o + 9] = growth[2 * i + 1];
+    }
+    // Plant height is about a quarter of a model metre; half a metre bounds it with size jitter and lean.
+    const viewProj = params.view === 'top'
+      ? topDownMatrix(arena, params.zoom, 0.5 * params.mm_per_model_m * (1 + params.size_jitter))
+      : obliqueMatrix(arena, params.zoom, canvas.width / canvas.height);
+    const timer = renderer.gpuTimer;
+    timer?.begin();
+    renderer.draw(instances, field.count, {
+      viewProj, time, speedRef: params.speed_ref_mps, leafBend: params.leaf_bend_deg * DEG,
+      leafSwayHz: params.leaf_sway_hz, flutter: params.flutter_deg * DEG, flutterHz: params.flutter_hz,
+      flip: [params.flip_start_mps, params.flip_end_mps], dryWindResponse: params.dry_wind_response,
+    });
+    timer?.end();
+    if (timer) {
+      const gpuMs = timer.poll();
+      if (gpuMs !== null && bench && !benchDone && stepIndex >= 0 && now - stepStart > BENCH_WARMUP_MS) {
+        gpuSamples.push(gpuMs);
+      }
+    }
+    const vertices = vat.vertexCount * field.count;
+    hud.textContent = `${field.count} plants · ` +
+      `${vertices >= 1e5 ? (vertices / 1e6).toFixed(1) + 'M' : vertices} vertices · ${fps.toFixed(0)} fps\n` +
+      `t ${(params.g * tEnd).toFixed(2)} P · alive leaves ${aliveOrganCount(vat, params.g * tEnd)} / ${vat.organCount}`;
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+  window.__gladeGrass = { params, get field() { return growthField; }, vat };
+}
+
+start().catch(showError);
+</script>
+</body>
+</html>

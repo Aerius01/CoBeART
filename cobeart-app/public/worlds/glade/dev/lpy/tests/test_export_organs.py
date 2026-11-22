@@ -118,6 +118,18 @@ def test_malformed_module_names_module_and_field(tmp_path: Path) -> None:
     assert eo.main([str(broken), str(out)]) == 1
 
 
+def test_unknown_module_raises(tmp_path: Path) -> None:
+    model = tmp_path / "stem.lpy"
+    text = FIXTURE.read_text().replace("module Apex, Leaf, Tiller", "module Apex, Leaf, Tiller, Stem")
+    text = text.replace("Apex(0, 2, 1.0)\n", "Apex(0, 2, 1.0) Stem(0)\n")
+    model.write_text(text, encoding="utf-8")
+    out = tmp_path / "out.json"
+    with pytest.raises(eo.OrganTableError, match="Stem"):
+        eo.export_organs(model, out)
+    assert not out.exists()
+    assert eo.main([str(model), str(out)]) == 1
+
+
 def test_wrong_type_names_module_and_field(tmp_path: Path) -> None:
     broken = tmp_path / "broken.lpy"
     text = FIXTURE.read_text().replace('"unroll": min(1.0, age / 2.0)', '"unroll": "open"')

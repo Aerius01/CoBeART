@@ -86,6 +86,8 @@ class TillerOrgan:
 Organ = LeafOrgan | TillerOrgan
 
 HEADER_FIELDS = frozenset({"id", "kind", "tiller", "rank", "birth_time", "age", "state"})
+# Grass-model modules that carry no organ; any other non-organ module is an error.
+NON_ORGAN_MODULES: frozenset[str] = frozenset({"Apex", "Bud"})
 
 
 def _field_names(cls: type, vector: bool) -> tuple[str, ...]:
@@ -214,7 +216,7 @@ def tiller_from_module(params: Sequence[Any], time: float) -> TillerOrgan:
 
 
 def organs_from_modules(modules: Iterable[Any], time: float) -> tuple[Organ, ...]:
-    """Turn the Leaf and Tiller modules of a derived string into organs; other modules are ignored."""
+    """Turn the Leaf and Tiller modules of a derived string into organs; NON_ORGAN_MODULES are skipped."""
     organs: list[Organ] = []
     for module in modules:
         params = list(module)
@@ -222,6 +224,11 @@ def organs_from_modules(modules: Iterable[Any], time: float) -> tuple[Organ, ...
             organs.append(leaf_from_module(params))
         elif module.name == "Tiller":
             organs.append(tiller_from_module(params, time))
+        elif module.name not in NON_ORGAN_MODULES:
+            raise OrganTableError(
+                f"module {module.name} at time {time} is neither an organ module (Leaf, Tiller) nor in "
+                f"NON_ORGAN_MODULES {sorted(NON_ORGAN_MODULES)}; add a converter for it or list it there"
+            )
     return tuple(sorted(organs, key=lambda o: (o.birth_time, o.id)))
 
 

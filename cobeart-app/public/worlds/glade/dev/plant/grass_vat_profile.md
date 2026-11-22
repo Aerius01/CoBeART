@@ -61,7 +61,10 @@ At model time `t`, with `FADE_DURATION` and `SHEATH_PLATEAU_M` from `species_par
 ```bash
 cd cobeart-app/public/worlds/glade/dev
 ~/miniconda3/envs/lpy/bin/python lpy/export_organs.py lpy/grass.lpy OUT/grass.json --samples 49 [--seed N]
-~/miniconda3/envs/lpy/bin/python plant/bake_grass_vat.py OUT/grass.json OUT/grass.vat.glb
+~/miniconda3/envs/lpy/bin/python plant/bake_grass_vat.py OUT/grass.json OUT/grass.vat.glb \
+    --blade-segments 6 --cross-segments 2 --sheath-rows 1
 ```
+
+The resolution flags give 24 vertices per leaf (1,104 per plant for seed 1), chosen in GP Phase 5 (G65) from the frame-rate measurement: at projection scale (about 3 mm per pixel) it looks the same as the `GeometryParams` defaults (180 per leaf), which stay the reference look for close-ups and the Blender stages.
 
 Nothing generated is committed.

@@ -314,8 +314,24 @@ def _events(leaf_id: str, raw: object) -> LeafEvents:
     duration = _num(f"organ_events {leaf_id!r}: senescence_duration", raw["senescence_duration"])
     if duration <= 0.0:
         raise OrganTableError(f"organ_events {leaf_id!r}: senescence_duration must be positive, got {duration!r}")
-    return LeafEvents(senescent_time=time("senescent_time"), senescence_duration=duration,
-                      death_time=time("death_time"), collapse_time=time("collapse_time"))
+    events = LeafEvents(senescent_time=time("senescent_time"), senescence_duration=duration,
+                        death_time=time("death_time"), collapse_time=time("collapse_time"))
+    _check_event_order(leaf_id, events)
+    return events
+
+
+def _check_event_order(leaf_id: str, events: LeafEvents) -> None:
+    """A later event needs the earlier one, and senescent_time <= death_time <= collapse_time."""
+    for earlier, later in (("senescent_time", "death_time"), ("death_time", "collapse_time")):
+        before, after = getattr(events, earlier), getattr(events, later)
+        if after is None:
+            continue
+        if before is None:
+            raise OrganTableError(f"organ_events {leaf_id!r}: {later} is {after} but {earlier} is null; "
+                                  f"a leaf cannot reach {later} without {earlier}")
+        if before > after:
+            raise OrganTableError(f"organ_events {leaf_id!r}: {earlier} {before} is after {later} {after}; "
+                                  "events must satisfy senescent_time <= death_time <= collapse_time")
 
 
 def _organ_events(raw: object, leaf_ids: Sequence[str]) -> dict[str, LeafEvents]:

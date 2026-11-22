@@ -650,3 +650,33 @@ def test_event_loader_errors(organ_table_path: Path) -> None:
         gg.parse_table(broken(lambda d: d["organ_events"][leaf_id].__setitem__("senescence_duration", None)))
     with pytest.raises(gg.OrganTableError, match=rf"organ_events '{leaf_id}': senescence_duration must be positive"):
         gg.parse_table(broken(lambda d: d["organ_events"][leaf_id].__setitem__("senescence_duration", 0.0)))
+
+
+EVENT_TIMES = ("senescent_time", "death_time", "collapse_time")
+
+
+@pytest.mark.parametrize("times, pattern", [
+    ((None, 2.0, None), r"death_time is 2\.0 but senescent_time is null"),
+    ((1.0, None, 3.0), r"collapse_time is 3\.0 but death_time is null"),
+    ((None, None, 3.0), r"collapse_time is 3\.0 but death_time is null"),
+    ((3.0, 2.0, 4.0), r"senescent_time 3\.0 is after death_time 2\.0"),
+    ((1.0, 3.0, 2.5), r"death_time 3\.0 is after collapse_time 2\.5"),
+])
+def test_inconsistent_events_are_rejected(organ_table_path: Path, times: tuple[float | None, ...],
+                                          pattern: str) -> None:
+    import json
+    doc = json.loads(organ_table_path.read_text(encoding="utf-8"))
+    leaf_id = next(iter(doc["organ_events"]))
+    doc["organ_events"][leaf_id].update(zip(EVENT_TIMES, times))
+    with pytest.raises(gg.OrganTableError, match=rf"organ_events '{leaf_id}': {pattern}"):
+        gg.parse_table(doc)
+
+
+def test_consistent_partial_and_equal_events_load(organ_table_path: Path) -> None:
+    import json
+    doc = json.loads(organ_table_path.read_text(encoding="utf-8"))
+    leaf_id = next(iter(doc["organ_events"]))
+    for times in ((None, None, None), (1.0, None, None), (1.0, 2.0, None), (2.0, 2.0, 2.0)):
+        doc["organ_events"][leaf_id].update(zip(EVENT_TIMES, times))
+        events = gg.parse_table(doc).events[leaf_id]
+        assert (events.senescent_time, events.death_time, events.collapse_time) == times

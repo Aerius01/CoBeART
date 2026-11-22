@@ -18,7 +18,7 @@ sys.path.insert(0, str(VAT_DIR))
 
 from make_fixture import FIXTURE_PATH, build_tiny_plant  # noqa: E402
 from vat_writer import (  # noqa: E402
-    NEVER, Block, VatError, VatPlant, decode_oct, decode_vat, encode_oct, encode_vat, write_vat,
+    NEVER, Block, Frame, VatError, VatPlant, decode_oct, decode_vat, encode_oct, encode_vat, write_vat,
 )
 
 PLANT = build_tiny_plant()
@@ -110,7 +110,7 @@ def test_bytes_are_deterministic_and_odd_f16_is_padded() -> None:
     one = VatPlant("t", {}, ["a"], [0.0], [0, 1, 2], 0, [
         Block("position", "vertex", "stage", 3, "f32", [0.0] * 9),
         Block("organ", "vertex", "static", 1, "u32", [0, 0, 0]),
-        Block("odd", "organ", "static", 1, "f16", [1.5])])
+        Block("odd", "organ", "static", 1, "f16", [1.5])], Frame("+Y", "m"), 1)
     data = encode_vat(one)
     gltf, binary = read_glb(data)
     assert len(binary) % 4 == 0
@@ -153,15 +153,28 @@ def test_glb_is_valid_gltf() -> None:
     # the preview mesh is the preview stage (2) of the position and normal blocks and the static uv block
     decoded = decode_vat(DATA)
     n = vertex_count * 3
-    assert list(floats["POSITION"]) == list(block("position", decoded).values[2 * n:3 * n])
+    expected = list(block("position", decoded).values[2 * n:3 * n])
+    for v in range(6):  # organ 0 vanished at t = 2.5, so the t = 3.0 preview collapses it onto its first vertex
+        expected[3 * v:3 * v + 3] = expected[0:3]
+    assert list(floats["POSITION"]) == expected
+    assert pos["min"] == [min(expected[c::3]) for c in range(3)]
+    assert pos["max"] == [max(expected[c::3]) for c in range(3)]
+    unit = [math.hypot(*floats["NORMAL"][k:k + 3]) for k in range(0, n, 3)]
+    assert unit == pytest.approx([1.0] * vertex_count, abs=1e-6)
+    assert gltf["nodes"] == [{"mesh": 0, "rotation": [-0.70710678, 0.0, 0.0, 0.70710678]}]
+    assert gltf["materials"] == [{"name": "vat_preview", "doubleSided": True}] and prim["material"] == 0
+    assert header["frame"] == {"up": "+Z", "unit": "m"} and header["species_version"] == 1
     assert list(floats["NORMAL"]) == pytest.approx(list(block("normal", decoded).values[2 * n:3 * n]), abs=1e-6)
     assert list(floats["TEXCOORD_0"]) == list(block("uv", decoded).values)
     assert header["format"] == "cobeart-vat" and header["version"] == 1 and header["never"] == NEVER
+    assert header["blocks"][0]["meta"] == {"components": ["x", "y", "z"], "unit": "m"}
+    assert "meta" not in header["blocks"][2]
     assert [b["name"] for b in header["blocks"]] == [b.name for b in PLANT.blocks]
 
 
 def test_events_keep_never_as_a_finite_float() -> None:
-    assert block("events", decode_vat(DATA)).values[6:] == (f32(NEVER),) * 2
+    assert NEVER == f32(1.0e30)
+    assert block("events", decode_vat(DATA)).values[6:] == (NEVER,) * 2
 
 
 ERRORS: list[tuple[str, Callable[[], VatPlant], str]] = [
@@ -191,6 +204,15 @@ ERRORS: list[tuple[str, Callable[[], VatPlant], str]] = [
     ("components range", lambda: with_block("s", components=5), r"block 's': components 5"),
     ("stage times", lambda: replace(PLANT, stage_times=(0.0, 1.5, 1.5)), r"strictly increasing: stage 2"),
     ("preview stage", lambda: replace(PLANT, preview_stage=3), r"preview_stage 3 must be an index below 3"),
+    ("not a number", lambda: with_value("uv", 2, "x"), r"block 'uv' element 1, component 0: value 'x' is not a number"),
+    ("bool", lambda: with_value("uv", 2, True), r"block 'uv' element 1, component 0: value True is not a number"),
+    ("meta components", lambda: with_block("position", meta={"components": ["x", "y"]}),
+     r"block 'position': meta.components must be 3 strings"),
+    ("meta unit", lambda: with_block("position", meta={"unit": 3}), r"block 'position': meta.unit must be a string"),
+    ("lifespan shape", lambda: with_block("lifespan", components=1, values=[0.0, 1.0], meta=None),
+     r"block 'lifespan' must be organ, static, 2 components, f32"),
+    ("frame", lambda: replace(PLANT, frame=Frame("+X", "m")), r"frame .* must be Frame"),
+    ("species version", lambda: replace(PLANT, species_version=1.5), r"species_version 1.5 must be an integer"),
     ("params", lambda: replace(PLANT, species_params={"x": float("nan")}), r"species_params"),
 ]
 
@@ -208,6 +230,7 @@ def test_decode_rejects_truncated_and_mislabelled_files() -> None:
         decode_vat(b"\0" * 64)
     gltf, binary = read_glb(DATA)
     gltf["extras"]["vat"]["organ_count"] = 3
+    gltf["extras"]["vat"]["organ_ids"].append("3")
     text = json.dumps(gltf).encode()
     text += b" " * (-len(text) % 4)
     forged = (struct.pack("<III", 0x46546C67, 2, 28 + len(text) + len(binary))
@@ -229,3 +252,60 @@ def test_node_loader_matches_python_decode() -> None:
     assert set(js["blocks"]) == {b.name for b in decoded.blocks}
     for b in decoded.blocks:
         assert js["blocks"][b.name] == pytest.approx(list(b.values), abs=1e-6, rel=1e-6), b.name
+
+
+def reforge(mutate: Callable[[dict], None]) -> bytes:
+    """The fixture with its glTF JSON edited by `mutate` (the BIN chunk is kept)."""
+    gltf, binary = read_glb(DATA)
+    mutate(gltf)
+    text = json.dumps(gltf).encode()
+    text += b" " * (-len(text) % 4)
+    return (struct.pack("<III", 0x46546C67, 2, 28 + len(text) + len(binary))
+            + struct.pack("<II", len(text), 0x4E4F534A) + text
+            + struct.pack("<II", len(binary), 0x004E4942) + binary)
+
+
+def test_decoded_plant_carries_frame_version_and_meta() -> None:
+    decoded = decode_vat(DATA)
+    assert decoded.frame == Frame("+Z", "m") and decoded.species_version == 1
+    assert block("events", decoded).meta == block("events").meta
+    assert block("organ", decoded).meta is None
+
+
+def test_y_up_has_no_node_rotation() -> None:
+    gltf, _ = read_glb(encode_vat(replace(PLANT, frame=Frame("+Y", "cm"))))
+    assert gltf["nodes"] == [{"mesh": 0}] and gltf["extras"]["vat"]["frame"] == {"up": "+Y", "unit": "cm"}
+
+
+def test_preview_without_lifespan_keeps_every_vertex() -> None:
+    plant = replace(PLANT, blocks=[b for b in PLANT.blocks if b.name != "lifespan"])
+    gltf, binary = read_glb(encode_vat(plant))
+    acc = gltf["accessors"][gltf["meshes"][0]["primitives"][0]["attributes"]["POSITION"]]
+    offset = gltf["bufferViews"][acc["bufferView"]]["byteOffset"]
+    floats = struct.unpack_from("<36f", binary, offset)
+    assert list(floats) == list(block("position", decode_vat(DATA)).values[72:108])
+
+
+@pytest.mark.parametrize(("mutate", "pattern"), [
+    (lambda g: g["extras"]["vat"].pop("vertex_count"), r"extras\.vat\.vertex_count is missing"),
+    (lambda g: g["extras"]["vat"].update(organ_count=-1, organ_ids=[]),
+     r"extras\.vat\.organ_count must be non-negative"),
+    (lambda g: g["extras"]["vat"].update(vertex_count="12"), r"extras\.vat\.vertex_count is missing or not int"),
+    (lambda g: g["extras"]["vat"].pop("never"), r"extras\.vat\.never is missing"),
+    (lambda g: g["extras"]["vat"].pop("frame"), r"extras\.vat\.frame is missing"),
+    (lambda g: g["extras"]["vat"].pop("species_version"), r"extras\.vat\.species_version is missing"),
+    (lambda g: g["extras"]["vat"]["blocks"][1].pop("storage"), r"extras\.vat\.blocks\[1\]\.storage is missing"),
+    (lambda g: g["extras"]["vat"].update(organ_count=5), r"organ_count 5 disagrees with organ_ids \(2\)"),
+    (lambda g: g["accessors"][-1].update(componentType=5123), r"indices accessor componentType is 5123"),
+])
+def test_decode_names_bad_header_fields(mutate: Callable[[dict], None], pattern: str) -> None:
+    with pytest.raises(VatError, match=pattern):
+        decode_vat(reforge(mutate))
+
+
+def test_decode_ignores_unknown_header_fields_and_blocks() -> None:
+    def extend(gltf: dict) -> None:
+        gltf["extras"]["vat"]["future_field"] = {"anything": 1}
+        gltf["extras"]["vat"]["blocks"][0]["future_key"] = True
+    decoded = decode_vat(reforge(extend))
+    assert [b.name for b in decoded.blocks] == [b.name for b in PLANT.blocks]

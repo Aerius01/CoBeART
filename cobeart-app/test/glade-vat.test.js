@@ -35,6 +35,13 @@ const withEditedHeader = (buffer, edit) => {
   return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
 };
 
+/** The fixture with one trailing space trimmed from the JSON chunk length, so it is not a multiple of 4. */
+const unpaddedJson = (buffer) => {
+  const copy = buffer.slice(0);
+  new DataView(copy).setUint32(12, new DataView(copy).getUint32(12, true) - 1, true);
+  return copy;
+};
+
 test('fixture header fields', async () => {
   const { parseVat } = await loadVat();
   const vat = parseVat(fixtureBuffer());
@@ -45,7 +52,9 @@ test('fixture header fields', async () => {
   assert.deepEqual(vat.organIds, ['1', '2']);
   assert.deepEqual(vat.stageTimes, [0, 1.5, 3]);
   assert.equal(vat.previewStage, 2);
-  assert.equal(vat.never, 1.0e30);
+  assert.equal(vat.never, Math.fround(1.0e30));
+  assert.equal(vat.speciesVersion, 1);
+  assert.deepEqual(vat.frame, { up: '+Z', unit: 'm' });
   assert.ok(vat.indices instanceof Uint32Array);
   assert.equal(vat.indices.length, 24);
   assert.ok(vat.indices.every((i) => i < 12));
@@ -62,6 +71,7 @@ test('block shapes and typed-array kinds', async () => {
     s: ['vertex', 'static', 1, 'f16', Uint16Array, 12],
     birth: ['organ', 'static', 1, 'f32', Float32Array, 2],
     events: ['organ', 'static', 4, 'f32', Float32Array, 8],
+    lifespan: ['organ', 'static', 2, 'f32', Float32Array, 4],
     kind: ['organ', 'static', 1, 'u32', Uint32Array, 2],
     tilt: ['organ', 'static', 1, 'f16', Uint16Array, 2],
     arch: ['organ', 'stage', 1, 'f32', Float32Array, 6],
@@ -85,7 +95,8 @@ test('decoded values', async () => {
   assert.deepEqual(Array.from(decodeBlock(blocks.get('tilt'))), [0.5, -1.25]);
   const events = decodeBlock(blocks.get('events'));
   assert.deepEqual(Array.from(events.slice(0, 6)), [1, 0.5, 2, 2.5, 2, 1]);
-  assert.equal(events[6], Math.fround(never));
+  assert.equal(events[6], never);
+  assert.deepEqual(Array.from(decodeBlock(blocks.get('lifespan'))), [0, 2.5, 1.5, never]);
   const position = decodeBlock(blocks.get('position'));
   assert.ok(position instanceof Float32Array && position.length === 108);
   // stage 2, organ 1, row 0, column 1 (vertex 7): x = 0.125 + 0.0625 * 3, z = 0.01 (float16 tolerance)
@@ -107,9 +118,46 @@ test('f16 and octahedral decoders', async () => {
   assert.equal(f16ToNumber(0xc000), -2);
   assert.equal(f16ToNumber(0x7bff), 65504);
   assert.equal(f16ToNumber(0x0001), 2 ** -24);
-  assert.deepEqual(octToUnit(0, 0), [0, 0, 1]);
-  const [x, y, z] = octToUnit(32767, 32767);
+  const out = new Float32Array(6);
+  octToUnit(0, 0, out, 3);
+  assert.deepEqual(Array.from(out), [0, 0, 0, 0, 0, 1]);
+  octToUnit(32767, 32767, out, 0);
+  const [x, y, z] = out;
   assert.ok(Math.abs(x) < 1e-3 && Math.abs(y) < 1e-3 && z < -0.99, 'the corner decodes to straight down');
+});
+
+test('block meta, with unknown header fields and blocks ignored', async () => {
+  const { parseVat } = await loadVat();
+  const { blocks } = parseVat(fixtureBuffer());
+  assert.deepEqual(blocks.get('position').meta, { components: ['x', 'y', 'z'], unit: 'm' });
+  assert.equal(blocks.get('organ').meta, null);
+  const extended = withEditedHeader(fixtureBuffer(), (g) => {
+    g.extras.vat.future_field = { a: 1 };
+    g.extras.vat.blocks[0].future_key = true;
+  });
+  assert.equal(parseVat(extended).blocks.size, blocks.size);
+});
+
+test('the preview mesh: node rotation, material and the collapse of a dead organ', () => {
+  const buffer = fixtureBuffer();
+  const view = new DataView(buffer);
+  const jsonLength = view.getUint32(12, true);
+  const gltf = JSON.parse(Buffer.from(buffer, 20, jsonLength).toString('utf8'));
+  assert.deepEqual(gltf.nodes[0].rotation, [-0.70710678, 0, 0, 0.70710678]);
+  assert.deepEqual(gltf.materials, [{ name: 'vat_preview', doubleSided: true }]);
+  const primitive = gltf.meshes[0].primitives[0];
+  assert.equal(primitive.material, 0);
+  const accessor = gltf.accessors[primitive.attributes.POSITION];
+  const bufferView = gltf.bufferViews[accessor.bufferView];
+  const positions = new Float32Array(buffer, 28 + jsonLength + bufferView.byteOffset, accessor.count * 3);
+  // organ 0 (vertices 0..5) vanished at t = 2.5 and the preview time is 3, so it sits on its first vertex
+  for (let v = 1; v < 6; v++) assert.deepEqual(Array.from(positions.slice(3 * v, 3 * v + 3)), Array.from(positions.slice(0, 3)));
+  assert.notDeepEqual(Array.from(positions.slice(21, 24)), Array.from(positions.slice(18, 21)));
+  for (let c = 0; c < 3; c++) {
+    const column = Array.from({ length: accessor.count }, (_, v) => positions[3 * v + c]);
+    assert.equal(accessor.min[c], Math.min(...column));
+    assert.equal(accessor.max[c], Math.max(...column));
+  }
 });
 
 test('errors on a truncated buffer, a bad header and mismatched block lengths', async () => {
@@ -120,6 +168,19 @@ test('errors on a truncated buffer, a bad header and mismatched block lengths', 
   assert.throws(() => parseVat(new ArrayBuffer(64)), /not a glTF 2\.0 binary/);
   assert.throws(
     () => parseVat(withEditedHeader(good, (g) => { g.extras.vat.format = 'other'; })), /extras\.vat\.format/);
+  const named = [
+    [(g) => { delete g.extras.vat.vertex_count; }, /extras\.vat\.vertex_count is missing/],
+    [(g) => { g.extras.vat.organ_count = -1; g.extras.vat.organ_ids = []; }, /organ_count must be non-negative/],
+    [(g) => { g.extras.vat.organ_count = 5; }, /organ_count 5 disagrees with organ_ids \(2\)/],
+    [(g) => { delete g.extras.vat.never; }, /extras\.vat\.never is missing/],
+    [(g) => { delete g.extras.vat.frame; }, /extras\.vat\.frame is missing/],
+    [(g) => { g.extras.vat.frame.up = '+X'; }, /extras\.vat\.frame must be/],
+    [(g) => { delete g.extras.vat.species_version; }, /extras\.vat\.species_version is missing/],
+    [(g) => { delete g.extras.vat.blocks[1].storage; }, /extras\.vat\.blocks\[1\]\.storage is missing/],
+    [(g) => { g.accessors.at(-1).componentType = 5123; }, /indices accessor componentType is 5123/],
+  ];
+  for (const [edit, pattern] of named) assert.throws(() => parseVat(withEditedHeader(good, edit)), pattern);
+  assert.throws(() => parseVat(unpaddedJson(good)), /4-byte padded JSON chunk/);
   assert.throws(
     () => parseVat(withEditedHeader(good, (g) => { g.extras.vat.organ_count = 3; g.extras.vat.organ_ids.push('3'); })),
     /block 'birth': bufferView \d+ is 8 bytes, header implies 12/);

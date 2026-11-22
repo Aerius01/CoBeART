@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
@@ -14,7 +14,10 @@ Storage = Literal["f32", "f16", "u32", "oct16"]
 
 FORMAT = "cobeart-vat"
 VERSION = 1
-NEVER = 1.0e30
+NEVER: float = struct.unpack("<f", struct.pack("<f", 1.0e30))[0]
+UP_AXES: tuple[str, ...] = ("+Z", "+Y")
+PREVIEW_ROTATION_Z_UP = [-0.70710678, 0.0, 0.0, 0.70710678]
+MATERIAL_NAME = "vat_preview"
 F16_MAX = 65504.0
 F32_MAX = 3.4028234663852886e38
 U32_MAX = 0xFFFFFFFF
@@ -47,6 +50,15 @@ class Block:
     components: int
     storage: Storage
     values: Sequence[float | int]
+    meta: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class Frame:
+    """The species coordinate frame: which axis is up and the length unit (e.g. "m")."""
+
+    up: Literal["+Z", "+Y"]
+    unit: str
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,8 @@ class VatPlant:
     triangles: Sequence[int]
     preview_stage: int
     blocks: Sequence[Block]
+    frame: Frame
+    species_version: int
 
 
 def _sign_not_zero(v: float) -> float:
@@ -100,29 +114,32 @@ def _locate(index: int, components: int, per_stage: int, timing: str) -> str:
 
 def _check_block_values(block: Block, count: int, stage_count: int) -> None:
     per_stage = count * block.components
-    expected = per_stage * (stage_count if block.timing == "stage" else 1)
-    if len(block.values) != expected:
+    stages = stage_count if block.timing == "stage" else 1
+    if len(block.values) != per_stage * stages:
         raise VatError(
-            f"block '{block.name}' has {len(block.values)} values, expected {expected} "
+            f"block '{block.name}' has {len(block.values)} values, expected {per_stage * stages} "
             f"({count} {block.domain} elements x {block.components} components"
             f"{f' x {stage_count} stages' if block.timing == 'stage' else ''})")
+
+    def fail(index: int, problem: str) -> VatError:
+        where = _locate(index, block.components, per_stage, block.timing)
+        return VatError(f"block '{block.name}' {where}: {problem}")
+
     for index, value in enumerate(block.values):
-        where = f"block '{block.name}' {_locate(index, block.components, per_stage, block.timing)}"
         if block.storage == "u32":
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= U32_MAX:
-                raise VatError(f"{where}: u32 value {value!r} must be an integer in 0..{U32_MAX}")
+                raise fail(index, f"u32 value {value!r} must be an integer in 0..{U32_MAX}")
             continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise fail(index, f"value {value!r} is not a number")
         if not math.isfinite(value):
-            raise VatError(f"{where}: value {value!r} is not finite")
+            raise fail(index, f"value {value!r} is not finite")
         if block.storage == "f32" and abs(value) > F32_MAX:
-            raise VatError(f"{where}: value {value!r} is beyond the float32 range")
+            raise fail(index, f"value {value!r} is beyond the float32 range")
         if block.storage == "f16" and abs(value) > F16_MAX:
-            raise VatError(f"{where}: value {value!r} is beyond the float16 range (+-{F16_MAX}); use f32 storage")
-    if block.storage == "oct16":
-        for start in range(0, len(block.values), 3):
-            if not any(block.values[start:start + 3]):
-                raise VatError(f"block '{block.name}' {_locate(start, 3, per_stage, block.timing)}: "
-                               "zero vector cannot be octahedral-encoded")
+            raise fail(index, f"value {value!r} is beyond the float16 range (+-{F16_MAX}); use f32 storage")
+        if block.storage == "oct16" and index % 3 == 2 and not any(block.values[index - 2:index + 1]):
+            raise fail(index - 2, "zero vector cannot be octahedral-encoded")
 
 
 def _validate_block_shape(block: Block) -> None:
@@ -138,10 +155,25 @@ def _validate_block_shape(block: Block) -> None:
         raise VatError(f"block '{block.name}': components {block.components!r} must be an integer in 1..4")
     if block.storage == "oct16" and block.components != 3:
         raise VatError(f"block '{block.name}': oct16 requires components 3, got {block.components}")
+    if block.meta is None:
+        return
+    if not isinstance(block.meta, Mapping):
+        raise VatError(f"block '{block.name}': meta must be a mapping, got {type(block.meta).__name__}")
+    names = block.meta.get("components")
+    if names is not None and (not isinstance(names, (list, tuple)) or len(names) != block.components
+                              or not all(isinstance(n, str) for n in names)):
+        raise VatError(f"block '{block.name}': meta.components must be {block.components} strings, got {names!r}")
+    if "unit" in block.meta and not isinstance(block.meta["unit"], str):
+        raise VatError(f"block '{block.name}': meta.unit must be a string, got {block.meta['unit']!r}")
 
 
 def _validate_plant(plant: VatPlant) -> int:
     """Checks the whole plant and returns its vertex count."""
+    if not isinstance(plant.frame, Frame) or plant.frame.up not in UP_AXES \
+            or not isinstance(plant.frame.unit, str) or not plant.frame.unit:
+        raise VatError(f"frame {plant.frame!r} must be Frame(up in {UP_AXES}, unit non-empty string)")
+    if isinstance(plant.species_version, bool) or not isinstance(plant.species_version, int):
+        raise VatError(f"species_version {plant.species_version!r} must be an integer")
     if not plant.stage_times:
         raise VatError("stage_times is empty; give at least one stage time")
     for k, t in enumerate(plant.stage_times):
@@ -169,6 +201,10 @@ def _validate_plant(plant: VatPlant) -> int:
     if (position.domain, position.timing, position.components) != ("vertex", "stage", 3) \
             or position.storage not in ("f32", "f16"):
         raise VatError("block 'position' must be vertex, stage, 3 components, f32 or f16")
+    lifespan = by_name.get("lifespan")
+    if lifespan is not None and (lifespan.domain, lifespan.timing, lifespan.components, lifespan.storage) \
+            != ("organ", "static", 2, "f32"):
+        raise VatError("block 'lifespan' must be organ, static, 2 components, f32 (appear, vanish)")
     vertex_count, organ_count, stage_count = len(organ.values), len(plant.organ_ids), len(plant.stage_times)
     if vertex_count == 0:
         raise VatError("block 'organ' is empty; a plant needs at least one vertex")
@@ -236,12 +272,34 @@ def encode_vat(plant: VatPlant) -> bytes:
     attributes: dict[str, int] = {}
 
     def preview(block: Block) -> tuple[float | int, ...]:
-        """The block's stored values as decoded at the preview stage."""
-        decoded = _decode_values(block.storage, encoded[block.name])
-        if block.timing == "static":
-            return decoded
-        size = vertex_count * block.components
-        return decoded[plant.preview_stage * size:(plant.preview_stage + 1) * size]
+        """The block's stored values as decoded at the preview stage (one stage is sliced before decoding)."""
+        data = encoded[block.name]
+        if block.timing == "stage":
+            size = _byte_length(block.storage, vertex_count * block.components)
+            data = data[plant.preview_stage * size:(plant.preview_stage + 1) * size]
+        return _decode_values(block.storage, data)
+
+    def preview_positions() -> tuple[float | int, ...]:
+        """Preview positions, with organs not alive at the preview time collapsed onto their first vertex."""
+        values = preview(by_name["position"])
+        if "lifespan" not in by_name:
+            return values
+        t = plant.stage_times[plant.preview_stage]
+        life = _decode_values("f32", encoded["lifespan"])
+        first: dict[int, int] = {}
+        out = list(values)
+        for v, o in enumerate(by_name["organ"].values):
+            first.setdefault(o, v)
+            if not life[2 * o] <= t < life[2 * o + 1]:
+                out[3 * v:3 * v + 3] = values[3 * first[o]:3 * first[o] + 3]
+        return tuple(out)
+
+    def unit_normals(values: tuple[float | int, ...]) -> tuple[float, ...]:
+        out: list[float] = []
+        for k in range(0, len(values), 3):
+            length = math.sqrt(values[k] ** 2 + values[k + 1] ** 2 + values[k + 2] ** 2)
+            out.extend(values[k:k + 3] if length == 0.0 else (c / length for c in values[k:k + 3]))
+        return tuple(out)
 
     def add_attribute(name: str, values: tuple[float | int, ...], kind: str, width: int, bounds: bool = False) -> None:
         accessor: dict[str, Any] = {"bufferView": add_view(struct.pack(f"<{len(values)}f", *values), GL_ARRAY_BUFFER),
@@ -253,10 +311,10 @@ def encode_vat(plant: VatPlant) -> bytes:
         attributes[name] = len(accessors)
         accessors.append(accessor)
 
-    add_attribute("POSITION", preview(by_name["position"]), "VEC3", 3, bounds=True)
+    add_attribute("POSITION", preview_positions(), "VEC3", 3, bounds=True)
     normal = by_name.get("normal")
     if normal is not None and normal.domain == "vertex" and normal.components == 3:
-        add_attribute("NORMAL", preview(normal), "VEC3", 3)
+        add_attribute("NORMAL", unit_normals(preview(normal)), "VEC3", 3)
     uv = by_name.get("uv")
     if uv is not None and uv.domain == "vertex" and uv.timing == "static" and uv.components == 2:
         add_attribute("TEXCOORD_0", preview(uv), "VEC2", 2)
@@ -265,16 +323,26 @@ def encode_vat(plant: VatPlant) -> bytes:
                                              GL_ELEMENT_ARRAY_BUFFER),
                       "componentType": GL_UNSIGNED_INT, "count": len(plant.triangles), "type": "SCALAR"})
 
-    block_headers = [{"name": b.name, "domain": b.domain, "timing": b.timing, "components": b.components,
-                      "storage": b.storage, "bufferView": add_view(encoded[b.name])} for b in plant.blocks]
+    block_headers = []
+    for b in plant.blocks:
+        entry: dict[str, Any] = {"name": b.name, "domain": b.domain, "timing": b.timing, "components": b.components,
+                                 "storage": b.storage, "bufferView": add_view(encoded[b.name])}
+        if b.meta is not None:
+            entry["meta"] = b.meta
+        block_headers.append(entry)
+    node: dict[str, Any] = {"mesh": 0}
+    if plant.frame.up == "+Z":
+        node["rotation"] = PREVIEW_ROTATION_Z_UP
 
     gltf = {
         "asset": {"version": "2.0", "generator": "cobeart vat_writer"},
-        "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
-        "meshes": [{"primitives": [{"attributes": attributes, "indices": indices_accessor, "mode": 4}]}],
+        "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [node],
+        "materials": [{"name": MATERIAL_NAME, "doubleSided": True}],
+        "meshes": [{"primitives": [{"attributes": attributes, "indices": indices_accessor, "mode": 4, "material": 0}]}],
         "buffers": [{"byteLength": len(binary)}], "bufferViews": views, "accessors": accessors,
         "extras": {"vat": {
-            "format": FORMAT, "version": VERSION, "species": plant.species, "species_params": plant.species_params,
+            "format": FORMAT, "version": VERSION, "species": plant.species, "species_version": plant.species_version,
+            "species_params": plant.species_params, "frame": {"up": plant.frame.up, "unit": plant.frame.unit},
             "vertex_count": vertex_count, "organ_count": len(plant.organ_ids), "organ_ids": list(plant.organ_ids),
             "stage_times": list(plant.stage_times), "preview_stage": plant.preview_stage, "never": NEVER,
             "blocks": block_headers}},
@@ -320,6 +388,22 @@ def _parse_glb(data: bytes) -> tuple[dict[str, Any], bytes]:
     return gltf, data[start:start + bin_length]
 
 
+def _field(obj: Any, key: str, kind: type | tuple[type, ...], where: str = "extras.vat") -> Any:
+    """`obj[key]`, or a VatError naming `where.key` when it is missing or not of type `kind`."""
+    kinds = kind if isinstance(kind, tuple) else (kind,)
+    value = obj.get(key) if isinstance(obj, dict) else None
+    if not isinstance(value, kinds) or (isinstance(value, bool) and bool not in kinds):
+        raise VatError(f"{where}.{key} is missing or not {'/'.join(k.__name__ for k in kinds)}: got {value!r}")
+    return value
+
+
+def _count(obj: Any, key: str) -> int:
+    value: int = _field(obj, key, int)
+    if value < 0:
+        raise VatError(f"extras.vat.{key} must be non-negative, got {value}")
+    return value
+
+
 def decode_vat(data: bytes) -> VatPlant:
     """Parses and validates a VAT GLB; values come back decoded (`oct16` as unit xyz, `u32` as ints)."""
     gltf, binary = _parse_glb(data)
@@ -328,12 +412,25 @@ def decode_vat(data: bytes) -> VatPlant:
         raise VatError(f"extras.vat.format must be '{FORMAT}'")
     if header.get("version") != VERSION:
         raise VatError(f"extras.vat.version is {header.get('version')!r}; this reader supports {VERSION}")
-    vertex_count, organ_count = header["vertex_count"], header["organ_count"]
-    stage_count = len(header["stage_times"])
-    views = gltf["bufferViews"]
+    organ_ids = _field(header, "organ_ids", list)
+    vertex_count, organ_count = _count(header, "vertex_count"), _count(header, "organ_count")
+    if organ_count != len(organ_ids):
+        raise VatError(f"extras.vat.organ_count {organ_count} disagrees with organ_ids ({len(organ_ids)})")
+    stage_times = _field(header, "stage_times", list)
+    never = _field(header, "never", (int, float))
+    if never != NEVER:
+        raise VatError(f"extras.vat.never is {never!r}; this reader supports {NEVER!r}")
+    frame_header = _field(header, "frame", dict)
+    frame = Frame(_field(frame_header, "up", str, "extras.vat.frame"),
+                  _field(frame_header, "unit", str, "extras.vat.frame"))
+    species_version = _field(header, "species_version", int)
+    species, species_params = _field(header, "species", str), _field(header, "species_params", dict)
+    preview_stage = _field(header, "preview_stage", int)
+    stage_count = len(stage_times)
+    views = _field(gltf, "bufferViews", list, "gltf")
 
     def view_bytes(index: int, expected: int, label: str) -> bytes:
-        if not 0 <= index < len(views):
+        if not isinstance(index, int) or not 0 <= index < len(views):
             raise VatError(f"{label}: bufferView {index} does not exist")
         view = views[index]
         if view["byteLength"] != expected:
@@ -345,20 +442,24 @@ def decode_vat(data: bytes) -> VatPlant:
         return binary[offset:offset + expected]
 
     blocks = []
-    for entry in header["blocks"]:
-        block = Block(entry["name"], entry["domain"], entry["timing"], entry["components"], entry["storage"], ())
+    for k, entry in enumerate(_field(header, "blocks", list)):
+        where = f"extras.vat.blocks[{k}]"
+        meta = entry.get("meta") if isinstance(entry, dict) else None
+        block = Block(_field(entry, "name", str, where), _field(entry, "domain", str, where),
+                      _field(entry, "timing", str, where), _field(entry, "components", int, where),
+                      _field(entry, "storage", str, where), (), meta)
         _validate_block_shape(block)
         count = _element_count(block.domain, vertex_count, organ_count)
         n = count * block.components * (stage_count if block.timing == "stage" else 1)
-        raw = view_bytes(entry["bufferView"], _byte_length(block.storage, n), f"block '{block.name}'")
-        blocks.append(Block(block.name, block.domain, block.timing, block.components, block.storage,
-                            _decode_values(block.storage, raw)))
+        raw = view_bytes(_field(entry, "bufferView", int, where), _byte_length(block.storage, n),
+                         f"block '{block.name}'")
+        blocks.append(replace(block, values=_decode_values(block.storage, raw)))
     accessor = gltf["accessors"][gltf["meshes"][0]["primitives"][0]["indices"]]
+    if accessor.get("componentType") != GL_UNSIGNED_INT:
+        raise VatError(f"indices accessor componentType is {accessor.get('componentType')!r}, "
+                       f"expected {GL_UNSIGNED_INT}")
     triangles = _decode_values("u32", view_bytes(accessor["bufferView"], accessor["count"] * 4, "indices"))
-    plant = VatPlant(header["species"], header["species_params"], tuple(header["organ_ids"]),
-                     tuple(header["stage_times"]), triangles, header["preview_stage"], tuple(blocks))
-    if _validate_plant(plant) != vertex_count:
-        raise VatError(f"header vertex_count {vertex_count} disagrees with block 'organ'")
-    if organ_count != len(plant.organ_ids):
-        raise VatError(f"header organ_count {organ_count} disagrees with organ_ids ({len(plant.organ_ids)})")
+    plant = VatPlant(species, species_params, tuple(organ_ids), tuple(stage_times), triangles, preview_stage,
+                     tuple(blocks), frame, species_version)
+    _validate_plant(plant)
     return plant

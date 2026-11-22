@@ -4,13 +4,13 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GP`. Scope: the growth chain for Glade's first 3D plant, a bushy vegetative grass (no heading, no flowering), from an L-Py model to a growth slider on a dev page. Design input: the grill of 2026-11-01 (decisions P1 to P8 below) and the reference plant in `dev/assets/build_grass_plant.py`. The wind MVP (`dev/wind-demo.html`, `dev/wind/`) is a sibling prototype and not part of this roadmap; Phase 5 reuses its renderer.
 
-**Status (2026-11-22):** Phases 0 to 3 done and merged into `main`. Phase 4 is next; its base is the tip of `main` after the Phase 3 outcome commit.
+**Status (2026-11-22):** Phases 0 to 3 done and merged into `main`. Phase 4 runs on `gp-4-vat` from `1d0f3c7`.
 
 ## Project facts
 
 - **Worktree base:** `.claude/settings.local.json` sets `worktree.baseRef: "head"` (verified 2026-11-01).
 - **L-Py environment:** a dedicated conda env `lpy`, never `splat-env`. Create it with `conda create -n lpy openalea.lpy pytest jsonschema -c openalea3 -c conda-forge` (created 2026-11-02; `jsonschema` 4.26 is needed by the exporter). A dry run on 2026-11-01 resolved `openalea.lpy` 3.15.4, `openalea.plantgl` 3.23.2 and Python 3.13 with the Qt viewer. Phase 1 tests: `timeout 120 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/lpy/tests`. Call the interpreter directly (`~/miniconda3/envs/lpy/bin/python`), never `conda run`. The GUI is `~/miniconda3/envs/lpy/bin/lpy`.
-- **Blender:** Phases 3 and 4 run Python inside Blender (headless: `blender --background --python <script> -- <args>`), the way `build_grass_plant.py` does. Blender's bundled Python has no access to the `lpy` env, so the two sides meet only through files.
+- **Blender:** Phase 3 runs Python inside Blender (Phase 4 does not need it) (headless: `blender --background --python <script> -- <args>`), the way `build_grass_plant.py` does. Blender's bundled Python has no access to the `lpy` env, so the two sides meet only through files.
 - **Ports:** `3000 + 100 * phase + wp`; 3000 is the orchestrator's. Only Phase 5 serves pages.
 - **Tests outside CI:** the root `pytest` collects only `cobeart` and `tests` (`pyproject.toml`), and CI has no `lpy` env, so this roadmap's Python tests run locally with the `lpy` interpreter. Each phase's gate lists them.
 - **Files no WP edits:** this file, `../BRIEF.md`, `../ROADMAP.md`, `CLAUDE.md`.
@@ -246,9 +246,87 @@ Base: `36f5674` (tip of `main` after the Phase 2 merge). A generator that reads 
 
 **Phase gate:** every WP's Must-pass on the merged head; `timeout 300 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/lpy/tests cobeart-app/public/worlds/glade/dev/plant/tests`; `~/miniconda3/envs/splat-env/bin/python -m flake8 --max-line-length 120` on `dev/lpy/decline.py` and `dev/plant/`; `node scripts/fitness.mjs`. Then the user opens the stages `.blend` in Blender and judges growth and decline (orchestrator hands over with exact commands).
 
-## Phase 4: Fixed-topology VAT export (outline)
+## Phase 4: Fixed-topology VAT export (3 WPs in 2 waves)
 
-Builds the full-lifetime mesh (P6): one index buffer over every organ the plant ever has, per-stage healthy positions plus wind pivots and axes and the per-stage leaf senescence and fade for N stages (decline is not baked, G10), unborn and dead organs collapsed to their attachment point. Exports a GLB (or GLB plus a binary VAT) and a loader in `dev/` with tests that check the topology is identical across stages. Open for its grill: N and stage spacing (denser where shape changes fast, such as unrolling; at 0.5 P spacing the 0.5 P turnover fade is never sampled between 0 and 1, so either the spacing resolves `FADE_DURATION` or the export gains static per-leaf `senescent_time` and `death_time` so senescence and fade become analytic in `g`), texture layout and precision (float16 or float32), and the number of plant variants (seeds) and the memory budget.
+Base: `1d0f3c7` (tip of `main` after the Phase 3 outcome commit). Bakes the full-lifetime mesh (P6) into a vertex animation file: one index buffer over every organ the plant ever has, per-stage positions and normals, per-organ data, and analytic organ events, in a species-neutral format that a later flower species reuses with its own adapter. No pages are served and Blender is not needed.
+
+**Verified 2026-11-22 (seed 1, a full-step export with `--samples 241`):**
+- 46 lifetime leaves, 8,280 vertices; 31 leaves turn senescent and 17 collapse by t = 12; every collapse is exactly `FADE_DURATION` (0.5) after death.
+- Of the Phase 3 `STAGE_ATTRIBUTES`, `pivot`, `axis`, `collar`, `arch`, `sen` and `fade` take one value per leaf and kind (sheath `pivot` and `axis` are the static tiller base and axis), `s` is fully static (wrongly listed as a stage attribute), and `stem_t` is per leaf for blades and a per-leaf height times the static `s` for sheaths. Only positions (and normals) vary per vertex per stage.
+- In the model, `senescence` rises linearly over the leaf's drawn `senescence_duration` (a birth draw not exported so far) and `fade` linearly over `FADE_DURATION`; both are therefore exact closed forms of time given per-leaf event times.
+- float16 absolute positions err by at most 0.12 mm (|position| up to 0.26 m).
+- Linear blending between uniform stages, collapsed leaves held at their last visible shape, visible leaves only (worst vertex, then the 95th percentile over times): N 25: 22 / 17 mm; 33: 16 / 11 mm; 49: 11 / 6.6 mm; 97: 6.3 / 3.9 mm. The worst case is always a young blade at about age 1 (lengthening and unrolling, tip moving about 11 mm per 0.05 P). Leaves are born every 0.25 to 0.5 P after t = 6, so non-uniform spacing buys little. Without holding collapsed leaves the error is 228 mm (a full-size dead blade flying to its anchor).
+
+**Grill outcomes (2026-11-22):**
+- **G38 Analytic organ events.** Senescence and fade are not stored per stage. Each leaf carries static `senescent_time`, `senescence_duration`, `death_time` and `collapse_time`; the consumer computes `sen(t) = clamp((t - senescent_time) / senescence_duration, 0, 1)` and `fade(t) = clamp((t - death_time) / FADE_DURATION, 0, 1)`, and hides the organ for `t < birth_time` or `t >= collapse_time`. An event that does not happen by `t_end` is `null` in JSON and `NEVER` (`1.0e30`, finite because GLSL infinities are unreliable) in the binary. These formulas reproduce the track's `senescence` and `fade` at every step (the model is step-quantised but linear).
+- **G39 Collapsed organs carry forward.** In every stage at or after its collapse, an organ keeps the positions, normals and per-organ stage values of the last stage in which it was visible, so a blend never flies a blade to its anchor; the consumer hides it by the G38 rule. Unborn organs stay degenerate at their first-seen attach (they are born at near-zero size).
+- **G40 Three data domains.** Per vertex static (`s`, `kind`, organ index, UV), per organ static (birth, draws, tiller frame, events) and per organ per stage (collar, blade direction, arch, sheath length, emergence height). Per vertex per stage holds only position and normal. `pivot`, `axis` and `stem_t` are rebuilt from these (`stem_t` with `SHEATH_PLATEAU_M`). `grass_geometry.STAGE_ATTRIBUTES` moves `s` to `STATIC_ATTRIBUTES`.
+- **G41 Pure-Python writer, GLB container.** The VAT file is written without Blender by a stdlib-only Python writer (also importable in Blender). It is a valid glTF 2.0 binary whose one mesh is the preview stage (viewable in any glTF viewer) and whose `extras.vat` describes the stage blocks in the same BIN chunk: one fetch, testable with the lpy interpreter.
+- **G42 Normals baked per stage**, octahedral-encoded (`oct16`, two int16 snorm, 4 bytes per vertex per stage), computed from the quad grid (area-weighted, the generator's winding: underside). Phase 5 rotates them by the decline row rotation and the lean; the export only carries them.
+- **G43 Species-neutral, self-describing format.** The header lists every block (name, domain, timing, components, storage, buffer view), the organ ids, the stage times and a free `species_params` object. The writer and loader know nothing about grass; a species adapter maps its geometry onto named blocks. Stage times are model time (phyllochrons for grass); mapping Glade's `g` onto them is Phase 5's.
+- **G44 Layout.** Generic code in `dev/vat/` (`vat_format.md`, `vat_writer.py`, `vat.mjs`, `fixtures/`); the grass adapter in `dev/plant/bake_grass_vat.py`. `decline.py` stays grass-side.
+- **G45 Event times come from the organ table (schema v3).** `grass.lpy` adds the leaf's static `senescence_duration` to leaf `o`; the exporter derives one step at a time and writes a top-level `organ_events` map (leaf id to the four G38 values, `null` where the event has not happened by `t_end`). The Phase 1 to 3 checks of `schema_version` move to 3.
+- **G46 Stages are the export's samples.** The bake uses every sample of the organ table it is given as one stage, in order; the canonical bake exports with `--samples 49` (0.25 P spacing, about 5 MB per variant with float16 positions and oct16 normals). Phase 5's frame-rate and look check may change N; nothing else depends on it.
+- **G47 Variants.** Phase 4 ships the tooling (`--seed` on the export) and one default bake; the number of variants is Glade's memory decision. Tests bake two seeds.
+- **G48 Loader tests.** A tiny synthetic fixture (2 organs, 3 stages, every storage type), written by the generic writer through `dev/vat/make_fixture.py`, is committed in `dev/vat/fixtures/tiny.vat.glb`. A node test in `cobeart-app/test/glade-vat.test.js` loads it in CI; a Python test checks a fresh write is byte-identical to it. Locally, a Python test runs `node` on a real grass bake and compares the decoded values with the source arrays.
+
+**VAT format v1 (settled; WP 4.2 writes `vat_format.md` from it):**
+- **Container:** glTF 2.0 GLB, little-endian, JSON chunk then BIN chunk, every buffer view 4-byte aligned. The glTF has one buffer (the BIN chunk), one mesh with one primitive: `POSITION` (f32 vec3, the `preview_stage` positions, with `min`/`max`), `NORMAL` (f32 vec3, decoded from the `normal` block at the preview stage, only when that block exists), `TEXCOORD_0` (f32 vec2, only when a vertex-static `uv` block with 2 components exists) and `indices` (u32 triangles). No materials.
+- **`extras.vat`** at the glTF top level: `format` `"cobeart-vat"`, `version` 1, `species` (string), `species_params` (JSON object, free), `vertex_count`, `organ_count`, `organ_ids` (strings, organ index order), `stage_times` (strictly increasing), `preview_stage` (index), `never` (`1.0e30`), and `blocks`: a list of `{name, domain: "vertex" | "organ", timing: "static" | "stage", components: 1..4, storage: "f32" | "f16" | "u32" | "oct16", bufferView}`. Block names are unique.
+- **Element layout:** a static block holds `count * components` values (`count` is `vertex_count` or `organ_count`); a stage block holds `stage_count` such runs, stage-major (`[stage][element][component]`). `oct16` requires `components` 3 and stores each unit vector as two int16 snorm (octahedral), 4 bytes per element. `u32` values are integers.
+- **Required blocks:** `position` (vertex, stage, 3) and `organ` (vertex, static, 1, `u32`, the organ index of each vertex). Everything else is species-defined.
+- **Validation (writer and loader):** counts and lengths agree, every value finite, `f16` values within the float16 range, `oct16` input vectors non-zero (normalised by the writer), organ indices below `organ_count`, triangle indices below `vertex_count`; errors name the block, and the stage and element where one applies.
+
+**Generic writer interface (`dev/vat/vat_writer.py`, stdlib only, WP 4.2):**
+- `Block` (frozen): `name`, `domain`, `timing`, `components`, `storage`, `values` (flat floats or ints, stage-major for stage blocks).
+- `VatPlant` (frozen): `species`, `species_params` (mapping), `organ_ids`, `stage_times`, `triangles` (flat u32 indices), `preview_stage`, `blocks`.
+- `encode_vat(plant) -> bytes` (deterministic: same input, same bytes), `write_vat(plant, path)`, `decode_vat(data: bytes) -> VatPlant` (values decoded to floats, `oct16` to unit xyz), `VatError(ValueError)`.
+
+**JS loader interface (`dev/vat/vat.mjs`, ES module, no dependencies, WP 4.2):**
+- `parseVat(arrayBuffer) -> Vat`: `{species, speciesParams, vertexCount, organCount, organIds, stageTimes, previewStage, never, indices: Uint32Array, blocks: Map<name, {domain, timing, components, storage, raw}>}` with `raw` the stored typed array (`Float32Array`, `Uint16Array` bits for `f16`, `Int16Array` for `oct16`, `Uint32Array`), ready for a GPU upload.
+- `decodeBlock(block) -> Float32Array | Uint32Array` (`f16` to floats, `oct16` to unit xyz triples) and `loadVat(url)` (fetch plus `parseVat`). Errors are `Error`s naming the block and what failed.
+
+**Grass blocks (`bake_grass_vat.py`, WP 4.3):**
+- Vertex stage: `position` (3, `f16`), `normal` (3, `oct16`).
+- Vertex static: `organ` (`u32`, lifetime leaf index, 0-based), `kind` (`u32`, 0 sheath, 1 blade), `s` (`f32`), `uv` (2, `f32`, per vertex from the grid: u across, v along the leaf).
+- Organ static (`f32`): `birth`, `draw` (decline draw), `phase`, `tiller`, `tiller_az`, `tiller_base` (3), `tiller_axis` (3), `side` (3), `events` (4: `senescent_time`, `senescence_duration`, `death_time`, `collapse_time`, `NEVER` where null).
+- Organ stage (`f32`): `collar` (3, the G37 emergence-row midrib point), `direction` (3, the healthy blade direction), `arch`, `sheath_length`, `emergence` (height along the tiller axis).
+- `species` `"grass"`; `species_params`: `model`, `seed`, `params` (every extern of the export), `geometry` (`dataclasses.asdict(GeometryParams())`, so `collar_bend` travels with it).
+- Preview stage: the last stage (`t_end`).
+
+### WP 4.1: Organ events and schema v3
+
+- **Model:** Opus (fresh; the event semantics must match the step-quantised model exactly).
+- **Wave:** 1.
+- **Owns:** `dev/lpy/grass.lpy`, `dev/lpy/export_organs.py`, `dev/lpy/organ_table.schema.json`, `dev/lpy/tests/` (all files), `dev/plant/grass_geometry.py`, `dev/plant/tests/test_grass_geometry.py`.
+- **Scope:** G38, G40's attribute fix and G45. `grass.lpy`: leaf `o` gains `senescence_duration` (the existing birth draw, unchanged values), documented in the header. Exporter: `schema_version` 3, leaf field `senescence_duration`, derivation one step at a time recording per leaf the first senescent step, the death step and the collapse step, and a top-level `organ_events` map `{id: {senescent_time, senescence_duration, death_time, collapse_time}}` where `senescent_time` is the step before the first senescent step (so the G38 formula holds), `null` for events not reached by `t_end`; schema and fixture follow. `grass_geometry.py`: accepts schema 3, `OrganTable` gains `events: Mapping[str, LeafEvents]` (frozen, `None` for null), `s` moves to `STATIC_ATTRIBUTES`. Output unchanged otherwise (same seed, same organ values).
+- **Must pass:**
+  - `timeout 300 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/lpy/tests cobeart-app/public/worlds/glade/dev/plant/tests` (the Blender smoke test runs), including new tests: on a `--samples 241` export of `grass.lpy` the G38 formulas reproduce `senescence` and `fade` of every leaf at every sample within 1e-6, and every leaf with `fade` 1 at a sample has `collapse_time <=` that sample; all leaf values except the new field equal the schema v2 values for seed 1.
+  - flake8 (max 120) on the owned Python files.
+
+### WP 4.2: Generic VAT writer and loader
+
+- **Model:** Sonnet (fresh; pinned down by the format and interfaces above).
+- **Wave:** 1.
+- **Owns:** `dev/vat/` (all files: `vat_format.md`, `vat_writer.py`, `vat.mjs`, `make_fixture.py`, `fixtures/tiny.vat.glb`, `tests/test_vat_writer.py`), `cobeart-app/test/glade-vat.test.js`.
+- **Scope:** G41, G43, G48 and the format, writer and loader interfaces above. Float16 and octahedral encoding implemented in both languages (round to nearest even for f16; standard octahedral with sign-not-zero). `vat_format.md` is the spec a new species adapter reads: the container, `extras.vat`, layouts, storage types and an example header. `make_fixture.py` writes the fixture deterministically.
+- **Must pass:**
+  - `timeout 120 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/vat/tests`: encode/decode round trip within each storage's tolerance (f32 exact, f16 relative 2^-11, oct16 angle below 0.01 deg), deterministic bytes, the committed fixture equals a fresh write, the GLB is valid glTF (header, chunks, accessor bounds, `POSITION` min/max), every validation error raised with its context, and a cross-language check that runs `node` on the fixture and compares decoded values (skipped with the reason when `node` is missing).
+  - `cd cobeart-app && timeout 300 npm test` passes, including `glade-vat.test.js` (fixture header, block shapes, decoded values, and errors on a truncated or mislabelled buffer).
+  - flake8 (max 120) on the Python files; `node scripts/fitness.mjs` 0 violations.
+
+### WP 4.3: Grass VAT bake
+
+- **Model:** Opus (fresh; carry-forward, normals and the mapping onto blocks are the substance).
+- **Wave:** 2.
+- **Owns:** `dev/plant/bake_grass_vat.py`, `dev/plant/tests/test_bake_grass_vat.py`.
+- **Uses:** `vat_writer` and `vat.mjs` (WP 4.2), `OrganTable.events` and the corrected attribute tuples (WP 4.1), the `conftest.py` export fixture.
+- **Scope:** G39, G40, G42, G46, G47 and the grass blocks above. CLI `~/miniconda3/envs/lpy/bin/python dev/plant/bake_grass_vat.py ORGANS.json OUT.vat.glb`; a pure `bake(table, p) -> VatPlant` the tests call. Builds every sample with the lifetime list, triangulates the quads with the generator's winding, computes area-weighted vertex normals per stage (unborn degenerate leaves get +Z), applies G39 carry-forward to positions, normals and organ stage blocks, fills `events` from `OrganTable.events`.
+- **Must pass:**
+  - `timeout 300 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/plant/tests`: decoded positions equal `build_plant` at every stage within the f16 tolerance for every leaf not collapsed at that stage, collapsed leaves equal their last visible stage; identical triangle list across stages and equal to the triangulated `PlantMesh.faces`; normals unit and on the underside side of their faces; organ stage and static blocks equal the `PlantMesh` attributes they replace (`pivot`, `axis`, `stem_t` rebuilt from them within 1e-6); G38 formulas from the `events` block reproduce `sen` and `fade` at every stage; two seeds bake; a `node` round trip of a real bake through `vat.mjs` matches (skipped without `node`).
+  - A bake of a fresh `--samples 49` export writes the file and prints vertex, organ and stage counts and the file size; flake8 on the owned files.
+
+**Phase gate:** every WP's Must-pass on the merged head; `timeout 400 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/lpy/tests cobeart-app/public/worlds/glade/dev/plant/tests cobeart-app/public/worlds/glade/dev/vat/tests`; `~/miniconda3/envs/splat-env/bin/python -m flake8 --max-line-length 120` on `dev/lpy/`, `dev/plant/` and `dev/vat/` Python files; `cd cobeart-app && npm test`; `node scripts/fitness.mjs`. Human check: open the default bake in a glTF viewer (the preview mesh) and read the printed sizes; the look of blended stages is Phase 5's.
 
 ## Phase 5: Growth slider on a dev page (outline)
 

@@ -308,8 +308,8 @@ void main() {
   float fade = clamp((t - events.z) / u_fadeDuration, 0.0, 1.0);
 
 #ifndef CAPTURE
-  // G53: a hidden organ's vertices go outside the clip volume before any other fetch, so its triangles are clipped
-  // away cheaply. The capture program keeps every vertex.
+  // G53: a hidden organ's vertices go outside the clip volume after only the life and events fetches, so its
+  // triangles are clipped away cheaply. The capture program keeps every vertex.
   if (t < life.x || t >= life.y || leafOpacity(fade, v) <= 0.0) {
     v_normal = vec3(0.0, 0.0, 1.0);
     v_kind = 0.0;

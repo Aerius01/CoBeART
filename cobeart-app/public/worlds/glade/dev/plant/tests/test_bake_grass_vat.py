@@ -357,6 +357,19 @@ def test_resolution_options_change_the_vertices_per_leaf(organ_table_path: Path,
     assert plant.species_params["geometry"]["cross_segments"] == 6
 
 
+def test_sheath_rows_option_gives_the_coarsest_leaf(organ_table_path: Path, tmp_path: Path) -> None:
+    out = tmp_path / "coarse.vat.glb"
+    assert main([str(organ_table_path), str(out), "--blade-segments", "6", "--cross-segments", "2",
+                 "--sheath-rows", "1"]) == 0
+    plant = decode_vat(out.read_bytes())
+    per_leaf = (1 + 6 + 1) * (2 + 1)
+    assert per_leaf == 24
+    organ = next(b for b in plant.blocks if b.name == "organ").values
+    assert len(organ) == per_leaf * len(plant.organ_ids)
+    assert all(organ.count(o) == per_leaf for o in range(len(plant.organ_ids)))
+    assert plant.species_params["geometry"]["sheath_rows"] == 1
+
+
 def test_profile_lists_every_block_with_its_shape(baked: Baked) -> None:
     rows = {}
     for line in (PLANT_DIR / "grass_vat_profile.md").read_text(encoding="utf-8").splitlines():

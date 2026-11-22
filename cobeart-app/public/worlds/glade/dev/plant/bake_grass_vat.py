@@ -1,7 +1,7 @@
 """Grass VAT bake (GP roadmap, Phase 4): an organ table to a cobeart-vat file (../vat/vat_format.md). Stdlib only.
 
 Usage: ~/miniconda3/envs/lpy/bin/python dev/plant/bake_grass_vat.py ORGANS.json OUT.vat.glb
-       [--blade-segments N] [--cross-segments N]
+       [--blade-segments N] [--cross-segments N] [--sheath-rows N]
 
 Every sample of the table is one stage (G46) and every lifetime leaf one organ, in lifetime_leaves order. Each stage
 is a fixed-topology build_plant over the lifetime list, so one triangle list serves all stages. Per vertex and stage
@@ -280,9 +280,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="quads along a blade (default %(default)s)")
     parser.add_argument("--cross-segments", type=int, default=defaults.cross_segments,
                         help="quads across a leaf (default %(default)s)")
+    parser.add_argument("--sheath-rows", type=int, default=defaults.sheath_rows,
+                        help="vertex rows of the sheath below the collar row (default %(default)s)")
     args = parser.parse_args(argv)
     start = time.perf_counter()
-    geometry = dataclasses.replace(defaults, blade_segments=args.blade_segments, cross_segments=args.cross_segments)
+    geometry = dataclasses.replace(defaults, blade_segments=args.blade_segments, cross_segments=args.cross_segments,
+                                   sheath_rows=args.sheath_rows)
     plant = bake(gg.load_table(args.organs), geometry)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     write_vat(plant, args.out)

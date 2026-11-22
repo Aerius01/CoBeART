@@ -202,7 +202,7 @@ def bake(table: gg.OrganTable, p: gg.GeometryParams) -> VatPlant:
     """The grass VAT of an organ table: every sample a stage, every lifetime leaf an organ (G39 to G49)."""
     lifetime = gg.lifetime_leaves(table)
     times = table.sample_times
-    plateau = float(table.params["SHEATH_PLATEAU_M"])  # type: ignore[arg-type]
+    plateau = gg.GrassModelParams.from_mapping(table.params).sheath_plateau_m
     meshes = [gg.build_plant(table, t, p, lifetime) for t in times]
     _check_fixed_topology(meshes, lifetime, times)
     first = meshes[0]

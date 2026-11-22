@@ -160,7 +160,7 @@ def test_one_surface_per_leaf(meshes: dict[float, gg.PlantMesh]) -> None:
 
 def test_first_blade_row_is_the_wrap_at_the_emergence_point(
         table: gg.OrganTable, meshes: dict[float, gg.PlantMesh]) -> None:
-    elongation_age = float(table.params["ELONGATION_AGE"])  # type: ignore[arg-type]
+    elongation_age = gg.GrassModelParams.from_mapping(table.params).elongation_age
     checked = enclosed = 0
     for sample in table.samples:
         mesh = meshes[sample.time]
@@ -229,7 +229,7 @@ def test_enclosed_blades_stay_inside_the_enclosing_wraps(table: gg.OrganTable,
     it (G36), both as built and as drawn by declined_vertex at v = 1 (turnover senescence shrinks some enclosing
     leaves). Rows after that have emerged; a drooping blade may hang below an older collar outside its sheath."""
     n = P.cross_segments + 1
-    elongation_age = float(table.params["ELONGATION_AGE"])  # type: ignore[arg-type]
+    elongation_age = gg.GrassModelParams.from_mapping(table.params).elongation_age
     decline = DeclineParams.from_mapping(table.params)
     worst = -1.0
     checked = 0
@@ -296,7 +296,7 @@ def test_split_wraps_never_exceed_the_width_cap(table: gg.OrganTable, meshes: di
             for row in (*sheath_rows(mesh, rng), *mesh_blade_rows(mesh, rng)):
                 arc = sum(dist(a, b) for a, b in zip(row, row[1:]))
                 assert arc <= cap + 1e-9, (sample.time, leaf.id, arc, cap)
-            rc = gg.sheath_radius(leaf.age, float(table.params["ELONGATION_AGE"]), P)  # type: ignore[arg-type]
+            rc = gg.sheath_radius(leaf.age, gg.GrassModelParams.from_mapping(table.params).elongation_age, P)
             split += gg.wrap_angle(rc, leaf.blade_width_m, P) < 2 * math.pi * P.rolled_turn
     assert split > 20
     assert gg.wrap_angle(0.002, 0.01, P) == pytest.approx(2 * math.pi * P.rolled_turn)
@@ -304,7 +304,7 @@ def test_split_wraps_never_exceed_the_width_cap(table: gg.OrganTable, meshes: di
 
 
 def test_sheath_wraps_nest_by_age(table: gg.OrganTable, meshes: dict[float, gg.PlantMesh]) -> None:
-    elongation_age = float(table.params["ELONGATION_AGE"])  # type: ignore[arg-type]
+    elongation_age = gg.GrassModelParams.from_mapping(table.params).elongation_age
     pairs = 0
     for sample in table.samples:
         mesh = meshes[sample.time]
@@ -497,7 +497,7 @@ def test_attributes_follow_the_table(table: gg.OrganTable, meshes: dict[float, g
         v = rng.blade[0]
         tiller = sample.tillers[leaf.tiller]
         emergence = add(leaf.attach, unit(tiller.direction), enclosed_length(leaf, sample))
-        rc = gg.sheath_radius(leaf.age, float(table.params["ELONGATION_AGE"]), P)  # type: ignore[arg-type]
+        rc = gg.sheath_radius(leaf.age, gg.GrassModelParams.from_mapping(table.params).elongation_age, P)
         wall = add(emergence, out_dir(leaf, tiller), rc)
         assert dist(mesh.vectors["collar"][v], wall) < 1e-12
         assert mesh.vectors["tiller_base"][v] == tiller.base
@@ -529,18 +529,19 @@ def test_static_attributes_identical_across_samples(meshes: dict[float, gg.Plant
             assert values == first_values, name
 
 
-def test_declined_vertex_runs_over_lifetime_builds(table: gg.OrganTable,
-                                                   meshes: dict[float, gg.PlantMesh]) -> None:
+def test_declined_vertex_runs_over_lifetime_builds(table: gg.OrganTable, lifetime: list[str]) -> None:
+    coarse = replace(P, blade_segments=6, cross_segments=2, sheath_rows=1)  # the canonical bake resolution (G65)
     decline = DeclineParams.from_mapping(table.params)
-    for time, mesh in meshes.items():
+    for time in table.sample_times:
+        mesh = gg.build_plant(table, time, coarse, lifetime)
         for i, position in enumerate(mesh.positions):
             vin = gg.vertex_inputs(mesh, i)
             for v in (1.0, 0.5, 0.1):
-                dv = declined_vertex(position, vin, time, v, decline, collar_bend=P.collar_bend)
+                dv = declined_vertex(position, vin, time, v, decline, collar_bend=coarse.collar_bend)
                 if v == 1.0 and vin.senescence == 0.0:
                     assert dist(dv.position, position) < 1e-12, (time, i)
             if vin.fade >= 1.0:
-                assert declined_vertex(position, vin, time, 1.0, decline, collar_bend=P.collar_bend).opacity == 0.0
+                assert declined_vertex(position, vin, time, 1.0, decline, collar_bend=coarse.collar_bend).opacity == 0.0
 
 
 def test_vertex_inputs_rejects_non_integral(meshes: dict[float, gg.PlantMesh]) -> None:

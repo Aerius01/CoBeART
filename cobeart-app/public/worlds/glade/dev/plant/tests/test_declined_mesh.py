@@ -39,7 +39,7 @@ def test_declined_mesh_matches_rebuilt_leaves(table: gg.OrganTable, mesh: gg.Pla
                                               capsys: pytest.CaptureFixture[str]) -> None:
     sample = gg.sample_at(table, TIME)
     emergence = gg.emergence_heights(sample)
-    elongation_age = float(table.params["ELONGATION_AGE"])
+    elongation_age = gg.GrassModelParams.from_mapping(table.params).elongation_age
     row = P.cross_segments + 1
     worst_tip = 0.0
     compared = 0

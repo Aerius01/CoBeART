@@ -217,7 +217,7 @@ def test_organ_static_blocks_equal_the_mesh(baked: Baked) -> None:
 
 
 def test_organ_stage_blocks_rebuild_pivot_axis_and_stem_t(baked: Baked) -> None:
-    plateau = float(baked.table.params["SHEATH_PLATEAU_M"])  # type: ignore[arg-type]
+    plateau = gg.GrassModelParams.from_mapping(baked.table.params).sheath_plateau_m
     organs = len(baked.decoded.organ_ids)
     collar, direction = baked.block("collar"), baked.block("direction")
     arch, sheath_length, emergence = baked.block("arch"), baked.block("sheath_length"), baked.block("emergence")

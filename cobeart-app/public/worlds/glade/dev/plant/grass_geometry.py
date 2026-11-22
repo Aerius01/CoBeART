@@ -186,6 +186,22 @@ class OrganTable:
 
 
 @dataclass(frozen=True)
+class GrassModelParams:
+    """The grass model externs the mesh and bake code read from OrganTable.params."""
+    elongation_age: float
+    sheath_plateau_m: float
+
+    @classmethod
+    def from_mapping(cls, params: Mapping[str, object]) -> GrassModelParams:
+        """Read from an organ table's params; raises OrganTableError naming a missing or non-numeric key."""
+        missing = [k for k in ("ELONGATION_AGE", "SHEATH_PLATEAU_M") if k not in params]
+        if missing:
+            raise OrganTableError(f"organ table params are missing {missing}; re-export with lpy/export_organs.py")
+        return cls(elongation_age=_num("params ELONGATION_AGE", params["ELONGATION_AGE"]),
+                   sheath_plateau_m=_num("params SHEATH_PLATEAU_M", params["SHEATH_PLATEAU_M"]))
+
+
+@dataclass(frozen=True)
 class LeafRange:
     """Vertex index ranges [start, stop) of one leaf's sheath and blade in a PlantMesh.
 
@@ -658,8 +674,8 @@ def build_plant(table: OrganTable, time: float, p: GeometryParams = GeometryPara
     unknown = [lid for lid in ids if lid not in organ_index]
     if unknown:
         raise OrganTableError(f"lifetime leaves {unknown} are not in the organ table; use lifetime_leaves(table)")
-    elongation_age = _num("params ELONGATION_AGE", table.params.get("ELONGATION_AGE"))
-    plateau = _num("params SHEATH_PLATEAU_M", table.params.get("SHEATH_PLATEAU_M"))
+    model = GrassModelParams.from_mapping(table.params)
+    elongation_age, plateau = model.elongation_age, model.sheath_plateau_m
     materials = [MATERIAL_SHEATH] * p.sheath_rows + [MATERIAL_BLADE] * p.blade_segments
     emergence = emergence_heights(sample)
     fractions = blade_row_fractions(p)

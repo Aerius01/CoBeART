@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 import grass_geometry as gg
-from bake_grass_vat import BakeError, bake, vertex_uvs
+from bake_grass_vat import BakeError, bake, main, vertex_uvs
 from conftest import EXPORT_TIMEOUT_S, LPY_DIR, PLANT_DIR
 
 sys.path.insert(0, str(PLANT_DIR.parent / "vat"))
@@ -341,6 +341,20 @@ def test_cli_writes_the_file_and_prints_counts(organ_table_path: Path, tmp_path:
     for text in (f"{vertices} vertices", f"{len(plant.organ_ids)} organs", f"{len(plant.stage_times)} stages",
                  f"{len(plant.triangles) // 3} triangles", f"{out.stat().st_size} bytes"):
         assert text in result.stdout
+
+
+def test_resolution_options_change_the_vertices_per_leaf(organ_table_path: Path, tmp_path: Path) -> None:
+    out = tmp_path / "low.vat.glb"
+    assert main([str(organ_table_path), str(out), "--blade-segments", "12", "--cross-segments", "6"]) == 0
+    plant = decode_vat(out.read_bytes())
+    p = dataclasses.replace(gg.GeometryParams(), blade_segments=12, cross_segments=6)
+    per_leaf = (p.sheath_rows + 12 + 1) * (6 + 1)
+    assert per_leaf == 112
+    organ = next(b for b in plant.blocks if b.name == "organ").values
+    assert len(organ) == per_leaf * len(plant.organ_ids)
+    assert all(organ.count(o) == per_leaf for o in range(len(plant.organ_ids)))
+    assert plant.species_params["geometry"]["blade_segments"] == 12
+    assert plant.species_params["geometry"]["cross_segments"] == 6
 
 
 def test_profile_lists_every_block_with_its_shape(baked: Baked) -> None:

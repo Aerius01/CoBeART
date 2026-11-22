@@ -55,6 +55,9 @@ At model time `t`, with `FADE_DURATION` and `SHEATH_PLATEAU_M` from `species_par
 - `seed`: the export's seed.
 - `params`: every extern of the model. It includes `FADE_DURATION`, `SHEATH_PLATEAU_M`, `ELONGATION_AGE` and the decline parameters that `decline.DeclineParams.from_mapping(params)` reads (`V_DEAD`, `DECLINE_*`, `SHRIVEL_*`, `ANGLE_SENESCENT_DEG`, `DECLINE_SPLAY_DEG`).
 - `geometry`: the `GeometryParams` used for the bake. `geometry.collar_bend` is the `collar_bend` argument of `declined_vertex` (a shader uniform).
+- `source`: content hashes binding the bake to its inputs (G76). `organ_table_sha256` is the lowercase hex sha256 of the organ table file's bytes the bake read. Consumers do not read it; it identifies which export a bake came from.
+
+The decline reference (`decline_reference.py`) stores `vat_sha256`, the lowercase hex sha256 of the bake file's bytes, and `grass-check.html` fails when it differs from the sha256 of the bake it loaded.
 
 ## Canonical bake
 

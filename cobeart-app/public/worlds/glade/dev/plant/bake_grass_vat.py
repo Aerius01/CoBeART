@@ -9,11 +9,14 @@ the file holds only the position (f16) and the area-weighted normal (oct16, G42)
 static, per organ static or per organ per stage (G40), with the senescence and fade events analytic (G38, G49). A leaf
 collapsed at a stage keeps the positions, normals and organ stage values of the last stage where it was visible
 (G39); unborn leaves stay degenerate at their first-seen attach. grass_vat_profile.md describes every block.
+species_params.source records the sha256 of the organ table bytes the bake read (G76).
 """
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
+import json
 import math
 import sys
 import time
@@ -198,8 +201,16 @@ def _block(name: str, domain: Domain, timing: Timing, storage: Storage, values: 
 XYZ = ("x", "y", "z")
 
 
-def bake(table: gg.OrganTable, p: gg.GeometryParams) -> VatPlant:
-    """The grass VAT of an organ table: every sample a stage, every lifetime leaf an organ (G39 to G49)."""
+def read_table(path: Path) -> tuple[gg.OrganTable, str]:
+    """The organ table at path and the sha256 (hex) of the exact bytes it was parsed from (G76)."""
+    data = Path(path).read_bytes()
+    return gg.parse_table(json.loads(data.decode("utf-8"))), hashlib.sha256(data).hexdigest()
+
+
+def bake(table: gg.OrganTable, p: gg.GeometryParams, organ_table_sha256: str) -> VatPlant:
+    """The grass VAT of an organ table: every sample a stage, every lifetime leaf an organ (G39 to G49).
+
+    organ_table_sha256 is the hex sha256 of the table file's bytes, recorded in species_params.source (G76)."""
     lifetime = gg.lifetime_leaves(table)
     times = table.sample_times
     plateau = gg.GrassModelParams.from_mapping(table.params).sheath_plateau_m
@@ -266,7 +277,8 @@ def bake(table: gg.OrganTable, p: gg.GeometryParams) -> VatPlant:
     ]
     return VatPlant(species=SPECIES,
                     species_params={"model": table.model, "seed": table.seed, "params": dict(table.params),
-                                    "geometry": dataclasses.asdict(p)},
+                                    "geometry": dataclasses.asdict(p),
+                                    "source": {"organ_table_sha256": organ_table_sha256}},
                     organ_ids=tuple(lifetime), stage_times=times, triangles=triangulate(first.faces),
                     preview_stage=len(times) - 1, blocks=tuple(blocks), frame=FRAME, species_version=SPECIES_VERSION)
 
@@ -286,7 +298,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     start = time.perf_counter()
     geometry = dataclasses.replace(defaults, blade_segments=args.blade_segments, cross_segments=args.cross_segments,
                                    sheath_rows=args.sheath_rows)
-    plant = bake(gg.load_table(args.organs), geometry)
+    table, organ_table_sha256 = read_table(args.organs)
+    plant = bake(table, geometry, organ_table_sha256)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     write_vat(plant, args.out)
     size = args.out.stat().st_size

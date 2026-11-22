@@ -3,13 +3,15 @@
 Usage: ~/miniconda3/envs/lpy/bin/python dev/plant/decline_reference.py BAKE.vat.glb OUT.json [--case T,V ...]
 
 Rebuilds decline.VertexInputs for every vertex from the decoded blocks (grass_vat_profile.md, rebuild rules) at exact
-stage times T and vitalities V, runs decline.declined_vertex, and writes {vat, vertex_count, cases: [{t, v, positions,
-pivots, axes, browning, opacity}]} with flat lists (3 per vertex for the vectors). grass-check.html compares the GLSL
-port against it.
+stage times T and vitalities V, runs decline.declined_vertex, and writes {vat, vat_sha256, vertex_count, cases: [{t, v,
+positions, pivots, axes, browning, opacity}]} with flat lists (3 per vertex for the vectors). vat is the bake's file
+name and vat_sha256 the hex sha256 of its bytes (G76). grass-check.html compares the GLSL port against it and fails
+when vat_sha256 is not the sha256 of the bake it loaded.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -100,8 +102,9 @@ def _round(values: Sequence[float]) -> list[float]:
     return [float(f"{x:.{SIGNIFICANT_DIGITS}g}") for x in values]
 
 
-def reference(plant: VatPlant, cases: Sequence[Case], vat_name: str) -> dict[str, Any]:
-    """Declined position, pivot, axis, browning and opacity of every vertex for each (T, v) case."""
+def reference(plant: VatPlant, cases: Sequence[Case], vat_name: str, vat_sha256: str) -> dict[str, Any]:
+    """Declined position, pivot, axis, browning and opacity of every vertex for each (T, v) case, bound to the bake
+    by its file name and the hex sha256 of its bytes."""
     pv = view(plant)
     params = decline.DeclineParams.from_mapping(plant.species_params["params"])
     collar_bend = float(plant.species_params["geometry"]["collar_bend"])
@@ -126,7 +129,7 @@ def reference(plant: VatPlant, cases: Sequence[Case], vat_name: str) -> dict[str
             opacity.append(d.opacity)
         out_cases.append({"t": t, "v": v, "positions": _round(positions), "pivots": _round(pivots),
                           "axes": _round(axes), "browning": _round(browning), "opacity": _round(opacity)})
-    return {"vat": vat_name, "vertex_count": count, "cases": out_cases}
+    return {"vat": vat_name, "vat_sha256": vat_sha256, "vertex_count": count, "cases": out_cases}
 
 
 def parse_case(text: str) -> Case:
@@ -146,7 +149,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cases = tuple(args.case) if args.case else DEFAULT_CASES
     start = time.perf_counter()
-    result = reference(decode_vat(args.vat.read_bytes()), cases, args.vat.name)
+    data = args.vat.read_bytes()
+    result = reference(decode_vat(data), cases, args.vat.name, hashlib.sha256(data).hexdigest())
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, separators=(",", ":")), encoding="utf-8")
     size = args.out.stat().st_size

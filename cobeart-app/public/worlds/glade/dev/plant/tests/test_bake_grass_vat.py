@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 import shutil
@@ -14,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import grass_geometry as gg
-from bake_grass_vat import BakeError, bake, main, vertex_uvs
+from bake_grass_vat import BakeError, bake, main, read_table, vertex_uvs
 from conftest import EXPORT_TIMEOUT_S, LPY_DIR, PLANT_DIR
 
 sys.path.insert(0, str(PLANT_DIR.parent / "vat"))
@@ -42,11 +43,11 @@ class Baked:
         return next(b for b in self.decoded.blocks if b.name == name).values
 
 
-def make_baked(table: gg.OrganTable) -> Baked:
+def make_baked(table: gg.OrganTable, organ_table_sha256: str) -> Baked:
     p = gg.GeometryParams()
     lifetime = gg.lifetime_leaves(table)
     meshes = tuple(gg.build_plant(table, t, p, lifetime) for t in table.sample_times)
-    plant = bake(table, p)
+    plant = bake(table, p, organ_table_sha256)
     seen: set[str] = set()
     visible_at: dict[str, int] = {}
     collapsed, unborn, last_visible = [], [], []
@@ -63,17 +64,21 @@ def make_baked(table: gg.OrganTable) -> Baked:
 
 @pytest.fixture(scope="module")
 def baked(organ_table_path: Path) -> Baked:
-    return make_baked(gg.load_table(organ_table_path))
+    return make_baked(*read_table(organ_table_path))
 
 
 @pytest.fixture(scope="module")
-def seed2_table(tmp_path_factory: pytest.TempPathFactory) -> gg.OrganTable:
+def seed2(tmp_path_factory: pytest.TempPathFactory) -> tuple[gg.OrganTable, str]:
     out = tmp_path_factory.mktemp("organs_seed2") / "grass.json"
     result = subprocess.run([sys.executable, str(LPY_DIR / "export_organs.py"), str(LPY_DIR / "grass.lpy"), str(out),
                              "--seed", "2"], capture_output=True, text=True, timeout=EXPORT_TIMEOUT_S)
     if result.returncode != 0:
         raise RuntimeError(f"export_organs.py --seed 2 failed ({result.returncode}): {result.stderr.strip()}")
-    return gg.load_table(out)
+    return read_table(out)
+
+
+def sha256_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def leaf_vertices(rng: gg.LeafRange) -> range:
@@ -107,14 +112,15 @@ def area_sums(positions: Sequence[gg.Vec3], faces: Sequence[gg.Quad]) -> list[li
     return sums
 
 
-def test_header(baked: Baked) -> None:
+def test_header(baked: Baked, organ_table_path: Path) -> None:
     d, table = baked.decoded, baked.table
     assert d.species == "grass" and d.species_version == 1 and d.frame == Frame("+Z", "m")
     assert list(d.organ_ids) == gg.lifetime_leaves(table)
     assert list(d.stage_times) == list(table.sample_times)
     assert d.preview_stage == len(table.samples) - 1
     assert d.species_params == {"model": table.model, "seed": table.seed, "params": dict(table.params),
-                                "geometry": dataclasses.asdict(gg.GeometryParams())}
+                                "geometry": dataclasses.asdict(gg.GeometryParams()),
+                                "source": {"organ_table_sha256": sha256_of(organ_table_path)}}
     assert {b.name: (b.domain, b.timing, b.components, b.storage) for b in d.blocks} == {
         "position": ("vertex", "stage", 3, "f16"), "normal": ("vertex", "stage", 3, "oct16"),
         "organ": ("vertex", "static", 1, "u32"), "kind": ("vertex", "static", 1, "u32"),
@@ -307,13 +313,35 @@ def test_preview_collapses_organs_not_alive_at_t_end(baked: Baked) -> None:
     assert collapsed > 0, "the default export should have leaves collapsed by t_end"
 
 
-def test_a_second_seed_bakes(baked: Baked, seed2_table: gg.OrganTable) -> None:
-    other = make_baked(seed2_table)
+def test_a_second_seed_bakes(baked: Baked, seed2: tuple[gg.OrganTable, str]) -> None:
+    seed2_table = seed2[0]
+    other = make_baked(*seed2)
     assert other.decoded.species_params["seed"] == 2 != baked.decoded.species_params["seed"]
     assert list(other.decoded.organ_ids) == gg.lifetime_leaves(seed2_table)
     count = len(other.meshes[0].positions)
     assert len(other.block("position")) == 3 * count * len(seed2_table.samples)
     assert other.block("position") != baked.block("position")
+    assert other.decoded.species_params["source"] != baked.decoded.species_params["source"]
+
+
+def test_read_table_hashes_the_bytes_it_parses(organ_table_path: Path, tmp_path: Path) -> None:
+    table, digest = read_table(organ_table_path)
+    assert table == gg.load_table(organ_table_path) and digest == sha256_of(organ_table_path)
+    reformatted = tmp_path / "grass.json"
+    reformatted.write_text(json.dumps(json.loads(organ_table_path.read_text(encoding="utf-8")), indent=1),
+                           encoding="utf-8")
+    other_table, other_digest = read_table(reformatted)
+    assert other_table == table and other_digest == sha256_of(reformatted) != digest
+
+
+def test_cli_records_the_table_hash_and_is_byte_identical(organ_table_path: Path, tmp_path: Path) -> None:
+    first, second = tmp_path / "a.vat.glb", tmp_path / "b.vat.glb"
+    for out in (first, second):
+        assert main([str(organ_table_path), str(out), "--blade-segments", "6", "--cross-segments", "2",
+                     "--sheath-rows", "1"]) == 0
+    assert first.read_bytes() == second.read_bytes()
+    source = decode_vat(first.read_bytes()).species_params["source"]
+    assert source == {"organ_table_sha256": sha256_of(organ_table_path)}
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not on the PATH")

@@ -58,4 +58,4 @@ def test_missing_model_param_names_the_key(table: gg.OrganTable) -> None:
     with pytest.raises(gg.OrganTableError, match="SHEATH_PLATEAU_M"):
         gg.build_plant(broken, table.sample_times[0], p)
     with pytest.raises(gg.OrganTableError, match="SHEATH_PLATEAU_M"):
-        bake(broken, p)
+        bake(broken, p, "0" * 64)

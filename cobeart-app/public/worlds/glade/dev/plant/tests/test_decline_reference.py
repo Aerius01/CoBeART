@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 import subprocess
@@ -13,7 +14,7 @@ from typing import Any
 import pytest
 
 import grass_geometry as gg
-from bake_grass_vat import bake
+from bake_grass_vat import bake, read_table
 from conftest import PLANT_DIR
 from decline_reference import DEFAULT_CASES, PlantView, reference, vertex_inputs_at, view
 
@@ -36,8 +37,8 @@ class Reference:
 
 @pytest.fixture(scope="module")
 def ref(organ_table_path: Path) -> Reference:
-    table = gg.load_table(organ_table_path)
-    plant = decode_vat(encode_vat(bake(table, gg.GeometryParams())))
+    table, digest = read_table(organ_table_path)
+    plant = decode_vat(encode_vat(bake(table, gg.GeometryParams(), digest)))
     return Reference(table, plant, view(plant), tuple(gg.lifetime_leaves(table)))
 
 
@@ -77,7 +78,7 @@ def test_vertex_inputs_equal_build_plant(ref: Reference) -> None:
 def test_reference_at_full_vitality_equals_positions_of_healthy_main_shoot_leaves(ref: Reference) -> None:
     t = 12.0
     stage = list(ref.plant.stage_times).index(t)
-    result = reference(ref.plant, [(t, 1.0)], "x.vat.glb")
+    result = reference(ref.plant, [(t, 1.0)], "x.vat.glb", "0" * 64)
     positions = result["cases"][0]["positions"]
     decoded = ref.pv.blocks["position"]
     count = ref.pv.vertex_count
@@ -98,18 +99,18 @@ def test_reference_at_full_vitality_equals_positions_of_healthy_main_shoot_leave
 
 def test_a_non_stage_time_raises_naming_the_nearest_stages(ref: Reference) -> None:
     with pytest.raises(ValueError, match=r"T=6\.25 is not a stage time.*6\.0, 6\.5"):
-        reference(ref.plant, [(6.25, 1.0)], "x.vat.glb")
+        reference(ref.plant, [(6.25, 1.0)], "x.vat.glb", "0" * 64)
 
 
 def test_a_non_grass_bake_raises(ref: Reference) -> None:
     for changed in (dataclasses.replace(ref.plant, species="flower"),
                     dataclasses.replace(ref.plant, species_version=2)):
         with pytest.raises(ValueError, match="grass"):
-            reference(changed, [(12.0, 1.0)], "x.vat.glb")
+            reference(changed, [(12.0, 1.0)], "x.vat.glb", "0" * 64)
 
 
 def check_shape(result: dict[str, Any], vertices: int, cases: Sequence[tuple[float, float]]) -> None:
-    assert set(result) == {"vat", "vertex_count", "cases"}
+    assert set(result) == {"vat", "vat_sha256", "vertex_count", "cases"}
     assert result["vertex_count"] == vertices
     assert [(c["t"], c["v"]) for c in result["cases"]] == [tuple(c) for c in cases]
     for case in result["cases"]:
@@ -124,21 +125,23 @@ def check_shape(result: dict[str, Any], vertices: int, cases: Sequence[tuple[flo
 
 def test_json_shape_and_rounding(ref: Reference) -> None:
     cases = [(12.0, 0.6), (3.0, 0.8)]
-    result = reference(ref.plant, cases, "grass.vat.glb")
-    assert result["vat"] == "grass.vat.glb"
+    result = reference(ref.plant, cases, "grass.vat.glb", "ab" * 32)
+    assert result["vat"] == "grass.vat.glb" and result["vat_sha256"] == "ab" * 32
     check_shape(json.loads(json.dumps(result)), ref.pv.vertex_count, cases)
     assert all(float(f"{x:.7g}") == x for x in result["cases"][0]["positions"])
 
 
 def test_cli_writes_default_cases(organ_table_path: Path, ref: Reference, tmp_path: Path) -> None:
     vat, out = tmp_path / "grass.vat.glb", tmp_path / "ref.json"
-    vat.write_bytes(encode_vat(bake(gg.load_table(organ_table_path), gg.GeometryParams())))
+    table, digest = read_table(organ_table_path)
+    vat.write_bytes(encode_vat(bake(table, gg.GeometryParams(), digest)))
     done = subprocess.run([sys.executable, str(PLANT_DIR / "decline_reference.py"), str(vat), str(out)],
                           capture_output=True, text=True, timeout=300, check=False)
     assert done.returncode == 0, done.stderr
     assert f"{len(DEFAULT_CASES)} cases" in done.stdout and f"{ref.pv.vertex_count} vertices" in done.stdout
     result = json.loads(out.read_text(encoding="utf-8"))
     assert result["vat"] == "grass.vat.glb"
+    assert result["vat_sha256"] == hashlib.sha256(vat.read_bytes()).hexdigest()
     check_shape(result, ref.pv.vertex_count, DEFAULT_CASES)
     bad = subprocess.run([sys.executable, str(PLANT_DIR / "decline_reference.py"), str(vat), str(out),
                           "--case", "5.1,1"], capture_output=True, text=True, timeout=300, check=False)

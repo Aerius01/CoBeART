@@ -24,9 +24,10 @@
 <div id="out"></div>
 <script type="module">
 // Compares the renderer's transform feedback capture with decline_reference.py output, per case and quantity, over the
-// vertices of organs alive at t. Query: ?vat= and ?ref=, paths relative to this page (default out/grass.*).
+// vertices of organs alive at t. Query: ?vat= and ?ref=, paths relative to this page (default out/grass.*). The
+// reference must carry the sha256 of the bake it was made from (vat_sha256, G76); a mismatch fails the check.
 // Sets window.__grassCheck = {ok, tolerance, cases} when done (or {ok: false, error}).
-import { loadVat, decodeBlock } from './vat/vat.mjs';
+import { parseVat, decodeBlock } from './vat/vat.mjs';
 import { createGrassRenderer } from './grass/renderer.mjs';
 import { aliveMask } from './grass/vat-textures.mjs';
 
@@ -93,6 +94,27 @@ async function fetchJson(url) {
 
 
 /**
+ * @param {string} url
+ * @returns {Promise<ArrayBuffer>}
+ */
+async function fetchBytes(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`could not fetch ${url}: HTTP ${res.status}`);
+  return res.arrayBuffer();
+}
+
+/**
+ * Lowercase hex sha256 of `bytes` (crypto.subtle needs a secure context: https or localhost / 127.0.0.1).
+ * @param {ArrayBuffer} bytes
+ * @returns {Promise<string>}
+ */
+async function sha256Hex(bytes) {
+  if (!crypto.subtle) throw new Error('crypto.subtle is unavailable; open this page over http://127.0.0.1 or https');
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
  * @param {Worst} w
  * @returns {string}
  */
@@ -115,8 +137,15 @@ async function run() {
   const params = new URLSearchParams(location.search);
   const vatPath = params.get('vat') ?? 'out/grass.vat.glb';
   const refPath = params.get('ref') ?? 'out/grass.reference.json';
-  const vat = await loadVat(new URL(vatPath, location.href).href);
+  const vatBytes = await fetchBytes(new URL(vatPath, location.href).href);
   const ref = await fetchJson(new URL(refPath, location.href).href);
+  const vatSha256 = await sha256Hex(vatBytes);
+  if (ref.vat_sha256 !== vatSha256) {
+    throw new Error(`reference ${refPath} was made from a bake with sha256 ${JSON.stringify(ref.vat_sha256)}, but ` +
+      `${vatPath} has sha256 ${vatSha256}; regenerate the reference with plant/decline_reference.py ${vatPath} ` +
+      `${refPath}`);
+  }
+  const vat = parseVat(vatBytes);
 
   if (ref.vertex_count !== vat.vertexCount) {
     throw new Error(`reference vertex_count ${ref.vertex_count} differs from the bake's ${vat.vertexCount}`);

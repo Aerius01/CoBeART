@@ -5,9 +5,9 @@ Usage: ~/miniconda3/envs/lpy/bin/python dev/plant/bake_grass_vat.py ORGANS.json 
 Every sample of the table is one stage (G46) and every lifetime leaf one organ, in lifetime_leaves order. Each stage
 is a fixed-topology build_plant over the lifetime list, so one triangle list serves all stages. Per vertex and stage
 the file holds only the position (f16) and the area-weighted normal (oct16, G42); everything else is per vertex
-static, per organ static or per organ per stage (G40), with the senescence and fade events analytic (G38). A leaf
+static, per organ static or per organ per stage (G40), with the senescence and fade events analytic (G38, G49). A leaf
 collapsed at a stage keeps the positions, normals and organ stage values of the last stage where it was visible
-(G39); unborn leaves stay degenerate at their first-seen attach.
+(G39); unborn leaves stay degenerate at their first-seen attach. grass_vat_profile.md describes every block.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import math
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
@@ -26,9 +27,11 @@ for _dir in (_PLANT_DIR, _PLANT_DIR.parent / "vat"):
         sys.path.insert(0, str(_dir))
 
 import grass_geometry as gg  # noqa: E402
-from vat_writer import NEVER, Block, VatPlant, write_vat  # noqa: E402
+from vat_writer import NEVER, Block, Domain, Frame, Storage, Timing, VatPlant, write_vat  # noqa: E402
 
 SPECIES = "grass"
+SPECIES_VERSION = 1  # the grass block set of grass_vat_profile.md
+FRAME = Frame("+Z", "m")
 UP: gg.Vec3 = (0.0, 0.0, 1.0)  # normal of a vertex with no face area (unborn or zero-width leaves); oct16 needs one
 
 Triangle = tuple[int, int, int]
@@ -136,19 +139,28 @@ def _first_seen(table: gg.OrganTable) -> dict[str, gg.Leaf]:
     return first
 
 
-def _organ_stage_values(table: gg.OrganTable, k: int, mesh: gg.PlantMesh,
-                        first_seen: dict[str, gg.Leaf]) -> dict[str, tuple[float, ...]]:
-    """Per leaf at stage k: collar (3), direction (3), arch, sheath_length, emergence, as build_plant used them."""
+@dataclass(frozen=True)
+class OrganStage:
+    """One leaf's per-stage values (G40): what the shader rebuilds pivot, axis and stem_t from."""
+    collar: gg.Vec3          # the blade's collar attribute: the emergence-row midrib point (G37)
+    direction: gg.Vec3       # the blade's axis attribute: the healthy leaf direction
+    arch: float              # the leaf's healthy arch_rad
+    sheath_length: float     # metres along the tiller axis; sheath stem_t is sheath_length * s / SHEATH_PLATEAU_M
+    emergence: float         # metres along the tiller axis; blade stem_t is emergence / SHEATH_PLATEAU_M
+
+
+def _organ_stages(table: gg.OrganTable, k: int, mesh: gg.PlantMesh, first_seen: dict[str, gg.Leaf],
+                  plateau: float) -> dict[str, OrganStage]:
+    """Per leaf at stage k, read back from the built mesh; sheath_length from the leaf record build_plant used."""
     sample = table.samples[k]
-    emergence = gg.emergence_heights(sample)
-    values = {}
+    stages = {}
     for rng in mesh.leaves:
-        leaf = sample.leaves.get(rng.id, first_seen[rng.id])
-        degenerate = rng.id not in sample.leaves or leaf.fade >= 1.0
         b = rng.blade[0]
-        values[rng.id] = (*mesh.vectors["collar"][b], *mesh.vectors["axis"][b], mesh.scalars["arch"][b],
-                          leaf.sheath_length_m, leaf.sheath_length_m if degenerate else emergence[rng.id])
-    return values
+        stages[rng.id] = OrganStage(collar=mesh.vectors["collar"][b], direction=mesh.vectors["axis"][b],
+                                    arch=mesh.scalars["arch"][b],
+                                    sheath_length=sample.leaves.get(rng.id, first_seen[rng.id]).sheath_length_m,
+                                    emergence=mesh.scalars["stem_t"][b] * plateau)
+    return stages
 
 
 def _check_fixed_topology(meshes: Sequence[gg.PlantMesh], lifetime: Sequence[str], times: Sequence[float]) -> None:
@@ -166,70 +178,96 @@ def _check_fixed_topology(meshes: Sequence[gg.PlantMesh], lifetime: Sequence[str
                                 "fixed for a leaf's lifetime (grass_geometry.STATIC_ATTRIBUTES)")
 
 
-def _events(e: gg.LeafEvents) -> tuple[float, float, float, float]:
-    def at(value: float | None) -> float:
-        return NEVER if value is None else value
-    return (at(e.senescent_time), e.senescence_duration, at(e.death_time), at(e.collapse_time))
+def _or_never(value: float | None) -> float:
+    return NEVER if value is None else value
+
+
+def _index(name: str, value: float, where: str) -> int:
+    if not (math.isfinite(value) and value.is_integer() and value >= 0.0):
+        raise BakeError(f"{where}: attribute {name!r} must be a non-negative integer for a u32 block, got {value!r}")
+    return int(value)
+
+
+def _block(name: str, domain: Domain, timing: Timing, storage: Storage, values: Sequence[float | int],
+           components: Sequence[str], unit: str) -> Block:
+    return Block(name, domain, timing, len(components), storage, values,
+                 {"components": list(components), "unit": unit})
+
+
+XYZ = ("x", "y", "z")
 
 
 def bake(table: gg.OrganTable, p: gg.GeometryParams) -> VatPlant:
-    """The grass VAT of an organ table: every sample a stage, every lifetime leaf an organ (G39 to G47)."""
+    """The grass VAT of an organ table: every sample a stage, every lifetime leaf an organ (G39 to G49)."""
     lifetime = gg.lifetime_leaves(table)
     times = table.sample_times
+    plateau = float(table.params["SHEATH_PLATEAU_M"])  # type: ignore[arg-type]
     meshes = [gg.build_plant(table, t, p, lifetime) for t in times]
     _check_fixed_topology(meshes, lifetime, times)
     first = meshes[0]
     sources = carry_sources(leaf_states(table, lifetime))
     normals = [vertex_normals(m.positions, m.faces) for m in meshes]
     first_seen = _first_seen(table)
-    stage_values = [_organ_stage_values(table, k, m, first_seen) for k, m in enumerate(meshes)]
+    organ_stages = [_organ_stages(table, k, m, first_seen, plateau) for k, m in enumerate(meshes)]
 
     positions: list[float] = []
     normal_values: list[float] = []
-    organ_stage: list[float] = []
+    carried: list[OrganStage] = []  # stage-major, one record per leaf
     for source in sources:
         for rng in first.leaves:
             src = source[rng.id]
             span = range(rng.sheath[0], rng.blade[1])
             positions.extend(c for v in span for c in meshes[src].positions[v])
             normal_values.extend(c for v in span for c in normals[src][v])
-            organ_stage.extend(stage_values[src][rng.id])
-
-    def organ_stage_block(name: str, start: int, components: int) -> Block:
-        width = 9
-        values = [organ_stage[i + start + c] for i in range(0, len(organ_stage), width) for c in range(components)]
-        return Block(name, "organ", "stage", components, "f32", values)
+            carried.append(organ_stages[src][rng.id])
 
     blade_starts = [rng.blade[0] for rng in first.leaves]
 
-    def organ_static_block(name: str) -> Block:
-        if name in first.vectors:
-            values = [c for b in blade_starts for c in first.vectors[name][b]]
-            return Block(name, "organ", "static", 3, "f32", values)
-        return Block(name, "organ", "static", 1, "f32", [first.scalars[name][b] for b in blade_starts])
+    def organ_scalar(name: str) -> list[float]:
+        return [first.scalars[name][b] for b in blade_starts]
 
+    def organ_vector(name: str) -> list[float]:
+        return [c for b in blade_starts for c in first.vectors[name][b]]
+
+    events = [table.events[lid] for lid in lifetime]
     uvs = vertex_uvs(first)
     blocks = [
-        Block("position", "vertex", "stage", 3, "f16", positions),
-        Block("normal", "vertex", "stage", 3, "oct16", normal_values),
-        Block("organ", "vertex", "static", 1, "u32", [int(o) - 1 for o in first.scalars["organ"]]),
-        Block("kind", "vertex", "static", 1, "u32", [int(k) for k in first.scalars["kind"]]),
-        Block("s", "vertex", "static", 1, "f32", list(first.scalars["s"])),
-        Block("uv", "vertex", "static", 2, "f32", [c for uv in uvs for c in uv]),
-        *(organ_static_block(n) for n in ("birth", "draw", "phase", "tiller", "tiller_az",
-                                          "tiller_base", "tiller_axis", "side")),
-        Block("events", "organ", "static", 4, "f32", [c for lid in lifetime for c in _events(table.events[lid])]),
-        organ_stage_block("collar", 0, 3),
-        organ_stage_block("direction", 3, 3),
-        organ_stage_block("arch", 6, 1),
-        organ_stage_block("sheath_length", 7, 1),
-        organ_stage_block("emergence", 8, 1),
+        _block("position", "vertex", "stage", "f16", positions, XYZ, "m"),
+        _block("normal", "vertex", "stage", "oct16", normal_values, XYZ, "1"),
+        _block("organ", "vertex", "static", "u32",
+               [_index("organ", o, f"vertex {v}") - 1 for v, o in enumerate(first.scalars["organ"])], ["organ"],
+               "index"),
+        _block("kind", "vertex", "static", "u32",
+               [_index("kind", k, f"vertex {v}") for v, k in enumerate(first.scalars["kind"])], ["kind"], "index"),
+        _block("s", "vertex", "static", "f32", list(first.scalars["s"]), ["s"], "1"),
+        _block("uv", "vertex", "static", "f32", [c for uv in uvs for c in uv], ["u", "v"], "1"),
+        _block("lifespan", "organ", "static", "f32",
+               [c for birth, e in zip(organ_scalar("birth"), events) for c in (birth, _or_never(e.collapse_time))],
+               ["appear", "vanish"], "P"),
+        _block("senescence", "organ", "static", "f32",
+               [c for e in events for c in (_or_never(e.senescent_time), e.senescence_duration,
+                                            _or_never(e.death_time))],
+               ["senescent_time", "senescence_duration", "death_time"], "P"),
+        _block("draw", "organ", "static", "f32", organ_scalar("draw"), ["draw"], "1"),
+        _block("phase", "organ", "static", "f32", organ_scalar("phase"), ["phase"], "1"),
+        _block("tiller", "organ", "static", "u32",
+               [_index("tiller", t, f"leaf {lid}") for lid, t in zip(lifetime, organ_scalar("tiller"))], ["tiller"],
+               "index"),
+        _block("tiller_az", "organ", "static", "f32", organ_scalar("tiller_az"), ["tiller_az"], "rad"),
+        _block("tiller_base", "organ", "static", "f32", organ_vector("tiller_base"), XYZ, "m"),
+        _block("tiller_axis", "organ", "static", "f32", organ_vector("tiller_axis"), XYZ, "1"),
+        _block("side", "organ", "static", "f32", organ_vector("side"), XYZ, "1"),
+        _block("collar", "organ", "stage", "f32", [c for o in carried for c in o.collar], XYZ, "m"),
+        _block("direction", "organ", "stage", "f32", [c for o in carried for c in o.direction], XYZ, "1"),
+        _block("arch", "organ", "stage", "f32", [o.arch for o in carried], ["arch"], "rad"),
+        _block("sheath_length", "organ", "stage", "f32", [o.sheath_length for o in carried], ["sheath_length"], "m"),
+        _block("emergence", "organ", "stage", "f32", [o.emergence for o in carried], ["emergence"], "m"),
     ]
     return VatPlant(species=SPECIES,
                     species_params={"model": table.model, "seed": table.seed, "params": dict(table.params),
                                     "geometry": dataclasses.asdict(p)},
                     organ_ids=tuple(lifetime), stage_times=times, triangles=triangulate(first.faces),
-                    preview_stage=len(times) - 1, blocks=tuple(blocks))
+                    preview_stage=len(times) - 1, blocks=tuple(blocks), frame=FRAME, species_version=SPECIES_VERSION)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -70,11 +70,9 @@ def stage_index(stage_times: Sequence[float], t: float) -> int:
 
 
 def _ramp(t: float, start: float, duration: float) -> float:
-    """clamp((t - start) / duration, 0, 1); a NEVER start gives 0 and a zero duration is a step."""
+    """clamp((t - start) / duration, 0, 1); a NEVER start gives 0 (the organ table guarantees duration > 0)."""
     if start >= NEVER:
         return 0.0
-    if duration <= 0.0:
-        return 1.0 if t >= start else 0.0
     return min(max((t - start) / duration, 0.0), 1.0)
 
 

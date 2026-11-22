@@ -25,10 +25,10 @@
 // relative to this folder>) with per-instance growth g and vitality v, under the wind of wind-demo.html. ?bench runs
 // the frame-rate sweep of G56. window.__gladeGrass exposes the params, growth field and bake for checks.
 import GUI from '../vendor/lil-gui.esm.min.js';
-import { aliveOrganCount, grassParams } from './grass/vat-textures.mjs';
+import { aliveOrganCount, grassParams, stagePair } from './grass/vat-textures.mjs';
 import { createGrowthField, fillGrowth } from './grass/instances.mjs';
 import { GRASS_INSTANCE_FLOATS, createGrassRenderer } from './grass/renderer.mjs';
-import { loadVat } from './vat/vat.mjs';
+import { decodeBlock, loadVat } from './vat/vat.mjs';
 import { obliqueMatrix, topDownMatrix } from './wind/renderer.mjs';
 import { createPlants, stepPlants } from './wind/wind.mjs';
 
@@ -44,9 +44,14 @@ const BAKE_COMMANDS = [
   '~/miniconda3/envs/lpy/bin/python plant/bake_grass_vat.py out/grass.json out/grass.vat.glb',
 ];
 const BENCH_COUNTS = [500, 1000, 2000, 5000, 10000, 20000];
-const BENCH_GROWTHS = [0.25, 0.5, 1];
+const BENCH_CASES = [{ g: 0.25, v: 1 }, { g: 0.5, v: 1 }, { g: 1, v: 1 }, { g: 1, v: 0.5 }];
 const BENCH_WARMUP_MS = 1000;
 const BENCH_MEASURE_MS = 3 * 1000;
+const BENCH_FINISH_MS = 1000;
+const HUD_PERIOD_MS = 250;
+const DROP_FACTOR = 1.5;
+const LEAN_MARGIN = 1.5;
+const CLEAR_COLOR = [0.03, 0.035, 0.025, 1];
 
 /** @param {unknown} err */
 function showError(err) {
@@ -61,6 +66,20 @@ function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = sorted.length >> 1;
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** @param {number[]} values @param {number} p fraction @returns {number} */
+function percentile(values, p) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+}
+
+/** Largest model-space z over every stage of the bake's position block, in model metres. */
+function maxModelZ(vat) {
+  const positions = decodeBlock(/** @type {import('./vat/vat.mjs').VatBlock} */ (vat.blocks.get('position')));
+  let max = 0;
+  for (let k = 2; k < positions.length; k += 3) if (positions[k] > max) max = positions[k];
+  return max;
 }
 
 /** @param {string} path @returns {Promise<import('./vat/vat.mjs').Vat>} */
@@ -82,7 +101,10 @@ async function start() {
   const vat = await loadBake(vatPath);
   const { tEnd } = grassParams(vat);
   const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('view'));
-  const renderer = createGrassRenderer(canvas, vat);
+  const gl = /** @type {WebGL2RenderingContext | null} */ (canvas.getContext('webgl2', { antialias: true }));
+  if (!gl) throw new Error('WebGL2 is not available in this browser');
+  const renderer = createGrassRenderer(gl, vat);
+  const modelHeightM = maxModelZ(vat);
   const hud = /** @type {HTMLElement} */ (document.getElementById('hud'));
 
   const params = {
@@ -125,11 +147,29 @@ async function start() {
   let growthField = createGrowthField(params.count, params.seed);
   let instances = new Float32Array(params.count * GRASS_INSTANCE_FLOATS);
   let growth = new Float32Array(params.count * 2);
+  let growthSignature = '';
   const rebuild = () => {
     field = createPlants(params.count, arena, params.size_jitter, PLANT_SEED);
     growthField = createGrowthField(params.count, params.seed);
     instances = new Float32Array(params.count * GRASS_INSTANCE_FLOATS);
     growth = new Float32Array(params.count * 2);
+    growthSignature = '';
+  };
+  // g_i, v_i and the stage pair go into the instance slots only when their inputs change (G63).
+  const refreshGrowth = () => {
+    const signature = [params.count, params.seed, params.g, params.g_spread, params.v, params.v_spread, params.spatial,
+      params.noise_scale_mm].join('|');
+    if (signature === growthSignature) return;
+    growthSignature = signature;
+    fillGrowth(growthField, params, field.x, field.y, growth);
+    for (let i = 0; i < field.count; i++) {
+      const o = i * GRASS_INSTANCE_FLOATS;
+      const pair = stagePair(vat.stageTimes, growth[2 * i] * tEnd);
+      instances[o + 8] = growth[2 * i];
+      instances[o + 9] = growth[2 * i + 1];
+      instances[o + 10] = pair.i0;
+      instances[o + 11] = pair.w;
+    }
   };
 
   if (!bench) {
@@ -167,37 +207,51 @@ async function start() {
     plants.add(params, 'zoom', 1, 20, 0.1);
   }
 
-  // Benchmark state machine (G56): one step per (g, count), a warm-up then a measuring window.
+  // Benchmark state machine (G56, G63): one step per (case, count): warm-up, a measuring window of frame intervals,
+  // then a short window timing draw plus gl.finish() so the stalls stay out of the intervals.
   const benchEl = /** @type {HTMLElement} */ (document.getElementById('bench'));
   const benchText = /** @type {HTMLElement} */ (document.getElementById('benchText'));
   const copyButton = /** @type {HTMLButtonElement} */ (document.getElementById('benchCopy'));
-  const steps = BENCH_GROWTHS.flatMap((g) => BENCH_COUNTS.map((count) => ({ g, count })));
-  /** @type {Array<{count: number, g: number, median_ms: number, fps: number, gpu_ms: number | null,
-   *   alive_fraction: number}>} */
+  const steps = BENCH_CASES.flatMap((c) => BENCH_COUNTS.map((count) => ({ ...c, count })));
+  /** @type {Array<{count: number, g: number, v: number, median_ms: number, p95_ms: number, dropped: number,
+   *   fps: number, cpu_ms: number, gpu_ms: number | null, finish_ms: number, alive_fraction: number}>} */
   const rows = [];
   const bakeName = vatPath.split('/').pop();
   let stepIndex = -1;
   let stepStart = 0;
   /** @type {number[]} */ let intervals = [];
+  /** @type {number[]} */ let cpuSamples = [];
   /** @type {number[]} */ let gpuSamples = [];
+  /** @type {number[]} */ let finishSamples = [];
   let benchDone = false;
+  let benchCanvas = '';
   const beginStep = (now) => {
     stepIndex++;
-    params.g = steps[stepIndex].g;
-    params.count = steps[stepIndex].count;
+    Object.assign(params, { g: steps[stepIndex].g, v: steps[stepIndex].v, count: steps[stepIndex].count });
     rebuild();
     stepStart = now;
     intervals = [];
+    cpuSamples = [];
     gpuSamples = [];
+    finishSamples = [];
     benchEl.hidden = false;
-    benchText.textContent = `bench ${stepIndex + 1}/${steps.length}: ${params.count} plants, g ${params.g}`;
+    benchText.textContent = `bench ${stepIndex + 1}/${steps.length}: ${params.count} plants, g ${params.g}, ` +
+      `v ${params.v}`;
+  };
+  const rendererName = () => {
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    return String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
   };
   const finishBench = () => {
     benchDone = true;
-    const header = ['plants', 'g', 'median ms', 'fps', 'gpu ms', 'alive leaf fraction'];
-    const lines = rows.map((r) => [r.count, r.g, r.median_ms.toFixed(2), r.fps.toFixed(1),
-      r.gpu_ms === null ? 'null' : r.gpu_ms.toFixed(2), r.alive_fraction.toFixed(3)]);
-    const title = `bake ${bakeName}, ${vat.vertexCount} vertices per plant`;
+    const header = ['plants', 'g', 'v', 'median ms', 'p95 ms', 'dropped', 'fps', 'cpu ms', 'gpu ms', 'finish ms',
+      'alive leaf fraction'];
+    const lines = rows.map((r) => [r.count, r.g, r.v, r.median_ms.toFixed(2), r.p95_ms.toFixed(2),
+      r.dropped.toFixed(3), r.fps.toFixed(1), r.cpu_ms.toFixed(2), r.gpu_ms === null ? 'null' : r.gpu_ms.toFixed(2),
+      r.finish_ms.toFixed(2), r.alive_fraction.toFixed(3)]);
+    const attrs = gl.getContextAttributes();
+    const title = `bake ${bakeName}, ${vat.vertexCount} vertices per plant; canvas ${benchCanvas}, ` +
+      `DPR ${devicePixelRatio}; MSAA ${attrs?.antialias} (${gl.getParameter(gl.SAMPLES)} samples); ${rendererName()}`;
     const tsv = [title, header.join('\t'), ...lines.map((l) => l.join('\t'))].join('\n');
     const pad = (cell, w) => String(cell).padStart(w);
     const widths = header.map((h, i) => Math.max(h.length, ...lines.map((l) => String(l[i]).length)));
@@ -212,14 +266,26 @@ async function start() {
     };
   };
 
-  const resize = () => renderer.resize();
+  let resizeIgnored = false;
+  const resize = () => {
+    if (bench && stepIndex >= 0 && !benchDone) {
+      if (!resizeIgnored) console.log('grass demo: resize ignored while the benchmark runs');
+      resizeIgnored = true;
+      return;
+    }
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  };
   window.addEventListener('resize', resize);
   resize();
 
   let last = performance.now();
   let time = 0;
   let fps = 60;
+  let lastHud = -Infinity;
   const frame = (now) => {
+    const cpuStart = performance.now();
     const rawMs = now - last;
     const dt = Math.min(rawMs / 1000, MAX_DT_S);
     fps += ((1000 / Math.max(rawMs, 1e-3)) - fps) * 0.05;
@@ -227,23 +293,34 @@ async function start() {
     time += dt;
     if (params.flip_end_mps <= params.flip_start_mps) params.flip_end_mps = params.flip_start_mps + 0.5;
 
+    /** @type {'warmup' | 'measure' | 'finish'} */
+    let phase = 'warmup';
     if (bench && !benchDone) {
-      if (stepIndex < 0) beginStep(now);
-      else if (now - stepStart > BENCH_WARMUP_MS) intervals.push(rawMs);
-      if (stepIndex >= 0 && now - stepStart >= BENCH_WARMUP_MS + BENCH_MEASURE_MS) {
+      if (stepIndex < 0) {
+        beginStep(now);
+        benchCanvas = `${canvas.width}x${canvas.height}`;
+      }
+      if (now - stepStart >= BENCH_WARMUP_MS + BENCH_MEASURE_MS + BENCH_FINISH_MS) {
         const ms = median(intervals);
+        const floor = Math.min(...intervals);
         rows.push({
-          count: params.count, g: params.g, median_ms: ms, fps: 1000 / ms,
-          gpu_ms: gpuSamples.length ? median(gpuSamples) : null,
-          alive_fraction: aliveOrganCount(vat, params.g * tEnd) / vat.organCount,
+          count: params.count, g: params.g, v: params.v, median_ms: ms, p95_ms: percentile(intervals, 0.95),
+          dropped: intervals.filter((x) => x > DROP_FACTOR * floor).length / intervals.length, fps: 1000 / ms,
+          cpu_ms: median(cpuSamples), gpu_ms: gpuSamples.length ? median(gpuSamples) : null,
+          finish_ms: median(finishSamples), alive_fraction: aliveOrganCount(vat, params.g * tEnd) / vat.organCount,
         });
         if (stepIndex + 1 < steps.length) beginStep(now);
         else finishBench();
       }
+      if (!benchDone) {
+        const inStep = now - stepStart;
+        if (inStep >= BENCH_WARMUP_MS + BENCH_MEASURE_MS) phase = 'finish';
+        else if (inStep > BENCH_WARMUP_MS) phase = 'measure';
+        if (phase === 'measure') intervals.push(rawMs);
+      }
     }
 
     stepPlants(field, params, time, dt);
-    fillGrowth(growthField, params, field.x, field.y, growth);
     for (let i = 0; i < field.count; i++) {
       const o = i * GRASS_INSTANCE_FLOATS;
       instances[o] = field.x[i];
@@ -254,31 +331,41 @@ async function start() {
       instances[o + 5] = field.leanY[i];
       instances[o + 6] = field.windX[i];
       instances[o + 7] = field.windY[i];
-      instances[o + 8] = growth[2 * i];
-      instances[o + 9] = growth[2 * i + 1];
     }
-    // Plant height is about a quarter of a model metre; half a metre bounds it with size jitter and lean.
+    refreshGrowth();
+    const zMaxMm = modelHeightM * params.mm_per_model_m * (1 + params.size_jitter) * LEAN_MARGIN;
     const viewProj = params.view === 'top'
-      ? topDownMatrix(arena, params.zoom, 0.5 * params.mm_per_model_m * (1 + params.size_jitter))
+      ? topDownMatrix(arena, params.zoom, zMaxMm)
       : obliqueMatrix(arena, params.zoom, canvas.width / canvas.height);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(CLEAR_COLOR[0], CLEAR_COLOR[1], CLEAR_COLOR[2], CLEAR_COLOR[3]);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     const timer = renderer.gpuTimer;
     timer?.begin();
+    const drawStart = performance.now();
     renderer.draw(instances, field.count, {
       viewProj, time, speedRef: params.speed_ref_mps, leafBend: params.leaf_bend_deg * DEG,
       leafSwayHz: params.leaf_sway_hz, flutter: params.flutter_deg * DEG, flutterHz: params.flutter_hz,
       flip: [params.flip_start_mps, params.flip_end_mps], dryWindResponse: params.dry_wind_response,
     });
+    if (phase === 'finish') {
+      gl.finish();
+      finishSamples.push(performance.now() - drawStart);
+    }
     timer?.end();
     if (timer) {
       const gpuMs = timer.poll();
-      if (gpuMs !== null && bench && !benchDone && stepIndex >= 0 && now - stepStart > BENCH_WARMUP_MS) {
-        gpuSamples.push(gpuMs);
-      }
+      if (gpuMs !== null && phase === 'measure') gpuSamples.push(gpuMs);
     }
-    const vertices = vat.vertexCount * field.count;
-    hud.textContent = `${field.count} plants · ` +
-      `${vertices >= 1e5 ? (vertices / 1e6).toFixed(1) + 'M' : vertices} vertices · ${fps.toFixed(0)} fps\n` +
-      `t ${(params.g * tEnd).toFixed(2)} P · alive leaves ${aliveOrganCount(vat, params.g * tEnd)} / ${vat.organCount}`;
+    if (now - lastHud >= HUD_PERIOD_MS) {
+      lastHud = now;
+      const vertices = vat.vertexCount * field.count;
+      hud.textContent = `${field.count} plants · ` +
+        `${vertices >= 1e5 ? (vertices / 1e6).toFixed(1) + 'M' : vertices} vertices · ${fps.toFixed(0)} fps\n` +
+        `t ${(params.g * tEnd).toFixed(2)} P · alive leaves ${aliveOrganCount(vat, params.g * tEnd)} / ` +
+        `${vat.organCount}`;
+    }
+    if (phase === 'measure') cpuSamples.push(performance.now() - cpuStart);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

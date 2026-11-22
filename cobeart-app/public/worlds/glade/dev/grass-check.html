@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glade grass check</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; background: #111; color: #eee; font: 14px monospace; }
+  body { padding: 12px; }
+  canvas { width: 64px; height: 64px; }
+  #verdict { font-size: 20px; margin: 8px 0; }
+  .pass { color: #6d6; }
+  .fail { color: #f66; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #444; padding: 3px 8px; text-align: right; }
+  #error { color: #f66; white-space: pre-wrap; margin: 8px 0; }
+</style>
+</head>
+<body>
+<h3>Grass decline: GLSL port against the Python reference</h3>
+<canvas id="view" width="64" height="64"></canvas>
+<div id="verdict">running...</div>
+<div id="error" hidden></div>
+<div id="out"></div>
+<script type="module">
+// Compares the renderer's transform feedback capture with decline_reference.py output, per case and quantity, over the
+// vertices of organs alive at t. Query: ?vat= and ?ref=, paths relative to this page (default out/grass.*).
+// Sets window.__grassCheck = {ok, tolerance, cases} when done (or {ok: false, error}).
+import { loadVat, decodeBlock } from './vat/vat.mjs';
+import { createGrassRenderer } from './grass/renderer.mjs';
+
+const TOLERANCE = 1e-5;
+
+/**
+ * @typedef {object} Worst
+ * @property {number} max
+ * @property {number} vertex worst vertex index, -1 when no vertex is alive
+ * @property {string | null} organ organ id of that vertex
+ */
+
+/**
+ * @typedef {object} CaseResult
+ * @property {number} t
+ * @property {number} v
+ * @property {number} alive
+ * @property {Record<string, Worst>} errors
+ * @property {boolean} ok
+ */
+
+/** Quantity name to components per vertex. */
+const QUANTITIES = /** @type {const} */ ({ positions: 3, pivots: 3, axes: 3, browning: 1, opacity: 1 });
+
+/**
+ * @param {Float32Array | number[]} got
+ * @param {number[]} want
+ * @param {number} comps
+ * @param {Uint8Array} alive 1 per vertex
+ * @param {Uint32Array} organOf organ index per vertex
+ * @param {string[]} organIds
+ * @param {string} label for error messages
+ * @returns {Worst}
+ */
+function worstError(got, want, comps, alive, organOf, organIds, label) {
+  if (got.length !== want.length) throw new Error(`${label}: captured ${got.length} values, reference has ${want.length}`);
+  let max = 0;
+  let vertex = -1;
+  for (let i = 0; i < alive.length; i++) {
+    if (!alive[i]) continue;
+    for (let c = 0; c < comps; c++) {
+      const e = Math.abs(got[i * comps + c] - want[i * comps + c]);
+      if (!(e <= max)) {
+        max = e; // NaN also lands here, so it fails
+        vertex = i;
+      }
+    }
+  }
+  return { max, vertex, organ: vertex >= 0 ? organIds[organOf[vertex]] : null };
+}
+
+/**
+ * @param {string} url
+ * @returns {Promise<any>}
+ */
+async function fetchJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`could not fetch ${url}: HTTP ${res.status}`);
+  return res.json();
+}
+
+
+/**
+ * @param {Worst} w
+ * @returns {string}
+ */
+const cell = (w) => `${w.max.toExponential(2)} (v${w.vertex} ${w.organ})`;
+
+/** @param {{ok: boolean, cases: CaseResult[]}} result */
+function render(result) {
+  const names = Object.keys(QUANTITIES);
+  const head = `<tr><th>t</th><th>v</th><th>alive</th>${names.map((n) => `<th>${n}</th>`).join('')}<th>result</th></tr>`;
+  const rows = result.cases.map((c) => `<tr><td>${c.t}</td><td>${c.v}</td><td>${c.alive}</td>`
+    + names.map((n) => `<td>${cell(c.errors[n])}</td>`).join('')
+    + `<td class="${c.ok ? 'pass' : 'fail'}">${c.ok ? 'pass' : 'FAIL'}</td></tr>`).join('');
+  document.getElementById('out').innerHTML = `<table>${head}${rows}</table>`;
+  const verdict = /** @type {HTMLElement} */ (document.getElementById('verdict'));
+  verdict.textContent = `${result.ok ? 'PASS' : 'FAIL'} (tolerance ${TOLERANCE}, max abs error per quantity over alive vertices)`;
+  verdict.className = result.ok ? 'pass' : 'fail';
+}
+
+async function run() {
+  const params = new URLSearchParams(location.search);
+  const vatPath = params.get('vat') ?? 'out/grass.vat.glb';
+  const refPath = params.get('ref') ?? 'out/grass.reference.json';
+  const vat = await loadVat(new URL(vatPath, location.href).href);
+  const ref = await fetchJson(new URL(refPath, location.href).href);
+
+  if (ref.vertex_count !== vat.vertexCount) {
+    throw new Error(`reference vertex_count ${ref.vertex_count} differs from the bake's ${vat.vertexCount}`);
+  }
+  const bakeName = vatPath.split('/').pop();
+  if (ref.vat !== bakeName) throw new Error(`reference was made from '${ref.vat}', but the bake is '${bakeName}'`);
+
+  const organBlock = vat.blocks.get('organ');
+  const lifeBlock = vat.blocks.get('lifespan');
+  if (!organBlock || !lifeBlock) throw new Error("the bake lacks the 'organ' or 'lifespan' block");
+  const organOf = /** @type {Uint32Array} */ (decodeBlock(organBlock));
+  const life = /** @type {Float32Array} */ (decodeBlock(lifeBlock));
+
+  const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('view'));
+  const renderer = createGrassRenderer(canvas, vat);
+  /** @type {CaseResult[]} */
+  const cases = [];
+  try {
+    for (const c of ref.cases) {
+      const alive = new Uint8Array(vat.vertexCount);
+      let aliveCount = 0;
+      for (let i = 0; i < vat.vertexCount; i++) {
+        const o = organOf[i];
+        if (life[o * 2] <= c.t && c.t < life[o * 2 + 1]) {
+          alive[i] = 1;
+          aliveCount++;
+        }
+      }
+      const cap = renderer.capture(c.t, c.v);
+      /** @type {Record<string, Worst>} */
+      const errors = {};
+      for (const [name, comps] of Object.entries(QUANTITIES)) {
+        errors[name] = worstError(cap[name], c[name], comps, alive, organOf, vat.organIds, `case t=${c.t} v=${c.v} ${name}`);
+      }
+      const ok = Object.values(errors).every((w) => w.max < TOLERANCE);
+      cases.push({ t: c.t, v: c.v, alive: aliveCount, errors, ok });
+    }
+  } finally {
+    renderer.dispose();
+  }
+  const result = { ok: cases.length > 0 && cases.every((c) => c.ok), tolerance: TOLERANCE, cases };
+  render(result);
+  window.__grassCheck = result;
+}
+
+run().catch((err) => {
+  console.error(err);
+  const message = String(err?.message ?? err);
+  const box = /** @type {HTMLElement} */ (document.getElementById('error'));
+  box.hidden = false;
+  box.textContent = message;
+  const verdict = /** @type {HTMLElement} */ (document.getElementById('verdict'));
+  verdict.textContent = 'FAIL';
+  verdict.className = 'fail';
+  window.__grassCheck = { ok: false, error: message };
+});
+</script>
+</body>
+</html>

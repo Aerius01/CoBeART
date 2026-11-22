@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GP`. Scope: the growth chain for Glade's first 3D plant, a bushy vegetative grass (no heading, no flowering), from an L-Py model to a growth slider on a dev page. Design input: the grill of 2026-11-01 (decisions P1 to P8 below) and the reference plant in `dev/assets/build_grass_plant.py`. The wind MVP (`dev/wind-demo.html`, `dev/wind/`) is a sibling prototype and not part of this roadmap; Phase 5 reuses its renderer.
 
-**Status (2026-11-07):** Phases 0 to 2 done and merged into `main`; Phase 3 in progress on `gp-3-geometry` from `36f5674`.
+**Status (2026-11-22):** Phases 0 to 3 done and merged into `main`. Phase 4 is next; its base is the tip of `main` after the Phase 3 outcome commit.
 
 ## Project facts
 
@@ -345,3 +345,41 @@ The tiller-state and time-varying-direction items were dropped by G10 to G15: ti
 - **Per-vertex arch:** the preview integrates arch along 8 segments (`rotate(d, side, arch * s^2)` per segment in `grass.lpy`'s `blade_mesh`). The grill settles the closed form that Blender and GLSL share.
 - **Shapes from Phase 1 still hold:** build from `direction`, `attach`, and the sheath along the tiller axis from the tiller `base`. Treat unborn organs as collapsed at their first-seen `attach`.
 - **Leaf count:** the leaf count per lifetime changed with G20 (51 organs at t = 12 for seed 1), so Phase 4's vertex budget should use a fresh export.
+
+### Phase 3 (2026-11-22)
+
+- **Commits on `gp-3-geometry` from `36f5674`:**
+  - `0504d9e`: the grill outcomes (G21 to G33); `f10afb2`: the G23 amendment.
+  - `f77f6a9` [GP 3.1] `declined_vertex` (Opus fork), `25dbcd4` [GP 3.2] `grass_geometry.py` (Opus fork), `c8faa9b` [GP 3.3] the Blender script and the mesh-level tests.
+  - `c650b64` and `514014f`, `f6e62fb`, `a7d3e22`: the gate review (G34) and its fixes.
+  - `7c05b5c`, `991694d`, `3402e59`: the user's stages review, one continuous leaf (G35).
+  - `a841819`, `55c866a`: the emergence point, split sheaths and uneven rows (G36).
+  - `435d86f`, `ea8b6ad`, `aaac24f`: the pivot on the wrap wall and one GLB material (G37), then WP 3.3 adapted to G35 to G37.
+  - This outcome commit. Fast-forwarded into `main`.
+- **Gate:**
+  - lpy plus plant pytest: 130 passed, with the Blender smoke tests run (Blender 5.2.2, re-run on 5.3.0 on 2026-11-22).
+  - flake8 on `dev/lpy/decline.py` and `dev/plant/` is clean, and `node scripts/fitness.mjs` reports 0 violations.
+  - A fresh export (25 samples, 51 organs) builds a GLB of 8,280 vertices, equal to the mesh, and the stages `.blend`.
+  - Worst declined tip error 0.755% of the declined blade length (bound 2%); the worst overshoot of a young blade through an enclosing sheath is 0 mm (19 mm before G36).
+  - The user judged the stages in Blender after G35 and G36 and approved them.
+- **Mesh facts:** each leaf is one grid of 3 sheath rows plus 17 blade rows (shared collar row) by 9 vertices, 180 vertices per leaf, 8,280 per plant for seed 1 (46 lifetime leaves). Topology is identical at every sample.
+- **Decline rule (replaces G23's chord factor):** the blade's bend profile is `angle * smoothstep(u / c) + arch * u^2`; `bend_cumulants` gives its mean, variance and third central moment up to s, and `chord_change` turns a blade vertex by Δ(mean - k3 / 6) and scales its offset by exp(-Δk2 / 2). All polynomial, so the GLSL port is closed form.
+- **Lessons:**
+  - Do not remove a worker's worktree until its fixes are done: resuming an agent whose worktree is gone fails, and a fresh fork has to re-derive its context.
+  - The first stages passed every test and still looked wrong: tests checked consistency with the spec, not botany. Render close-ups of the critical spots (pseudostem tops, young leaves inside old sheaths) before handing over.
+  - Several review rounds after the first wave were refinements of one WP's geometry; running them as wave-sized steps (3.1 and 3.2 in parallel, then 3.3) kept the file ownership clean.
+  - glTF splits primitives by material, which duplicates shared vertices; a fixed-topology mesh needs one material.
+
+### Carry-over to Phase 4
+
+- **Per-stage attributes:** `grass_geometry.STAGE_ATTRIBUTES` (`pivot`, `axis`, `collar`, `stem_t`, `arch`, `sen`, `fade`, `s`) plus positions change per stage; `STATIC_ATTRIBUTES` are identical across a lifetime build (tested). Pack only the stage ones per stage.
+- **Vertex order:** build with `build_plant(table, t, p, lifetime=lifetime_leaves(table))`. With one material the GLB keeps `PlantMesh` order and count (8,280); keep that check if the export format changes. Faces are quads in `PlantMesh` and triangulated by the exporter.
+- **Normals** are per stage and are not transformed by `declined_vertex`; decide whether to bake them per stage or recompute in the shader.
+- **Decline signature:** `declined_vertex(position, vin, time, v, p, collar_bend)`; `collar_bend` comes from `GeometryParams` and must travel with the export.
+- **Stage spacing:** the G36 emergence point eases with `fade`, and blade rows are dense near emergence, so shape changes fast while a leaf unrolls and while an old leaf fades; the outline's open question on sampling `FADE_DURATION` still applies.
+
+### Carry-over to Phase 5
+
+- **Wind renderer:** `wind-demo.html` and `dev/wind/` assume the frozen reference (`_ORGAN` 0 is the stem, a `Grass_Stalk` material, the stem's arc). The new mesh has no stem organ, one material, and tells sheath from blade by `_KIND`; the wind pivots each blade at its `collar` (emergence point on the wall) and each sheath at the tiller base.
+- **GLSL port of `decline.py`:** clamp where Python raises (age at 0 is already a clamp), mirror `bend_mean`, `bend_cumulants` and `chord_change` as polynomials, pass `collar_bend` as a uniform, and check float16 tolerances against the 2% bound if attributes are packed as half floats. Normals are not transformed.
+- **Resolution:** at close range a split old sheath shows a slightly jagged edge where the blade leaves it, and strongly arched tips show faint polygon corners; both are row-count effects, to settle with the frame-rate measurement (`GeometryParams`).

@@ -48,6 +48,7 @@ const BENCH_CASES = [{ g: 0.25, v: 1 }, { g: 0.5, v: 1 }, { g: 1, v: 1 }, { g: 1
 const BENCH_WARMUP_MS = 1000;
 const BENCH_MEASURE_MS = 3 * 1000;
 const BENCH_FINISH_MS = 1000;
+const BENCH_MIN_FRAMES = { warmup: 10, measure: 30, finish: 10 };
 const HUD_PERIOD_MS = 250;
 const DROP_FACTOR = 1.5;
 const LEAN_MARGIN = 1.5;
@@ -218,7 +219,10 @@ async function start() {
   const rows = [];
   const bakeName = vatPath.split('/').pop();
   let stepIndex = -1;
-  let stepStart = 0;
+  /** @type {'warmup' | 'measure' | 'finish'} */
+  let benchPhase = 'warmup';
+  let phaseStart = 0;
+  let phaseFrames = 0;
   /** @type {number[]} */ let intervals = [];
   /** @type {number[]} */ let cpuSamples = [];
   /** @type {number[]} */ let gpuSamples = [];
@@ -229,7 +233,9 @@ async function start() {
     stepIndex++;
     Object.assign(params, { g: steps[stepIndex].g, v: steps[stepIndex].v, count: steps[stepIndex].count });
     rebuild();
-    stepStart = now;
+    benchPhase = 'warmup';
+    phaseStart = now;
+    phaseFrames = 0;
     intervals = [];
     cpuSamples = [];
     gpuSamples = [];
@@ -266,6 +272,37 @@ async function start() {
     };
   };
 
+  /** @param {number} now @param {'warmup' | 'measure' | 'finish'} phase the phase this frame belonged to */
+  const advanceBench = (now, phase) => {
+    phaseFrames++;
+    const minMs = { warmup: BENCH_WARMUP_MS, measure: BENCH_MEASURE_MS, finish: BENCH_FINISH_MS }[phase];
+    if (now - phaseStart < minMs || phaseFrames < BENCH_MIN_FRAMES[phase]) return;
+    phaseStart = now;
+    phaseFrames = 0;
+    if (phase === 'warmup') {
+      benchPhase = 'measure';
+      return;
+    }
+    if (phase === 'measure') {
+      benchPhase = 'finish';
+      return;
+    }
+    if (!intervals.length || !cpuSamples.length || !finishSamples.length) {
+      throw new Error(`bench step ${stepIndex + 1} (${params.count} plants, g ${params.g}, v ${params.v}) ended with ` +
+        `${intervals.length} intervals, ${cpuSamples.length} cpu and ${finishSamples.length} finish samples`);
+    }
+    const ms = median(intervals);
+    const floor = Math.min(...intervals);
+    rows.push({
+      count: params.count, g: params.g, v: params.v, median_ms: ms, p95_ms: percentile(intervals, 0.95),
+      dropped: intervals.filter((x) => x > DROP_FACTOR * floor).length / intervals.length, fps: 1000 / ms,
+      cpu_ms: median(cpuSamples), gpu_ms: gpuSamples.length ? median(gpuSamples) : null,
+      finish_ms: median(finishSamples), alive_fraction: aliveOrganCount(vat, params.g * tEnd) / vat.organCount,
+    });
+    if (stepIndex + 1 < steps.length) beginStep(now);
+    else finishBench();
+  };
+
   let resizeIgnored = false;
   const resize = () => {
     if (bench && stepIndex >= 0 && !benchDone) {
@@ -293,31 +330,15 @@ async function start() {
     time += dt;
     if (params.flip_end_mps <= params.flip_start_mps) params.flip_end_mps = params.flip_start_mps + 0.5;
 
-    /** @type {'warmup' | 'measure' | 'finish'} */
-    let phase = 'warmup';
+    // A phase ends only after its minimum time and its minimum frame count, so a stalled or slow browser cannot skip
+    // a window and leave a step without samples. The frame that ends a phase still belongs to it (see below).
+    const phase = benchPhase;
     if (bench && !benchDone) {
       if (stepIndex < 0) {
         beginStep(now);
         benchCanvas = `${canvas.width}x${canvas.height}`;
       }
-      if (now - stepStart >= BENCH_WARMUP_MS + BENCH_MEASURE_MS + BENCH_FINISH_MS) {
-        const ms = median(intervals);
-        const floor = Math.min(...intervals);
-        rows.push({
-          count: params.count, g: params.g, v: params.v, median_ms: ms, p95_ms: percentile(intervals, 0.95),
-          dropped: intervals.filter((x) => x > DROP_FACTOR * floor).length / intervals.length, fps: 1000 / ms,
-          cpu_ms: median(cpuSamples), gpu_ms: gpuSamples.length ? median(gpuSamples) : null,
-          finish_ms: median(finishSamples), alive_fraction: aliveOrganCount(vat, params.g * tEnd) / vat.organCount,
-        });
-        if (stepIndex + 1 < steps.length) beginStep(now);
-        else finishBench();
-      }
-      if (!benchDone) {
-        const inStep = now - stepStart;
-        if (inStep >= BENCH_WARMUP_MS + BENCH_MEASURE_MS) phase = 'finish';
-        else if (inStep > BENCH_WARMUP_MS) phase = 'measure';
-        if (phase === 'measure') intervals.push(rawMs);
-      }
+      if (phase === 'measure') intervals.push(rawMs);
     }
 
     stepPlants(field, params, time, dt);
@@ -366,6 +387,14 @@ async function start() {
         `${vat.organCount}`;
     }
     if (phase === 'measure') cpuSamples.push(performance.now() - cpuStart);
+    if (bench && !benchDone) {
+      try {
+        advanceBench(now, phase);
+      } catch (err) {
+        showError(err);
+        return;
+      }
+    }
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

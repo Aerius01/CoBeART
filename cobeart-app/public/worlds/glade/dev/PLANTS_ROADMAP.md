@@ -4,7 +4,7 @@ Load the `orchestrate` skill before any implementation work. The user names the 
 
 **Roadmap ID:** `GP`. Scope: the growth chain for Glade's first 3D plant, a bushy vegetative grass (no heading, no flowering), from an L-Py model to a growth slider on a dev page. Design input: the grill of 2026-11-01 (decisions P1 to P8 below) and the reference plant in `dev/assets/build_grass_plant.py`. The wind MVP (`dev/wind-demo.html`, `dev/wind/`) is a sibling prototype and not part of this roadmap; Phase 5 reuses its renderer.
 
-**Status (2026-11-22):** Phases 0 to 4 done and merged into `main`. Phase 5 is next; its base is the tip of `main` after the Phase 4 outcome commit.
+**Status (2026-11-22):** Phases 0 to 4 done and merged into `main`. Phase 5 in progress on `gp-5-grass-page`.
 
 ## Project facts
 
@@ -338,9 +338,75 @@ Base: `1d0f3c7` (tip of `main` after the Phase 3 outcome commit). Bakes the full
 
 **Phase gate:** every WP's Must-pass on the merged head; `timeout 400 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/lpy/tests cobeart-app/public/worlds/glade/dev/plant/tests cobeart-app/public/worlds/glade/dev/vat/tests`; `~/miniconda3/envs/splat-env/bin/python -m flake8 --max-line-length 120` on `dev/lpy/`, `dev/plant/` and `dev/vat/` Python files; `cd cobeart-app && npm test`; `node scripts/fitness.mjs`. Human check: open the default bake in a glTF viewer (the preview mesh) and read the printed sizes; the look of blended stages is Phase 5's.
 
-## Phase 5: Growth slider on a dev page (outline)
+## Phase 5: Growth slider on a dev page (4 WPs in 2 waves)
 
-Base: the tip of `main` after the Phase 4 outcome commit. Inputs: a bake per `dev/plant/grass_vat_profile.md` (canonical commands there), loaded with `dev/vat/vat.mjs`; see the carry-over to Phase 5. A dev page, next to `wind-demo.html`, that draws instanced grass from the VAT with a per-instance growth value `g` and vitality `v`, blends the two stages around `g` and applies the `decline.py` look in GLSL, under the top-down camera, with the wind from `dev/wind/` applied on top. Sliders for `g` and `v` (global and randomised per instance). Measure frame rate against instance count, and decide on the P6 alternative from that. The GLSL mirror of `decline.py` hardcodes `MAX_DEATH_OFFSET` (0.95) and clamps where Python raises; Glade refuses revival once `v <= V_DEAD`. Open for its grill: whether the wind renderer is extended or a new renderer is written, culling of zero-size triangles, and level of detail.
+Base: `ea57566` (tip of `main` after the Phase 4 outcome commit); the phase branch `gp-5-grass-page` adds the grill commit, which is wave 1's base. Inputs: a bake per `dev/plant/grass_vat_profile.md`, loaded with `dev/vat/vat.mjs`; see the carry-over to Phase 5. A dev page, next to `wind-demo.html`, that draws instanced grass from the VAT with a per-instance growth value `g` and vitality `v`, blends the two stages around each instance's time, applies the `decline.py` look in GLSL and the wind on top, under the top-down camera, and measures frame rate against instance count for the P6 decision.
+
+**Verified 2026-11-22:** the canonical bake (seed 1, `--samples 49`) runs: 8,280 vertices, 46 organs, 49 stages (t 0 to 12 P), 13,984 triangles, 4.75 MB, 1.5 s. The arena is 6 m x 6 m (`config/cobeart.yaml`); a plant is about 0.25 m tall. The wind renderer needs a stem organ 0, a `Grass_Stalk` material and plain GLB attributes, none of which the VAT has; `wind.mjs` is pure and mesh-independent. `bake_grass_vat.py` has no geometry options. Nothing under `public/` ignores generated bakes. The Playwright browser available to the orchestrator renders WebGL2 (likely in software): good for correctness, useless for frame rates.
+
+**Grill outcomes (2026-11-22):**
+- **G50 New renderer.** `dev/grass/` holds a new renderer; `wind-demo.html` and `dev/wind/renderer.mjs` stay as they are. It imports `wind.mjs` (field and spring) unchanged and `topDownMatrix` / `obliqueMatrix` from `wind/renderer.mjs`, and ports the wind's vertex maths (flip, flutter, sway, stem arc) into its own shader.
+- **G51 GPU layout.** Vertex-stage blocks in textures of width `vertexCount` and height `stage_count`, fetched with `texelFetch(tex, ivec2(gl_VertexID, stage))`: `position` as `RGB16F` (the f16 bits uploaded as `HALF_FLOAT`), `normal` as `RG16I` (int16 pairs, decoded in GLSL). Organ-stage blocks (`collar`, `direction`, `arch`, `sheath_length`, `emergence`) in `RGBA32F` textures of width `organCount` and height `stage_count`. Organ-static blocks in one `RGBA32F` texture of width `organCount` (rows of the implementer's choice). Blocks that can hold `never` (`lifespan`, `senescence`) stay f32. Vertex-static blocks (`organ`, `kind`, `s`, `uv`) are vertex attributes. `g` and `v` are per-instance attributes; each instance fetches and blends its own two stages.
+- **G52 Growth value.** `g` in [0, 1], model time `t = g * t_end` (`stage_times` last); the stage pair is the two stage times around `t`, blended linearly. The HUD shows `t` in P too.
+- **G53 Culling in the vertex shader.** A vertex of an organ hidden at its instance's `t` (`t < appear` or `t >= vanish`) or at opacity 0 is moved outside the clip volume. Stage-grouped index compaction only on request after the benchmark (G61).
+- **G54 Dithered fade.** Opacity `(1 - leaf fade) * (1 - plant fade)` is drawn by discarding fragments against a stable per-pixel threshold (interleaved gradient noise on `gl_FragCoord`), with depth writes and no sorting.
+- **G55 GLSL checked against Python.** `dev/plant/decline_reference.py` runs `declined_vertex` over every vertex of a decoded bake at exact stage times and several `v`; the renderer captures the same values by transform feedback (decline only, before wind and placement); `dev/grass-check.html` compares them. Tolerance 1e-5 (m for positions and pivots, unitless for axes, browning and opacity), over the vertices of organs alive at `t`. Wind is checked by eye.
+- **G56 Benchmark mode.** `grass-demo.html?bench` sweeps instance counts at several `g`, records median frame time (and GPU time where `EXT_disjoint_timer_query_webgl2` exists) and the alive-leaf fraction, and prints a table to the HUD, the console and the clipboard. The user runs it on this machine.
+- **G57 No level of detail.** A top-down orthographic view has no distance to switch on. `bake_grass_vat.py` gains `--blade-segments` and `--cross-segments` so the benchmark can compare a lower resolution with the default.
+- **G58 Bake location.** Bakes and the reference JSON go in `dev/out/` (gitignored by `dev/.gitignore`). The page loads `out/grass.vat.glb` by default, `?vat=<path relative to dev/>` overrides it, and a missing file shows a visible error with the two canonical bake commands.
+- **G59 Per-instance variation.** `g_i = clamp(g + g_spread * r_i, 0, 1)`, `v_i = clamp(v + v_spread * q_i, 0, 1)` with seeded `r_i`, `q_i` in [-1, 1]; a "spatial" toggle replaces them with value noise over the arena (scale a GUI parameter), so neighbours share similar values. Rotation, size jitter and the spring come from `createPlants`. One bake (one seed) on the page.
+- **G60 Look and wind order.** Colours: the wind demo's `LEAF_TOP`, `LEAF_UNDER` (blade by facing) and `STEM` (sheath, by `kind`), each mixed by `browning` toward a straw brown (top about `(0.55, 0.42, 0.22)`, underside lighter); constants in the shader, tuned at the handover. Decline first, then wind on the declined mesh: flip, flutter and sway on blades only, about the declined pivot and axis; the stem arc with each vertex's attachment height `stem_t * SHEATH_PLATEAU_M * size_scale`. Dry leaves are stiffer: each leaf's wind drive is `drive * mix(1, DRY_WIND_RESPONSE, 1 - h)` (`h` the leaf's health, `DRY_WIND_RESPONSE` a uniform, default 0.3, in the GUI). The whole-plant spring is unchanged.
+- **G61 P6 target.** The VAT stays if the default bake holds 60 fps at 5,000 plants on this machine. If it does not, the orchestrator reports the numbers and asks the user before any further step (reduced-resolution bake, stage-grouped culling, analytic shader).
+- **G62 Split.** Wave 1: WP 5.1 (renderer) and WP 5.2 (Python reference and bake options), meeting only through the reference JSON below. Wave 2: WP 5.3 (demo page and benchmark) and WP 5.4 (check page), both on the renderer interface.
+- **GLSL port notes** (from the carry-over): hardcode `MAX_DEATH_OFFSET` 0.95; clamp where Python raises (age at 0, `v`, `h`, `s` to [0, 1], `cos` argument to [-1, 1]); expand `bend_mean` / `bend_cumulants` / `chord_change` as the same polynomials (`_profile_moment` for `i <= 3`, `j <= 3`); `collar_bend` from `species_params.geometry.collar_bend` as a uniform; decline parameters from `species_params.params` as uniforms (no literals); normals turned by the blade's chord turn about `side` and by the tiller lean; the sheath only scales (normals unchanged). Glade refuses revival once `v <= V_DEAD`; the page's sliders are direct values and do not model that.
+
+**Renderer interface (`dev/grass/`, WP 5.1 writes it, WPs 5.3 and 5.4 use it):**
+- `vat-textures.mjs` (pure, no WebGL): `checkGrassVat(vat)` throws an `Error` naming the field unless `species` is `grass`, `speciesVersion` 1, `frame` `{up: '+Z', unit: 'm'}` and every profile block is present with its domain, timing, components and storage; `grassParams(vat) -> {decline: {...DeclineParams names}, fadeDuration, sheathPlateauM, collarBend, tEnd}` throwing on a missing key; `stagePair(stageTimes, t) -> {i0, i1, w}`; `aliveOrganCount(vat, t) -> number` (`appear <= t < vanish`).
+- `renderer.mjs`: `GRASS_INSTANCE_FLOATS` = 12 (place: x mm, y mm, rotation rad, mm per model metre; motion: lean x, lean y, wind x, wind y; growth: g, v, 0, 0). `createGrassRenderer(canvas, vat) -> {resize(), draw(instances, count, uniforms), capture(t, v) -> Capture, gpuTimer, dispose()}`. Draw uniforms are the wind demo's (`viewProj`, `time`, `speedRef`, `leafBend`, `leafSwayHz`, `flutter`, `flutterHz`, `flip`) plus `dryWindResponse`. `capture(t, v)` runs one instance with transform feedback and rasterizer discard and returns `{positions, pivots, axes: Float32Array (3 per vertex), browning, opacity: Float32Array (1 per vertex)}`: model-space values after decline, before wind and placement. `gpuTimer` is `null` without the timer extension, else `{begin(), end(), poll() -> ms | null}`.
+- `shader.mjs`: the GLSL sources (vertex and fragment), with the decline port in one clearly delimited block.
+
+**Reference JSON (`decline_reference.py` writes it, `grass-check.html` reads it):** `{vat: <file name>, vertex_count, cases: [{t, v, positions, pivots, axes, browning, opacity}]}`, flat number arrays per vertex (3 per vertex for the vectors), every vertex included; `t` is always an exact stage time.
+
+### WP 5.1: Grass VAT renderer
+
+- **Model:** Opus (fresh; the GLSL port, the layout and the wind on the declined mesh are the substance).
+- **Wave:** 1.
+- **Owns:** `dev/grass/vat-textures.mjs`, `dev/grass/shader.mjs`, `dev/grass/renderer.mjs`, `cobeart-app/test/glade-grass-vat.test.js`.
+- **Scope:** G50 to G54, G60, the renderer interface and the GLSL port notes. Its own browser checks use a scratch page under `dev/out/` (gitignored) served by its own hub.
+- **Must pass:**
+  - `cd cobeart-app && timeout 300 npm test` passes, including `glade-grass-vat.test.js` (profile check accepts a synthetic grass `Vat` and rejects each wrong field or block, `grassParams`, `stagePair` at and between stage times and at both ends, `aliveOrganCount`).
+  - On a fresh canonical bake, in a browser through the hub: both shaders compile and link, `draw` renders a field without GL errors, and `capture(12, 1)` positions of alive organs with `sen` 0 at t = 12 equal the decoded bake positions at the last stage within 1e-5 m (`declined_vertex` is the identity there: health 1 and no lean at `v` 1).
+  - `node scripts/fitness.mjs` 0 violations.
+
+### WP 5.2: Python reference and bake options
+
+- **Model:** Sonnet (fresh; pinned down by `declined_vertex`, the profile and the JSON shape).
+- **Wave:** 1.
+- **Owns:** `dev/plant/decline_reference.py`, `dev/plant/tests/test_decline_reference.py`, `dev/plant/bake_grass_vat.py`, `dev/plant/tests/test_bake_grass_vat.py`.
+- **Scope:** CLI `~/miniconda3/envs/lpy/bin/python dev/plant/decline_reference.py BAKE.vat.glb OUT.json [--case T,V ...]`, default cases `(12, 1)`, `(12, 0.6)`, `(12, 0.3)`, `(12, 0.1)`, `(6, 1)`, `(6, 0.5)`, `(3, 0.8)`, `(9, 0.2)`; each `T` must be a stage time (error names the nearest ones). A pure `reference(plant: VatPlant, cases) -> dict` rebuilds `decline.VertexInputs` per vertex from the decoded blocks by the profile's rebuild rules (age from `lifespan.appear`, `sen` and `fade` from the events, `never` as no event, pivot and axis by `kind`, `collar_bend` from `species_params.geometry`) and calls `declined_vertex`; numbers rounded to 7 significant digits. `bake_grass_vat.py` gains `--blade-segments N` and `--cross-segments N` (defaults from `GeometryParams`), passed through `dataclasses.replace`.
+- **Must pass:**
+  - `timeout 400 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/plant/tests` passes, including new tests: on a real bake, the rebuilt `VertexInputs` at a stage equal those from `grass_geometry.vertex_inputs` on the same sample's `build_plant` (within the f16 position tolerance where positions enter), the reference at `v` 1 for a leaf with `sen` 0 on the main shoot equals the decoded positions, a non-stage `T` raises, and a `--blade-segments 12 --cross-segments 6` bake has `(sheath_rows + blade_segments + 1) x (cross_segments + 1)` = 16 x 7 = 112 vertices per leaf and validates.
+  - The CLI writes the default reference for a fresh canonical bake and prints its case count and size; flake8 (max 120) on the owned files.
+
+### WP 5.3: Demo page and benchmark
+
+- **Model:** Sonnet (fresh; on the renderer interface).
+- **Wave:** 2.
+- **Owns:** `dev/grass-demo.html`, `dev/grass/instances.mjs`, `dev/wind/wind.mjs` (only to export `valueNoise`), `cobeart-app/test/glade-grass-instances.test.js`.
+- **Uses:** the renderer interface (WP 5.1).
+- **Scope:** G52, G56, G58, G59. The page follows `wind-demo.html` (hub config for the arena, `createPlants` and `stepPlants`, lil-gui, HUD, `window.__gladeGrass` exposing params and field). GUI folders: Growth (`g`, `g spread`, `v`, `v spread`, spatial toggle and noise scale, seed), Wind (the wind demo's plus `dry wind response`), Plants and view (count, size jitter, mm per model m, view, zoom). HUD: plants, vertices, fps, `t` in P, alive leaves at the global `g`. `instances.mjs` (pure): `createGrowthField(count, seed)` and `fillGrowth(field, params, x, y, out)` writing per-instance `g`, `v`. `?bench`: counts 500, 1k, 2k, 5k, 10k, 20k at `g` 0.25, 0.5, 1 (`v` 1, spreads 0, wind on, top view), 1 s warm-up then 3 s per step, median frame ms, GPU ms when `gpuTimer` exists, alive-leaf fraction; a table in the HUD, `console.table` and the clipboard, plus `window.__gladeGrassBench`.
+- **Must pass:** `cd cobeart-app && timeout 300 npm test` (with `glade-grass-instances.test.js`: determinism, clamping, spreads 0 give the globals, spatial mode continuity); `node scripts/fitness.mjs` 0 violations. No browser use (the orchestrator smoke-tests the page).
+
+### WP 5.4: Check page
+
+- **Model:** Sonnet (fresh).
+- **Wave:** 2.
+- **Owns:** `dev/grass-check.html`.
+- **Uses:** the renderer interface (WP 5.1), the reference JSON (WP 5.2).
+- **Scope:** G55. Loads `?vat=` (default `out/grass.vat.glb`) and `?ref=` (default `out/grass.reference.json`), checks `vertex_count` and file name match, runs `capture(t, v)` per case, and reports per case and quantity the maximum absolute error over vertices of organs alive at `t`, with the worst vertex and organ id, a pass or fail against 1e-5, in the DOM and in `window.__grassCheck = {ok, cases: [...]}`.
+- **Must pass:** through the Playwright browser on its own hub, all default cases pass on a fresh canonical bake and reference; `node scripts/fitness.mjs` 0 violations. If a case fails, the worker reports the numbers and does not change the tolerance.
+
+**Phase gate:** every WP's Must-pass on the merged head; `timeout 400 ~/miniconda3/envs/lpy/bin/python -m pytest cobeart-app/public/worlds/glade/dev/lpy/tests cobeart-app/public/worlds/glade/dev/plant/tests cobeart-app/public/worlds/glade/dev/vat/tests`; flake8 (max 120) on `dev/plant/` and `dev/vat/`; `cd cobeart-app && npm test`; `node scripts/fitness.mjs`; the check page passes. Human checks: the user runs `grass-demo.html?bench` (default and a `--blade-segments 12 --cross-segments 6` bake) and judges growth, decline, fade and wind on the page; G61 decides what follows.
 
 ## Deferred (not in this roadmap)
 
